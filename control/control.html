@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Greenroom Control</title>
+<!--
+  Greenroom control page — director + editor + pusher in one document.
+  Open it at  http://127.0.0.1:7474/control/control.html  (Streamer.bot HTTP
+  Server, docs/STREAMERBOT-SETUP.md), as a browser tab or an OBS Custom Browser
+  Dock. Run exactly ONE director page at a time (this page or director-min.html) —
+  it hosts the hidden vdo.ninja director iframe that resolves guest labels to live
+  streamIDs every 2.5 s (that loop IS auto-follow-on-rejoin).
+
+  State lives in Streamer.bot's persisted `vdo.state` global, not in this page: on
+  connect it fires "VDO Sync" and hydrates from the replayed vdoninja:update; every
+  edit and every resolution change re-assembles the FULL payload and fires
+  "VDO Push". The Discord section drives the bridge sidecar via
+  "Discord Voice Command" broadcasts. The Discord bot token is deliberately NOT
+  configurable here — it lives file-only in sidecar/discord-tokens.json, because
+  every broadcast on this bus reaches every subscribed client.
+
+  Config: ?sbport=<n> (SB WebSocket port) · window.__SB_WS_URL ·
+  window.__VDO_DIRECTOR_URL (test hook: point the director iframe at
+  /mock/vdo-director.html to run the whole loop offline).
+-->
+<style>
+  :root {
+    --bg: #12161b; --panel: #191f26; --panel2: #202832; --line: #2b3642;
+    --text: #dfe7ee; --dim: #8b98a5; --green: #58d68b; --cyan: #4fc3dc;
+    --red: #e35d6a; --amber: #e8b34b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 'Segoe UI', system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .4px; }
+  header h1 span { color: var(--green); }
+  main { padding: 12px 14px 40px; max-width: 900px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; margin: 0 0 14px; }
+  section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--dim); margin: 0 0 10px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }
+  .row label { color: var(--dim); font-size: 12px; }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; font: inherit; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--cyan); }
+  input[type=checkbox] { accent-color: var(--green); }
+  textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; font-size: 12px; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--cyan); }
+  button.primary { border-color: var(--green); color: var(--green); }
+  button.danger { border-color: var(--red); color: var(--red); }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--line);
+    color: var(--dim); white-space: nowrap; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; }
+  .pill.live { color: var(--green); border-color: var(--green); }
+  .pill.error { color: var(--red); border-color: var(--red); }
+  .warn { color: var(--amber); font-size: 12px; }
+  .hint { color: var(--dim); font-size: 12px; }
+
+  /* Slots */
+  .vdo-slot-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; margin: 0 0 6px;
+    background: var(--panel2); }
+  .vdo-slot-name { min-width: 62px; color: var(--cyan); font-weight: 600; font-size: 13px; }
+  .vdo-slot-row[data-mode="webcam"] .vdo-discord-controls { display: none; }
+  .vdo-slot-row[data-mode="discord"] .vdo-webcam-controls { display: none; }
+  .vdo-webcam-controls, .vdo-discord-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .vdo-id { font-family: Consolas, monospace; font-size: 11px; color: var(--dim);
+    max-width: 16ch; overflow: hidden; text-overflow: ellipsis; }
+  .vdo-id.live { color: var(--green); }
+  .vdo-mirror { display: inline-flex; gap: 4px; align-items: center; color: var(--dim); cursor: pointer; }
+  .vdo-discord-id { width: 20ch; font-family: Consolas, monospace; }
+
+  /* Invite grid */
+  .vdo-invite-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 6px 12px; margin: 0 0 10px; }
+  .vdo-invite-opts label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+  .vdo-invite-opts input[type=text], .vdo-invite-opts select { flex: 1; min-width: 0; }
+  .linkrow { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 8px; }
+  .linkrow textarea { flex: 1; min-height: 40px; }
+  .linkrow .btns { display: flex; flex-direction: column; gap: 4px; }
+  a.btn-open { font-size: 12px; color: var(--cyan); text-decoration: none; border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; text-align: center; }
+
+  /* Discord */
+  .dvo-fav-item { display: flex; gap: 8px; align-items: center; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 8px; margin: 0 0 6px; background: var(--panel2); }
+  .dvo-fav-item.current { border-color: var(--green); }
+  .dvo-fav-info { flex: 1; min-width: 0; }
+  .dvo-fav-name { font-weight: 600; font-size: 13px; }
+  .dvo-fav-ids { font-family: Consolas, monospace; font-size: 11px; color: var(--dim); }
+  .dvo-fav-remove { border-color: var(--red); color: var(--red); padding: 4px 9px; }
+
+  /* Hidden director iframe — 1×1 so CEF keeps it "visible" (display:none can
+     throttle WebRTC); functionally invisible. */
+  #vdoDirector { position: fixed; width: 1px; height: 1px; right: 0; bottom: 0;
+    opacity: .01; border: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>●</span> Greenroom Control</h1>
+  <span id="sbStatus" class="pill">SB: connecting…</span>
+  <span id="vdoStatus" class="pill">director: idle</span>
+</header>
+<main>
+
+  <section>
+    <h2>Room &amp; Director</h2>
+    <div class="row">
+      <label>Room <input type="text" id="vdoRoom" size="18" placeholder="room name" /></label>
+      <label>Password <input type="password" id="vdoPassword" size="14" /></label>
+      <label><input type="checkbox" id="vdoEnabled" /> director enabled</label>
+      <button id="btnVdoSave" class="primary">Save</button>
+    </div>
+    <div class="row">
+      <label style="flex:1; display:flex; gap:6px; align-items:center;">viewFlags
+        <input type="text" id="vdoViewFlags" style="flex:1" spellcheck="false" /></label>
+    </div>
+    <div class="hint">Slots bind guests by their vdo.ninja <b>label</b>; the hidden director iframe
+      re-resolves label → current streamID every 2.5&nbsp;s, so a guest who rejoins is re-followed
+      automatically. Keep exactly one director page open (this page or director-min.html).</div>
+    <div id="cryptoWarn" class="warn" hidden>crypto.subtle unavailable (non-secure origin) —
+      the &amp;hash= invite mode can't be computed here. Open this page via 127.0.0.1, or use
+      plaintext/none password mode.</div>
+  </section>
+
+  <section>
+    <h2>Guest Slots</h2>
+    <div id="vdoSlots"></div>
+  </section>
+
+  <section>
+    <h2>Invite &amp; Director Links</h2>
+    <div class="vdo-invite-opts">
+      <label>password mode
+        <select id="vdoInvPasswordMode">
+          <option value="hash">hash (private)</option>
+          <option value="plaintext">plaintext</option>
+          <option value="none">none</option>
+        </select></label>
+      <label>label <input type="text" id="vdoInvLabel" placeholder="&amp;label=" /></label>
+      <label>push id <input type="text" id="vdoInvPush" placeholder="&amp;push=" /></label>
+      <label>video bitrate <input type="text" id="vdoInvVideoBitrate" placeholder="kbps" inputmode="numeric" /></label>
+      <label>quality
+        <select id="vdoInvQuality"><option value="">default</option><option value="0">0 max</option>
+          <option value="1">1 balanced</option><option value="2">2 smooth</option></select></label>
+      <label>width <input type="text" id="vdoInvWidth" inputmode="numeric" /></label>
+      <label>height <input type="text" id="vdoInvHeight" inputmode="numeric" /></label>
+      <label>fps <input type="text" id="vdoInvFps" inputmode="numeric" /></label>
+      <label>codec
+        <select id="vdoInvCodec"><option value="">default</option><option value="h264">h264</option>
+          <option value="vp8">vp8</option><option value="vp9">vp9</option><option value="av1">av1</option></select></label>
+      <label>audio bitrate <input type="text" id="vdoInvAudioBitrate" placeholder="kbps" inputmode="numeric" /></label>
+      <label><input type="checkbox" id="vdoInvStereo" /> stereo</label>
+      <label><input type="checkbox" id="vdoInvNoVideo" /> no video</label>
+      <label><input type="checkbox" id="vdoInvNoAudio" /> no audio</label>
+      <label>capture
+        <select id="vdoInvCapture"><option value="">ask</option><option value="webcam">webcam</option>
+          <option value="screenshare">screenshare</option></select></label>
+      <label><input type="checkbox" id="vdoInvBroadcast" /> broadcast</label>
+      <label><input type="checkbox" id="vdoInvMeshcast" /> meshcast</label>
+      <label><input type="checkbox" id="vdoInvAutostart" /> autostart</label>
+      <label><input type="checkbox" id="vdoInvRequireApproval" /> require approval</label>
+      <label>room cap <input type="text" id="vdoInvRoomCap" inputmode="numeric" /></label>
+      <label>extra flags <input type="text" id="vdoInvExtraFlags" placeholder="&amp;flag&amp;flag=x" spellcheck="false" /></label>
+    </div>
+    <div class="linkrow">
+      <textarea id="vdoInviteLink" readonly rows="2" placeholder="guest invite link"></textarea>
+      <span class="btns">
+        <button id="btnVdoInviteCopy">Copy</button>
+        <a id="btnVdoInviteOpen" class="btn-open" href="#" target="_blank" rel="noreferrer">Open</a>
+      </span>
+    </div>
+    <div class="linkrow">
+      <textarea id="vdoManageLink" readonly rows="2" placeholder="director / manage link"></textarea>
+      <span class="btns">
+        <button id="btnVdoManageCopy">Copy</button>
+        <a id="btnVdoManageOpen" class="btn-open" href="#" target="_blank" rel="noreferrer">Open</a>
+      </span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Discord Voice Bridge</h2>
+    <div class="row">
+      <span id="dvoStatus" class="pill">bridge: no feed yet</span>
+      <button id="discordConnect" class="primary">Connect</button>
+      <button id="discordLeave">Leave voice</button>
+      <button id="discordResetAuth" class="danger">Reset auth</button>
+    </div>
+    <div class="hint" style="margin-bottom:10px">The bridge sidecar joins the current voice channel
+      muted-but-listening and feeds the overlays. Its bot token is <b>file-only</b>:
+      <code>sidecar/discord-tokens.json</code> (never configured from this page — everything on
+      this bus is visible to every subscribed client). Start it with
+      <code>start-discord-bridge.bat</code> or the optional "Discord Bridge Start" action.</div>
+    <div id="dvoFavorites"></div>
+    <div class="row">
+      <input type="text" id="dvoName" size="14" placeholder="favorite name" />
+      <input type="text" id="dvoServerId" size="17" placeholder="Server ID" inputmode="numeric" />
+      <input type="text" id="dvoChannelId" size="17" placeholder="Voice Channel ID" inputmode="numeric" />
+      <button id="dvoSaveFav">Save favorite</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label>accent
+        <select id="dvoAccent"><option value="cyan">cyan</option><option value="magenta">magenta</option>
+          <option value="neon-green">neon-green</option></select></label>
+      <label>avatar px <input type="number" id="dvoAvatarPx" min="24" max="128" style="width:5.5em" /></label>
+      <label>streamer px <input type="number" id="dvoStreamerPx" min="32" max="160" style="width:5.5em" /></label>
+      <label>streamer id <input type="text" id="dvoStreamerId" size="17" inputmode="numeric" /></label>
+      <label><input type="checkbox" id="dvoHideWhenAbsent" /> hide when absent</label>
+      <label><input type="checkbox" id="dvoScanlines" /> scanlines</label>
+      <label><input type="checkbox" id="dvoNeonBlink" /> blink</label>
+    </div>
+    <div class="hint">Settings ride the <code>discord:voice:update</code> payload — the roster
+      overlay re-styles live (URL params on the overlay override them; docs/THEMING.md).</div>
+  </section>
+
+</main>
+<iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
+
+<script src="vdo-parse.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ── Constants / config knobs ──────────────────────────────────────────────
+  const P = new URLSearchParams(location.search);
+  const WS_URL = window.__SB_WS_URL
+    || (P.get('sbport') ? `ws://127.0.0.1:${P.get('sbport')}/` : 'ws://127.0.0.1:8080/');
+  const PUSH_ACTION = 'VDO Push';
+  const SYNC_ACTION = 'VDO Sync';
+  const CMD_ACTION = 'Discord Voice Command';
+  const SLOT_COUNT = 4;
+  const POLL_MS = 2500;
+  const FIRST_PROBE_MS = 1500;
+  const HYDRATE_TIMEOUT_MS = 1200;
+  // Test hook: point the director iframe at mock-vdo-director.html to run the
+  // enumeration loop offline. The accepted postMessage origin follows the URL.
+  const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
+  const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
+  const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    sbStatus: $('sbStatus'), vdoStatus: $('vdoStatus'), dvoStatus: $('dvoStatus'),
+    room: $('vdoRoom'), password: $('vdoPassword'), viewFlags: $('vdoViewFlags'), enabled: $('vdoEnabled'),
+    slots: $('vdoSlots'), director: $('vdoDirector'), cryptoWarn: $('cryptoWarn'),
+    inviteLink: $('vdoInviteLink'), manageLink: $('vdoManageLink'),
+    favs: $('dvoFavorites'), favName: $('dvoName'), favServer: $('dvoServerId'), favChannel: $('dvoChannelId'),
+  };
+  const inv = {
+    passwordMode: $('vdoInvPasswordMode'), label: $('vdoInvLabel'), push: $('vdoInvPush'),
+    videoBitrate: $('vdoInvVideoBitrate'), quality: $('vdoInvQuality'), width: $('vdoInvWidth'),
+    height: $('vdoInvHeight'), fps: $('vdoInvFps'), codec: $('vdoInvCodec'),
+    audioBitrate: $('vdoInvAudioBitrate'), stereo: $('vdoInvStereo'), noVideo: $('vdoInvNoVideo'),
+    noAudio: $('vdoInvNoAudio'), capture: $('vdoInvCapture'), broadcast: $('vdoInvBroadcast'),
+    meshcast: $('vdoInvMeshcast'), autostart: $('vdoInvAutostart'),
+    requireApproval: $('vdoInvRequireApproval'), roomCap: $('vdoInvRoomCap'), extraFlags: $('vdoInvExtraFlags'),
+  };
+  const dvo = {
+    accent: $('dvoAccent'), avatarPx: $('dvoAvatarPx'), streamerPx: $('dvoStreamerPx'),
+    streamerId: $('dvoStreamerId'), hideWhenAbsent: $('dvoHideWhenAbsent'),
+    scanlines: $('dvoScanlines'), neonBlink: $('dvoNeonBlink'),
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  function defaultInvite() {
+    return { passwordMode: 'hash', label: '', push: '', videoBitrate: '', quality: '', width: '',
+      height: '', fps: '', codec: '', audioBitrate: '', stereo: false, noVideo: false, noAudio: false,
+      capture: '', broadcast: false, meshcast: false, autostart: false, requireApproval: false,
+      roomCap: '', extraFlags: '' };
+  }
+  function defaultSlots() {
+    const out = [];
+    for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
+    return out;
+  }
+  let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(), invite: defaultInvite() };
+  let roster = [];          // live [{label, streamID}] from the director iframe
+  let hasRoster = false;    // at least one director reply this session
+  let discord = null;       // last discordVoice payload
+  let hydrated = false;     // set by the first vdoninja:update (or the timeout)
+  let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
+  let slotsSig = '';
+  let favsSig = '';
+  let frameUrl = '';
+  let pollTimer = null;
+
+  // Tolerant adoption of a broadcast payload (superset-safe, same spirit as the
+  // old vdoninja-config.js sanitizers).
+  function adoptCfg(v) {
+    if (!v || typeof v !== 'object') return;
+    const slots = defaultSlots();
+    if (Array.isArray(v.slots)) {
+      for (const s of v.slots) {
+        const i = Number(s && s.slot) - 1;
+        if (!Number.isInteger(i) || i < 0 || i >= SLOT_COUNT) continue;
+        slots[i] = {
+          label: String(s.label ?? ''),
+          streamID: String(s.streamID ?? ''),
+          mirror: !!s.mirror,
+          mode: s.mode === 'discord' ? 'discord' : 'webcam',
+          discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
+        };
+      }
+    }
+    cfg = {
+      enabled: !!v.enabled,
+      room: String(v.room ?? ''),
+      password: String(v.password ?? ''),
+      viewFlags: String(v.viewFlags ?? DEFAULT_VIEWFLAGS),
+      slots,
+      invite: Object.assign(defaultInvite(), (v.invite && typeof v.invite === 'object') ? v.invite : {}),
+    };
+  }
+
+  // ── SB WebSocket client ───────────────────────────────────────────────────
+  let ws = null;
+  let msgId = 0;
+  let subId = null;
+  let reconnectDelay = 2000;
+
+  function doAction(name, args) {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ request: 'DoAction', id: String(++msgId), action: { name }, args }));
+  }
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    let syncFired = false;
+    const fireSync = () => {
+      if (syncFired) return;
+      syncFired = true;
+      if (SYNC_ACTION) doAction(SYNC_ACTION, { reason: 'control-connect' });
+    };
+    ws.onopen = () => {
+      reconnectDelay = 2000;
+      setPill(els.sbStatus, 'SB: connected', 'live');
+      subId = String(++msgId);
+      // Lowercase `general` — the SB Subscribe case gotcha.
+      ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
+      setTimeout(fireSync, 400);
+      setTimeout(() => { if (!hydrated) { hydrated = true; renderAll(); } }, HYDRATE_TIMEOUT_MS);
+    };
+    ws.onmessage = (evt) => {
+      let m;
+      try { m = JSON.parse(evt.data); } catch { return; }
+      if (m && m.id && m.id === subId && !m.event) { fireSync(); return; }
+      if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      let d = m.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
+      if (!d || typeof d !== 'object' || !d.type) return;
+      handle(d);
+    };
+    ws.onclose = () => {
+      setPill(els.sbStatus, 'SB: offline — retrying', 'error');
+      setTimeout(() => { reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); connect(); }, reconnectDelay);
+    };
+    ws.onerror = () => {};
+  }
+
+  function handle(d) {
+    if (d.type === 'vdoninja:update') {
+      const sig = JSON.stringify(d.vdoninja);
+      if (sig === lastPushedSig) return; // our own echo
+      adoptCfg(d.vdoninja);
+      hydrated = true;
+      // Baseline so hydration alone never pushes: an unchanged re-assembly must
+      // equal what we just adopted.
+      lastPushedSig = JSON.stringify(assemblePayload());
+      renderAll();
+    } else if (d.type === 'discord:voice:update') {
+      discord = d.discordVoice || null;
+      renderDiscordSection();
+      renderSlots(); // pick-from-channel options (membership-sig guarded)
+    } else if (d.type === 'vdo:error' || d.type === 'discord:voice:error') {
+      setPill(els.sbStatus, 'SB action error: ' + (d.message || d.type), 'error');
+    }
+  }
+
+  // ── Payload assembly + push ───────────────────────────────────────────────
+  function assemblePayload() {
+    const byLabel = new Map(roster.map((g) => [g.label, g.streamID]));
+    const slots = cfg.slots.map((s, i) => {
+      const streamID = hasRoster
+        ? (s.label ? (byLabel.get(s.label) || '') : '')
+        : String(s.streamID || ''); // no roster yet: preserve hydrated resolution
+      s.streamID = streamID;
+      return {
+        slot: i + 1,
+        label: s.label || '',
+        streamID,
+        mirror: !!s.mirror,
+        mode: s.mode === 'discord' ? 'discord' : 'webcam',
+        discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
+      };
+    });
+    return {
+      enabled: !!cfg.enabled,
+      room: cfg.room || '',
+      password: cfg.password || '',
+      viewFlags: cfg.viewFlags || '',
+      slots,
+      invite: Object.assign(defaultInvite(), cfg.invite),
+    };
+  }
+
+  // fromRoster: pushes triggered by director polls also require a roster this
+  // session — a page that has never heard from its director must not blank the
+  // slots another director resolved (the anti-ping-pong gate).
+  function assembleAndPush(fromRoster) {
+    if (!hydrated) return;
+    if (fromRoster && !hasRoster) return;
+    const payload = JSON.stringify(assemblePayload());
+    if (payload === lastPushedSig) return;
+    lastPushedSig = payload;
+    doAction(PUSH_ACTION, { payload });
+  }
+
+  // ── Director iframe + enumeration loop ────────────────────────────────────
+  function directorUrl() {
+    if (!cfg.enabled || !cfg.room) return '';
+    const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
+    let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
+    if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
+    u += '&cleanish&novideo&noaudio'; // silent control-only director (no camera prompt)
+    return u;
+  }
+
+  function syncDirectorFrame() {
+    const url = directorUrl();
+    if (url === frameUrl) return;
+    frameUrl = url;
+    if (url) {
+      els.director.src = url;
+      setPill(els.vdoStatus, 'director: connecting…', '');
+      startPolling();
+    } else {
+      els.director.src = 'about:blank';
+      stopPolling();
+      roster = [];
+      setPill(els.vdoStatus, 'director: idle', '');
+      renderSlots();
+      // Blank every slot's overlay (mirrors the old panel's disable behavior).
+      if (hydrated) {
+        cfg.slots.forEach((s) => { s.streamID = ''; });
+        hasRoster = false;
+        assembleAndPush(false);
+      }
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(pollGuestList, POLL_MS);
+    setTimeout(pollGuestList, FIRST_PROBE_MS); // first probe after the iframe connects
+  }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  function pollGuestList() {
+    if (!frameUrl || !els.director.contentWindow) return;
+    try {
+      els.director.contentWindow.postMessage({ getGuestList: true, cib: 'sb-vdo' }, DIRECTOR_ORIGIN);
+    } catch (_) { /* iframe not ready yet */ }
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== DIRECTOR_ORIGIN) return;
+    const d = e.data;
+    if (!d || typeof d !== 'object' || !('guestList' in d)) return;
+    roster = VdoParse.parseGuestList(d); // defensive: [] on any malformed shape
+    hasRoster = true;
+    setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}`, 'live');
+    renderSlots();
+    assembleAndPush(true); // auto-follow: re-resolve every poll
+  });
+
+  // ── Rendering (focus-guarded, signature-deduped) ──────────────────────────
+  function setPill(el, text, cls) { el.textContent = text; el.className = 'pill' + (cls ? ' ' + cls : ''); }
+  function setIfNotFocused(el, val) { if (document.activeElement !== el && el.value !== val) el.value = val; }
+  function setCheck(el, val) { if (document.activeElement !== el) el.checked = !!val; }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  function renderAll() {
+    setIfNotFocused(els.room, cfg.room);
+    setIfNotFocused(els.password, cfg.password);
+    setIfNotFocused(els.viewFlags, cfg.viewFlags);
+    setCheck(els.enabled, cfg.enabled);
+    renderSlots(true);
+    renderInvite();
+    rebuildLinks();
+    renderDiscordSection();
+    syncDirectorFrame();
+  }
+
+  function rosterLabels() { return [...new Set(roster.map((g) => g.label).filter(Boolean))]; }
+  function discordUsersSig() {
+    const users = (discord && discord.users) || {};
+    return Object.entries(users).map(([id, u]) => id + ':' + ((u && u.username) || '')).sort().join(',');
+  }
+
+  function renderSlots(force) {
+    const live = rosterLabels();
+    const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig() });
+    if (!force && sig === slotsSig && els.slots.childElementCount) return;
+    if (els.slots.contains(document.activeElement)) return; // operator mid-edit
+    slotsSig = sig;
+
+    const users = Object.entries((discord && discord.users) || {});
+    els.slots.innerHTML = '';
+    for (let i = 1; i <= SLOT_COUNT; i++) {
+      const s = cfg.slots[i - 1];
+      const mode = s.mode === 'discord' ? 'discord' : 'webcam';
+      const row = document.createElement('div');
+      row.className = 'vdo-slot-row';
+      row.dataset.slot = String(i);
+      row.dataset.mode = mode;
+
+      const name = document.createElement('span');
+      name.className = 'vdo-slot-name';
+      name.textContent = `Guest ${i}`;
+
+      const modeSel = document.createElement('select');
+      modeSel.className = 'vdo-mode-sel';
+      for (const [val, text] of [['webcam', '📷 Webcam'], ['discord', '🎙 Discord']]) {
+        const o = document.createElement('option');
+        o.value = val; o.textContent = text;
+        if (val === mode) o.selected = true;
+        modeSel.appendChild(o);
+      }
+
+      // Webcam controls: label picker (live roster + offline fallback) + mirror + id.
+      const webcamWrap = document.createElement('span');
+      webcamWrap.className = 'vdo-webcam-controls';
+      const sel = document.createElement('select');
+      sel.className = 'vdo-label-sel';
+      const seen = new Set();
+      const addOpt = (val, text) => {
+        const o = document.createElement('option');
+        o.value = val; o.textContent = text;
+        if (val === s.label) o.selected = true;
+        sel.appendChild(o);
+      };
+      addOpt('', '— none —');
+      for (const l of live) { addOpt(l, `${l} • live`); seen.add(l); }
+      if (s.label && !seen.has(s.label)) addOpt(s.label, `${s.label} (offline)`);
+
+      const mirLabel = document.createElement('label');
+      mirLabel.className = 'vdo-mirror';
+      mirLabel.title = 'Mirror this source horizontally (flip X)';
+      const mir = document.createElement('input');
+      mir.type = 'checkbox';
+      mir.className = 'vdo-mirror-cb';
+      mir.checked = !!s.mirror;
+      const mirIcon = document.createElement('span');
+      mirIcon.textContent = '⇋';
+      mirLabel.append(mir, mirIcon);
+
+      const id = document.createElement('span');
+      id.className = 'vdo-id' + (s.streamID ? ' live' : '');
+      id.textContent = s.streamID || '—';
+      id.title = s.streamID || 'no stream resolved';
+      webcamWrap.append(sel, mirLabel, id);
+
+      // Discord controls: user id + pick-from-channel convenience.
+      const discordWrap = document.createElement('span');
+      discordWrap.className = 'vdo-discord-controls';
+      const discId = document.createElement('input');
+      discId.type = 'text';
+      discId.className = 'vdo-discord-id';
+      discId.placeholder = 'Discord User ID';
+      discId.inputMode = 'numeric';
+      discId.value = String(s.discordUserId ?? '');
+      const pick = document.createElement('select');
+      pick.className = 'vdo-discord-pick';
+      pick.title = 'Pick a user currently in the voice channel';
+      const p0 = document.createElement('option');
+      p0.value = ''; p0.textContent = users.length ? 'in channel…' : '(no one in channel)';
+      pick.appendChild(p0);
+      for (const [uid, u] of users) {
+        const o = document.createElement('option');
+        o.value = uid; o.textContent = (u && u.username) || uid;
+        pick.appendChild(o);
+      }
+      discordWrap.append(discId, pick);
+
+      row.append(name, modeSel, webcamWrap, discordWrap);
+      els.slots.appendChild(row);
+    }
+  }
+
+  // Read every slot straight from the DOM so two quick changes both land.
+  function slotsFromDom() {
+    const out = [];
+    for (let i = 1; i <= SLOT_COUNT; i++) {
+      const row = els.slots.querySelector(`.vdo-slot-row[data-slot="${i}"]`);
+      const sel = row && row.querySelector('select.vdo-label-sel');
+      const mir = row && row.querySelector('input.vdo-mirror-cb');
+      const modeSel = row && row.querySelector('select.vdo-mode-sel');
+      const discIn = row && row.querySelector('input.vdo-discord-id');
+      const prev = cfg.slots[i - 1] || {};
+      out.push({
+        label: sel ? sel.value : String(prev.label ?? ''),
+        streamID: String(prev.streamID ?? ''),
+        mirror: mir ? mir.checked : !!prev.mirror,
+        mode: modeSel ? modeSel.value : (prev.mode ?? 'webcam'),
+        discordUserId: discIn ? discIn.value.replace(/\D/g, '') : String(prev.discordUserId ?? ''),
+      });
+    }
+    return out;
+  }
+
+  els.slots.addEventListener('change', (e) => {
+    const row = e.target.closest('.vdo-slot-row');
+    if (!row) return;
+    if (e.target.classList.contains('vdo-discord-pick') && e.target.value) {
+      const idInput = row.querySelector('input.vdo-discord-id');
+      if (idInput) idInput.value = e.target.value;
+      e.target.value = '';
+    }
+    if (e.target.classList.contains('vdo-mode-sel')) {
+      row.dataset.mode = e.target.value;
+    }
+    cfg.slots = slotsFromDom();
+    slotsSig = ''; // slot ids/labels may need a rebuild on the next render
+    assembleAndPush(false); // update overlays now, don't wait for the next poll
+  });
+
+  function saveRoom() {
+    cfg.room = els.room.value.trim();
+    cfg.password = els.password.value;
+    cfg.viewFlags = els.viewFlags.value.trim();
+    cfg.enabled = els.enabled.checked;
+    assembleAndPush(false);
+    rebuildLinks();
+    syncDirectorFrame();
+  }
+  $('btnVdoSave').addEventListener('click', saveRoom);
+  els.enabled.addEventListener('change', saveRoom);
+
+  // ── Invite + director-link builder (vdo.ninja's exact &hash= algorithm) ────
+  let hashCache = { pw: null, hash: '' };
+  async function generateHash(pw) {
+    const s = encodeURIComponent(String(pw).trim()) + 'vdo.ninja';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(digest).slice(0, 2)).map((b) => ('0' + b.toString(16)).slice(-2)).join('');
+  }
+  function ensureHash(pw) {
+    if (pw === hashCache.pw) return hashCache.hash;
+    hashCache = { pw, hash: '' }; // stale until the async digest resolves
+    if (pw && window.crypto && crypto.subtle) {
+      generateHash(pw).then((h) => {
+        if (hashCache.pw === pw) { hashCache.hash = h; rebuildLinks(); }
+      });
+    }
+    return hashCache.hash;
+  }
+  function passwordParam(password, mode) {
+    if (!password || mode === 'none') return '';
+    if (mode === 'plaintext') return '&password=' + encodeURIComponent(password);
+    const h = ensureHash(password); // 'hash' (default)
+    return h ? '&hash=' + h : '';
+  }
+  function inviteFromDom() {
+    const digits = (el) => (el.value || '').replace(/[^\d]/g, '');
+    return {
+      passwordMode: inv.passwordMode.value,
+      label: inv.label.value.trim(),
+      push: inv.push.value.trim(),
+      videoBitrate: digits(inv.videoBitrate),
+      quality: inv.quality.value,
+      width: digits(inv.width),
+      height: digits(inv.height),
+      fps: digits(inv.fps),
+      codec: inv.codec.value,
+      audioBitrate: digits(inv.audioBitrate),
+      stereo: inv.stereo.checked,
+      noVideo: inv.noVideo.checked,
+      noAudio: inv.noAudio.checked,
+      capture: inv.capture.value,
+      broadcast: inv.broadcast.checked,
+      meshcast: inv.meshcast.checked,
+      autostart: inv.autostart.checked,
+      requireApproval: inv.requireApproval.checked,
+      roomCap: digits(inv.roomCap),
+      extraFlags: inv.extraFlags.value.trim(),
+    };
+  }
+  function buildInviteLink(room, password, i) {
+    if (!room) return '';
+    let u = 'https://vdo.ninja/?room=' + encodeURIComponent(room);
+    u += passwordParam(password, i.passwordMode);
+    if (i.label) u += '&label=' + encodeURIComponent(i.label);
+    if (i.push) u += '&push=' + encodeURIComponent(i.push);
+    if (i.videoBitrate) u += '&videobitrate=' + i.videoBitrate;
+    if (i.quality) u += '&quality=' + i.quality;
+    if (i.width) u += '&width=' + i.width;
+    if (i.height) u += '&height=' + i.height;
+    if (i.fps) u += '&fps=' + i.fps;
+    if (i.codec) u += '&codec=' + i.codec;
+    if (i.audioBitrate) u += '&audiobitrate=' + i.audioBitrate;
+    if (i.stereo) u += '&stereo';
+    if (i.noVideo) u += '&novideo';
+    if (i.noAudio) u += '&noaudio';
+    if (i.capture === 'webcam') u += '&webcam';
+    else if (i.capture === 'screenshare') u += '&screenshare';
+    if (i.broadcast) u += '&broadcast';
+    if (i.meshcast) u += '&meshcast';
+    if (i.autostart) u += '&autostart';
+    if (i.requireApproval) u += '&requireapproval';
+    if (i.roomCap) u += '&roomcap=' + i.roomCap;
+    if (i.extraFlags) u += i.extraFlags; // already leading '&'
+    return u;
+  }
+  function buildManageLink(room, password, i) {
+    if (!room) return '';
+    return 'https://vdo.ninja/?director=' + encodeURIComponent(room) + passwordParam(password, i.passwordMode);
+  }
+  function rebuildLinks() {
+    const room = els.room.value.trim();
+    const password = els.password.value;
+    const i = inviteFromDom();
+    const invite = buildInviteLink(room, password, i);
+    const manage = buildManageLink(room, password, i);
+    els.inviteLink.value = invite;
+    els.manageLink.value = manage;
+    $('btnVdoInviteOpen').href = invite || '#';
+    $('btnVdoManageOpen').href = manage || '#';
+  }
+  function renderInvite() {
+    const i = cfg.invite || {};
+    if (document.activeElement !== inv.passwordMode) inv.passwordMode.value = i.passwordMode || 'hash';
+    setIfNotFocused(inv.label, i.label ?? '');
+    setIfNotFocused(inv.push, i.push ?? '');
+    setIfNotFocused(inv.videoBitrate, i.videoBitrate ?? '');
+    if (document.activeElement !== inv.quality) inv.quality.value = i.quality ?? '';
+    setIfNotFocused(inv.width, i.width ?? '');
+    setIfNotFocused(inv.height, i.height ?? '');
+    setIfNotFocused(inv.fps, i.fps ?? '');
+    if (document.activeElement !== inv.codec) inv.codec.value = i.codec ?? '';
+    setIfNotFocused(inv.audioBitrate, i.audioBitrate ?? '');
+    setCheck(inv.stereo, i.stereo);
+    setCheck(inv.noVideo, i.noVideo);
+    setCheck(inv.noAudio, i.noAudio);
+    if (document.activeElement !== inv.capture) inv.capture.value = i.capture ?? '';
+    setCheck(inv.broadcast, i.broadcast);
+    setCheck(inv.meshcast, i.meshcast);
+    setCheck(inv.autostart, i.autostart);
+    setCheck(inv.requireApproval, i.requireApproval);
+    setIfNotFocused(inv.roomCap, i.roomCap ?? '');
+    setIfNotFocused(inv.extraFlags, i.extraFlags ?? '');
+  }
+
+  const invOpts = document.querySelector('.vdo-invite-opts');
+  [els.room, els.password].forEach((el) => el.addEventListener('input', rebuildLinks));
+  invOpts.addEventListener('input', rebuildLinks);
+  invOpts.addEventListener('change', () => {
+    cfg.invite = inviteFromDom();
+    assembleAndPush(false);
+    rebuildLinks();
+  });
+  async function copyToClipboard(textarea, btn) {
+    if (!textarea.value) return;
+    try { await navigator.clipboard.writeText(textarea.value); }
+    catch { textarea.select(); document.execCommand('copy'); textarea.blur(); }
+    const orig = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+  $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')));
+  $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
+  $('btnVdoInviteOpen').addEventListener('click', (e) => { if (!els.inviteLink.value) e.preventDefault(); });
+  $('btnVdoManageOpen').addEventListener('click', (e) => { if (!els.manageLink.value) e.preventDefault(); });
+  if (!(window.crypto && crypto.subtle)) els.cryptoWarn.hidden = false;
+
+  // ── Discord section ───────────────────────────────────────────────────────
+  function sendCmd(command, value) {
+    doAction(CMD_ACTION, { command, value: typeof value === 'string' ? value : JSON.stringify(value || '') });
+  }
+
+  function renderDiscordSection() {
+    const dv = discord;
+    const rpc = (dv && dv.rpc) || {};
+    const users = (dv && dv.users) || {};
+    let text = 'bridge: no feed yet — is the sidecar running?', cls = '';
+    if (!dv) { /* keep default */ }
+    else if (rpc.error) { text = rpc.error; cls = 'error'; }
+    else if (dv.connected && dv.hostInChannel) { text = `in voice · ${Object.keys(users).length} present`; cls = 'live'; }
+    else if (dv.connected) { text = 'bot online · pick a favorite and press USE'; cls = ''; }
+    else if (rpc.enabled && !rpc.hasToken) { text = 'enabled — add a token to sidecar/discord-tokens.json'; cls = ''; }
+    else if (rpc.enabled) { text = 'connecting…'; cls = ''; }
+    else { text = 'bridge off'; cls = ''; }
+    setPill(els.dvoStatus, text, cls);
+
+    // Settings inputs (focus-guarded).
+    const s = (dv && dv.settings) || {};
+    if (document.activeElement !== dvo.accent) dvo.accent.value = s.accent || 'cyan';
+    setIfNotFocused(dvo.avatarPx, String(s.avatarPx ?? 56));
+    setIfNotFocused(dvo.streamerPx, String(s.streamerPx ?? 72));
+    setIfNotFocused(dvo.streamerId, String(s.streamerUserId ?? ''));
+    setCheck(dvo.hideWhenAbsent, s.hideWhenAbsent !== false);
+    setCheck(dvo.scanlines, s.scanlines !== false);
+    setCheck(dvo.neonBlink, s.neonBlink !== false);
+
+    // Favorites list (rebuild only when favorites/current change).
+    const favs = (dv && dv.favorites) || [];
+    const cur = dv && dv.current;
+    const sig = JSON.stringify({ favs, cur });
+    if (sig === favsSig && els.favs.childElementCount) return;
+    if (els.favs.contains(document.activeElement)) return;
+    favsSig = sig;
+    els.favs.innerHTML = '';
+    for (const fav of favs) {
+      const isCurrent = cur && cur.serverId === fav.serverId && cur.channelId === fav.channelId;
+      const row = document.createElement('div');
+      row.className = 'dvo-fav-item' + (isCurrent ? ' current' : '');
+      row.dataset.id = fav.id;
+      row.innerHTML = `
+        <div class="dvo-fav-info">
+          <div class="dvo-fav-name">${escapeHtml(fav.name)}</div>
+          <div class="dvo-fav-ids">${escapeHtml(fav.serverId)} / ${escapeHtml(fav.channelId)}</div>
+        </div>
+        <button data-action="load">LOAD</button>
+        <button data-action="use" class="primary">${isCurrent ? 'ACTIVE' : 'USE'}</button>
+        <button data-action="remove" class="dvo-fav-remove" title="Remove">&times;</button>`;
+      els.favs.appendChild(row);
+    }
+  }
+
+  els.favs.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const row = btn.closest('.dvo-fav-item');
+    const fav = discord && (discord.favorites || []).find((f) => f.id === row.dataset.id);
+    if (!fav) return;
+    if (btn.dataset.action === 'load') {
+      els.favName.value = fav.name;
+      els.favServer.value = fav.serverId;
+      els.favChannel.value = fav.channelId;
+    } else if (btn.dataset.action === 'use') {
+      els.favServer.value = fav.serverId;
+      els.favChannel.value = fav.channelId;
+      sendCmd('set-current', { serverId: fav.serverId, channelId: fav.channelId });
+    } else if (btn.dataset.action === 'remove') {
+      if (!confirm(`Remove favorite "${fav.name}"?`)) return;
+      sendCmd('favorite-remove', { id: fav.id });
+    }
+  });
+
+  $('dvoSaveFav').addEventListener('click', () => {
+    const serverId = els.favServer.value.replace(/\D/g, '');
+    const channelId = els.favChannel.value.replace(/\D/g, '');
+    if (!serverId || !channelId) return;
+    const name = els.favName.value.trim() || `${serverId.slice(-4)}/${channelId.slice(-4)}`;
+    sendCmd('favorite-add', { name, serverId, channelId });
+    els.favName.value = '';
+  });
+
+  $('discordConnect').addEventListener('click', () => sendCmd('connect', ''));
+  $('discordLeave').addEventListener('click', () => sendCmd('leave', ''));
+  $('discordResetAuth').addEventListener('click', () => {
+    if (!confirm('Forget the saved bot token? (You will need to re-create sidecar/discord-tokens.json.)')) return;
+    sendCmd('reset-auth', '');
+  });
+
+  let settingsTimer = null;
+  function pushSettings() {
+    if (settingsTimer) clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(() => {
+      settingsTimer = null;
+      sendCmd('set-settings', {
+        accent: dvo.accent.value || 'cyan',
+        avatarPx: parseInt(dvo.avatarPx.value, 10) || 56,
+        streamerPx: parseInt(dvo.streamerPx.value, 10) || 72,
+        streamerUserId: dvo.streamerId.value.replace(/\D/g, ''),
+        hideWhenAbsent: dvo.hideWhenAbsent.checked,
+        scanlines: dvo.scanlines.checked,
+        neonBlink: dvo.neonBlink.checked,
+      });
+    }, 400);
+  }
+  Object.values(dvo).forEach((el) => el.addEventListener('change', pushSettings));
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  renderAll();
+  connect();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Greenroom — VDO.ninja guest slot</title>
+<!--
+  Greenroom guest slot — one OBS Browser Source per slot:
+    http://127.0.0.1:7474/overlay/vdoninja-guest.html?slot=1   (…slot=2, 3, 4)
+
+  SERVE OVER HTTP (Streamer.bot's HTTP Server, docs/STREAMERBOT-SETUP.md) — NOT as
+  an OBS "Local file" source: the embedded vdo.ninja WebRTC viewer needs a
+  secure-context (localhost http) parent or it renders black, and file:// sources
+  also ignore ?slot=/?sbport= URL params.
+
+  Two source modes per slot (chosen in control/control.html):
+    • webcam  — a VDO.ninja solo view of the guest bound to this slot.
+    • discord — a placeholder showing the bound Discord user's avatar, lit up when
+                they speak (fed by the Discord bridge sidecar).
+
+  Config (URL params, since this is http-served): ?slot=N · ?sbport=<n> · ?sbdebug=1
+-->
+<script>
+  // The sync action replays both cached blobs on connect (see actions/vdo-sync.cs).
+  window.__SB_SYNC_ACTION = 'VDO Sync';
+</script>
+<script src="panel-client-sb.js"></script>
+</head>
+<body>
+<script>
+// Render logic ported unchanged from the toolkit's Figma/StreamOverlay/vdoninja-guest.js —
+// it already consumed the generic `svc:message` event, so only the transport moved.
+(function () {
+  'use strict';
+
+  function resolveSlot() {
+    if (Number.isFinite(window.__VDO_SLOT)) return Math.max(1, Math.floor(window.__VDO_SLOT));
+    const n = parseInt(new URLSearchParams(location.search).get('slot'), 10);
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  }
+  const SLOT = resolveSlot();
+
+  // Transparent + size-agnostic: the OBS source dimensions decide. The speaking
+  // glow reuses the neon-green (57,255,20) language shared with the roster overlay.
+  const style = document.createElement('style');
+  style.textContent =
+    'html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}' +
+    '#frame{position:absolute;inset:0;width:100%;height:100%;border:0;display:block;background:transparent}' +
+    '#dpfp{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:transparent}' +
+    '#dpfp[hidden]{display:none}' +
+    '#dpfp img{width:min(60vmin,60%);aspect-ratio:1;border-radius:50%;object-fit:cover;' +
+      'opacity:.82;filter:brightness(70%) saturate(85%);' +
+      'box-shadow:0 0 0 2px rgba(255,255,255,.10);' +
+      'transition:opacity .15s ease, filter .15s ease, box-shadow .2s ease}' +
+    '#dpfp.speaking img{opacity:1;filter:brightness(112%) saturate(112%);' +
+      'box-shadow:0 0 0 3px rgba(57,255,20,.95),0 0 22px 6px rgba(57,255,20,.8);' +
+      'animation:dpfp-blink .9s ease-in-out infinite}' +
+    '@keyframes dpfp-blink{' +
+      '0%,100%{box-shadow:0 0 0 3px rgba(57,255,20,.9),0 0 12px 3px rgba(57,255,20,.6)}' +
+      '50%{box-shadow:0 0 0 3px rgba(57,255,20,1),0 0 26px 8px rgba(57,255,20,1)}}';
+  document.head.appendChild(style);
+
+  const frame = document.createElement('iframe');
+  frame.id = 'frame';
+  frame.src = 'about:blank';
+  frame.allow = 'autoplay; fullscreen';
+  frame.referrerPolicy = 'no-referrer';
+  document.body.appendChild(frame);
+
+  const dpfp = document.createElement('div');
+  dpfp.id = 'dpfp';
+  dpfp.hidden = true;
+  const dpfpImg = document.createElement('img');
+  dpfpImg.alt = '';
+  dpfp.appendChild(dpfpImg);
+  document.body.appendChild(dpfp);
+
+  let lastUrl = '';
+  let lastVdo = null;       // latest vdoninja config payload (slots, room, flags…)
+  let lastDiscord = null;   // latest discord voice feed { channelId, users:{…} }
+  let dpfpUserId = '';      // the user id currently shown (for onerror fallback)
+
+  // A missing/broken avatar image falls back to the user's default embed avatar.
+  dpfpImg.addEventListener('error', () => {
+    if (!dpfpUserId) return;
+    const fallback = defaultAvatar(dpfpUserId);
+    if (dpfpImg.getAttribute('src') !== fallback) dpfpImg.src = fallback;
+  });
+
+  // view/room/password are added programmatically; viewFlags carries the cosmetic
+  // flags (already leading with '&').
+  function buildUrl(v, streamID) {
+    let url = 'https://vdo.ninja/?view=' + encodeURIComponent(streamID);
+    if (v.room) url += '&room=' + encodeURIComponent(v.room);
+    if (v.password) url += '&password=' + encodeURIComponent(v.password);
+    url += v.viewFlags || '';
+    return url;
+  }
+
+  function defaultAvatar(userId) {
+    // Default embed avatar index for the new username system: (id >> 22) % 6.
+    // BigInt is mandatory — a Number shift overflows the 64-bit snowflake.
+    let idx = 0;
+    try { idx = Number((BigInt(userId) >> 22n) % 6n); } catch (_) { idx = 0; }
+    return 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
+  }
+
+  function slotFor(v) {
+    const slots = v && Array.isArray(v.slots) ? v.slots : [];
+    return slots.find((s) => Number(s.slot) === SLOT) || null;
+  }
+
+  function render() {
+    const mine = slotFor(lastVdo);
+    if (mine && mine.mode === 'discord') renderDiscord(mine);
+    else renderWebcam(lastVdo, mine);
+  }
+
+  function renderWebcam(v, mine) {
+    dpfp.hidden = true;
+    frame.style.display = 'block';
+
+    const streamID = mine && mine.streamID ? String(mine.streamID) : '';
+    // Per-slot horizontal mirror, applied as a CSS transform on the iframe —
+    // instant, no reload, works on the cross-origin vdo.ninja viewer.
+    frame.style.transform = mine && mine.mirror ? 'scaleX(-1)' : 'none';
+
+    const url = v && streamID ? buildUrl(v, streamID) : 'about:blank';
+    // Only reload the iframe when the resolved URL actually changes, so unrelated
+    // pushes (another slot updating, or the voice feed) never interrupt our video.
+    if (url !== lastUrl) {
+      frame.src = url;
+      lastUrl = url;
+    }
+  }
+
+  function renderDiscord(mine) {
+    // Blank + hide the iframe so its WebRTC viewer tears down (no phantom video).
+    if (lastUrl !== 'about:blank') { frame.src = 'about:blank'; lastUrl = 'about:blank'; }
+    frame.style.display = 'none';
+    frame.style.transform = 'none';
+
+    const userId = mine && mine.discordUserId ? String(mine.discordUserId) : '';
+    if (!userId) {
+      // Slot is in Discord mode but no user picked yet — show nothing.
+      dpfp.hidden = true;
+      dpfp.classList.remove('speaking');
+      dpfpUserId = '';
+      return;
+    }
+
+    dpfp.hidden = false;
+    dpfpUserId = userId;
+    const users = (lastDiscord && lastDiscord.users) || {};
+    const u = users[userId] || null;
+
+    // Real PFP when the guest is in the call; default embed avatar otherwise.
+    const avatarUrl = (u && u.avatarUrl) || defaultAvatar(userId);
+    if (dpfpImg.getAttribute('src') !== avatarUrl) dpfpImg.src = avatarUrl;
+
+    dpfp.classList.toggle('speaking', !!(u && u.speaking));
+  }
+
+  window.addEventListener('svc:message', (e) => {
+    const msg = e.detail;
+    if (!msg) return;
+    if (msg.type === 'sync') {
+      // Legacy StreamService shape; under Streamer.bot the VDO Sync action replays
+      // the two typed messages below instead. Kept for transport symmetry.
+      lastVdo = msg.vdoninja || null;
+      lastDiscord = msg.discordVoice || null;
+      render();
+    } else if (msg.type === 'vdoninja:update') {
+      lastVdo = msg.vdoninja || null;
+      render();
+    } else if (msg.type === 'discord:voice:update') {
+      lastDiscord = msg.discordVoice || null;
+      render();
+    }
+  });
+})();
+</script>
+</body>
+</html>

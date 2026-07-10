@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Greenroom director-min</title>
+<!--
+  Greenroom director-min — the always-on 1×1 variant of the control page: hidden
+  vdo.ninja director iframe + the 2.5 s label→streamID resolution loop + VDO Push.
+  NO editor UI — it adopts its config (room/password/slot labels) from the
+  persisted vdo.state that "VDO Sync" replays, and from any control.html pushes.
+
+  Deploy as a tiny always-on OBS Browser Source (e.g. 1×1 px in a corner of every
+  scene collection you stream with):
+      http://127.0.0.1:7474/control/director-min.html
+  That keeps auto-follow-on-rejoin alive with zero operator attention; open
+  control.html only when you want to edit slots. Prefer ONE long-lived director
+  page (this one). While control.html is open it also hosts a director iframe, so
+  expect a brief two-director overlap — their rosters converge within a poll, and
+  the signature gates prevent push ping-pong; real vdo.ninja multi-director
+  behavior stays on the live-validation checklist (docs/STREAMERBOT-SETUP.md).
+
+  Config: ?sbport=<n> · window.__SB_WS_URL · window.__VDO_DIRECTOR_URL (test hook).
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #status { font: 10px/1.4 Consolas, monospace; color: #7ee787; background: rgba(10,14,18,.8);
+    padding: 2px 6px; display: inline-block; white-space: nowrap; }
+  #vdoDirector { position: fixed; width: 1px; height: 1px; right: 0; bottom: 0;
+    opacity: .01; border: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<span id="status">greenroom director: boot…</span>
+<iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
+<script src="vdo-parse.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const P = new URLSearchParams(location.search);
+  const WS_URL = window.__SB_WS_URL
+    || (P.get('sbport') ? `ws://127.0.0.1:${P.get('sbport')}/` : 'ws://127.0.0.1:8080/');
+  const PUSH_ACTION = 'VDO Push';
+  const SYNC_ACTION = 'VDO Sync';
+  const SLOT_COUNT = 4;
+  const POLL_MS = 2500;
+  const FIRST_PROBE_MS = 1500;
+  const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
+  const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
+
+  const statusEl = document.getElementById('status');
+  const director = document.getElementById('vdoDirector');
+  const show = (t) => { statusEl.textContent = 'greenroom director: ' + t; };
+
+  function defaultSlots() {
+    const out = [];
+    for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
+    return out;
+  }
+  let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {} };
+  let roster = [];
+  let hasRoster = false;
+  let hydrated = false;
+  let lastPushedSig = '';
+  let frameUrl = '';
+  let pollTimer = null;
+
+  function adoptCfg(v) {
+    if (!v || typeof v !== 'object') return;
+    const slots = defaultSlots();
+    if (Array.isArray(v.slots)) {
+      for (const s of v.slots) {
+        const i = Number(s && s.slot) - 1;
+        if (!Number.isInteger(i) || i < 0 || i >= SLOT_COUNT) continue;
+        slots[i] = {
+          label: String(s.label ?? ''),
+          streamID: String(s.streamID ?? ''),
+          mirror: !!s.mirror,
+          mode: s.mode === 'discord' ? 'discord' : 'webcam',
+          discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
+        };
+      }
+    }
+    cfg = {
+      enabled: !!v.enabled,
+      room: String(v.room ?? ''),
+      password: String(v.password ?? ''),
+      viewFlags: String(v.viewFlags ?? ''),
+      slots,
+      invite: (v.invite && typeof v.invite === 'object') ? v.invite : {},
+    };
+  }
+
+  function assemblePayload() {
+    const byLabel = new Map(roster.map((g) => [g.label, g.streamID]));
+    const slots = cfg.slots.map((s, i) => {
+      const streamID = hasRoster
+        ? (s.label ? (byLabel.get(s.label) || '') : '')
+        : String(s.streamID || '');
+      s.streamID = streamID;
+      return {
+        slot: i + 1,
+        label: s.label || '',
+        streamID,
+        mirror: !!s.mirror,
+        mode: s.mode === 'discord' ? 'discord' : 'webcam',
+        discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
+      };
+    });
+    return { enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
+      viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {} };
+  }
+
+  // This page only ever pushes ROSTER-driven resolutions (it has no editor), so
+  // both gates apply to every push: hydrated (never clobber persisted state with
+  // defaults) and hasRoster (never blank slots before our director has spoken).
+  function assembleAndPush() {
+    if (!hydrated || !hasRoster) return;
+    const payload = JSON.stringify(assemblePayload());
+    if (payload === lastPushedSig) return;
+    lastPushedSig = payload;
+    doAction(PUSH_ACTION, { payload });
+    show(`room ${cfg.room} · ${roster.length} guest(s) · pushed`);
+  }
+
+  // ── SB WS client ──────────────────────────────────────────────────────────
+  let ws = null;
+  let msgId = 0;
+  let subId = null;
+  let reconnectDelay = 2000;
+
+  function doAction(name, args) {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ request: 'DoAction', id: String(++msgId), action: { name }, args }));
+  }
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    let syncFired = false;
+    const fireSync = () => {
+      if (syncFired) return;
+      syncFired = true;
+      doAction(SYNC_ACTION, { reason: 'director-min-connect' });
+    };
+    ws.onopen = () => {
+      reconnectDelay = 2000;
+      show('connected to SB — waiting for state');
+      subId = String(++msgId);
+      ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
+      setTimeout(fireSync, 400);
+    };
+    ws.onmessage = (evt) => {
+      let m;
+      try { m = JSON.parse(evt.data); } catch { return; }
+      if (m && m.id && m.id === subId && !m.event) { fireSync(); return; }
+      if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      let d = m.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
+      if (!d || typeof d !== 'object' || d.type !== 'vdoninja:update') return;
+      const sig = JSON.stringify(d.vdoninja);
+      if (sig === lastPushedSig) return; // our own echo
+      adoptCfg(d.vdoninja);
+      hydrated = true;
+      lastPushedSig = JSON.stringify(assemblePayload());
+      syncDirectorFrame();
+    };
+    ws.onclose = () => {
+      show('SB offline — retrying');
+      setTimeout(() => { reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); connect(); }, reconnectDelay);
+    };
+    ws.onerror = () => {};
+  }
+
+  // ── Director iframe + loop (same as control.html, minus the editor) ────────
+  function directorUrl() {
+    if (!cfg.enabled || !cfg.room) return '';
+    const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
+    let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
+    if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
+    u += '&cleanish&novideo&noaudio';
+    return u;
+  }
+
+  function syncDirectorFrame() {
+    const url = directorUrl();
+    if (url === frameUrl) return;
+    frameUrl = url;
+    if (url) {
+      director.src = url;
+      show(`room ${cfg.room} · director connecting…`);
+      startPolling();
+    } else {
+      director.src = 'about:blank';
+      stopPolling();
+      roster = [];
+      hasRoster = false;
+      show(cfg.enabled ? 'no room configured' : 'director disabled');
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(pollGuestList, POLL_MS);
+    setTimeout(pollGuestList, FIRST_PROBE_MS);
+  }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  function pollGuestList() {
+    if (!frameUrl || !director.contentWindow) return;
+    try {
+      director.contentWindow.postMessage({ getGuestList: true, cib: 'sb-vdo-min' }, DIRECTOR_ORIGIN);
+    } catch (_) { /* iframe not ready yet */ }
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== DIRECTOR_ORIGIN) return;
+    const d = e.data;
+    if (!d || typeof d !== 'object' || !('guestList' in d)) return;
+    roster = VdoParse.parseGuestList(d);
+    hasRoster = true;
+    show(`room ${cfg.room} · ${roster.length} guest(s)`);
+    assembleAndPush(); // auto-follow: re-resolve every poll
+  });
+
+  show('connecting to SB…');
+  connect();
+})();
+</script>
+</body>
+</html>

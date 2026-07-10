@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>mock vdo.ninja director</title>
+<!--
+  Fake vdo.ninja director — speaks the director's postMessage protocol so the
+  control pages (and verify-render.mjs) can exercise enumeration + auto-follow with
+  no live room, no camera, no network. Load a control page with
+      window.__VDO_DIRECTOR_URL = 'http://127.0.0.1:<port>/mock/vdo-director.html'
+  and it hosts THIS page in its hidden director iframe instead of vdo.ninja.
+
+  Protocol (same shape the real director answers):
+      parent posts   { getGuestList: true, cib }
+      we answer      { guestList: { "<n>": { streamID, label } }, cib }
+  The director's own connection is always present with an EMPTY label ("0" below) —
+  the parser must drop it.
+
+  Scripted timeline (wall clock from page load; ?fast=1 compresses ×2.5):
+      t ≥ 1s   ALPHA joins   (streamID aaa111)
+      t ≥ 3s   BRAVO joins   (streamID bbb222)
+      t ≥ 6s   ALPHA leaves
+      t ≥ 9s   ALPHA REJOINS with a NEW streamID (aaa333)   ← the auto-follow window
+  ?malformed=1 answers the first four polls with malformed shapes (null guestList,
+  string guestList, entry missing streamID, numeric label/streamID) before going
+  normal — the defensive-parser cases, live.
+  window.__setRoster({...}) overrides the timeline for hand-driven tests.
+-->
+<style>
+  body { font: 12px/1.5 Consolas, monospace; background: #101418; color: #9fe8a8; margin: 0; padding: 10px; }
+  h1 { font-size: 13px; color: #7ee787; margin: 0 0 6px; }
+  pre { white-space: pre-wrap; word-break: break-all; color: #cdd9e5; }
+</style>
+</head>
+<body>
+<h1>mock vdo.ninja director</h1>
+<div>elapsed: <span id="t">0.0</span>s · polls answered: <span id="n">0</span></div>
+<pre id="out">(no poll yet)</pre>
+<script>
+(function () {
+  'use strict';
+
+  const P = new URLSearchParams(location.search);
+  const SPEED = P.get('fast') === '1' ? 2.5 : 1;
+  const MALFORMED = P.get('malformed') === '1';
+  const t0 = Date.now();
+  let polls = 0;
+  let malformedServed = 0;
+  let forcedRoster = null;
+
+  function rosterAt(elapsedMs) {
+    const t = elapsedMs * SPEED;
+    const gl = { 0: { streamID: 'dIrEcToR00', label: '' } }; // the director itself
+    let n = 1;
+    if (t >= 1000 && t < 6000) gl[n++] = { streamID: 'aaa111', label: 'ALPHA' };
+    if (t >= 3000) gl[n++] = { streamID: 'bbb222', label: 'BRAVO' };
+    if (t >= 9000) gl[n++] = { streamID: 'aaa333', label: 'ALPHA' }; // rejoined — NEW streamID
+    return gl;
+  }
+
+  const MALFORMED_REPLIES = [
+    { guestList: null },
+    { guestList: 'nope' },
+    { guestList: { 1: { label: 'NOSTREAM' } } },
+    { guestList: { 1: { label: 123, streamID: 456 } } },
+  ];
+
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || typeof d !== 'object' || !d.getGuestList) return;
+    polls++;
+    let reply;
+    if (MALFORMED && malformedServed < MALFORMED_REPLIES.length) {
+      reply = Object.assign({}, MALFORMED_REPLIES[malformedServed++], { cib: d.cib });
+    } else {
+      reply = { guestList: forcedRoster || rosterAt(Date.now() - t0), cib: d.cib };
+    }
+    // '*' is fine here — this is a local test mock, and the real director replies
+    // cross-origin anyway (the control page filters on the iframe's origin).
+    (e.source || window.parent).postMessage(reply, '*');
+
+    document.getElementById('t').textContent = ((Date.now() - t0) / 1000).toFixed(1);
+    document.getElementById('n').textContent = String(polls);
+    document.getElementById('out').textContent = JSON.stringify(reply.guestList, null, 1);
+  });
+
+  window.__setRoster = (gl) => { forcedRoster = gl; };
+})();
+</script>
+</body>
+</html>

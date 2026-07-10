@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Greenroom — Discord voice roster</title>
+<!--
+  Greenroom Discord voice roster — the standalone channel overlay (the StreamKit
+  replacement): every member of the watched voice channel as an avatar with a
+  speaking glow, mute/deaf badges, and optional name labels.
+
+  OBS Browser Source URL (docs/STREAMERBOT-SETUP.md):
+    http://127.0.0.1:7474/overlay/discord-roster.html?layout=row
+
+  Fed by the Discord bridge sidecar's `discord:voice:update`. Config precedence per
+  render: URL param > payload settings block > built-in default (docs/THEMING.md):
+
+    ?layout=row|grid       row = one horizontal strip (default); grid = wrapping panel
+    ?labels=0|1            show usernames under avatars (default 1)
+    ?avatar=<px>           guest avatar size        (settings.avatarPx,   default 56)
+    ?streamerpx=<px>       streamer avatar size     (settings.streamerPx, default 72)
+    ?accent=<name|R,G,B>   glow color: cyan | magenta | neon-green | "R,G,B" triplet
+    ?streamer=<userId>     streamer-first ordering  (settings.streamerUserId)
+    ?hidewhenabsent=0|1    hide everything when the streamer isn't in voice
+    ?theme=plain           second look: no chips/scanlines/blink, thin speaking ring
+    ?max=<n>               cap rendered members; the rest collapse into a "+N" chip
+    ?sbport=<n> ?sbdebug=1 transport knobs (overlay/panel-client-sb.js)
+
+  Re-theming = overriding the CSS custom properties in :root below (Cadence-style;
+  see docs/THEMING.md for the variable reference).
+-->
+<style>
+  :root {
+    /* ── Theme variables — override these to re-skin (docs/THEMING.md) ── */
+    --accent: 34, 211, 238;          /* speaking glow, R,G,B triplet (cyan) */
+    --avatar-px: 56px;               /* guest avatar size */
+    --streamer-px: 72px;             /* streamer avatar size */
+    --gap: 14px;                     /* spacing between members */
+    --name-size: 13px;
+    --name-color: #eef2f5;
+    --name-font: 'Segoe UI', system-ui, sans-serif;
+    --chip-bg: rgba(10, 14, 18, .55);   /* per-member backing chip */
+    --chip-pad: 8px;
+    --badge-bg: rgba(15, 18, 22, .92);  /* mute/deaf badge disc */
+    --badge-fg: #ff5560;                /* mute/deaf badge glyph */
+    --blink-s: .9s;                     /* speaking pulse period */
+    --radius: 14px;                     /* chip corner radius */
+  }
+
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: var(--name-font); }
+  body.absent #stage { display: none; }
+  body.offline #stage { opacity: .35; filter: grayscale(1); }
+  #stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transition: opacity .3s ease; }
+
+  #roster { display: flex; gap: var(--gap); align-items: flex-start; justify-content: center; }
+  #roster.layout-row { flex-wrap: nowrap; }
+  #roster.layout-grid { flex-wrap: wrap; max-width: 100%; }
+
+  .member { display: flex; flex-direction: column; align-items: center; gap: 6px;
+            background: var(--chip-bg); border-radius: var(--radius); padding: var(--chip-pad);
+            position: relative; }
+  body.fx-scanlines .member::after {
+    content: ''; position: absolute; inset: 0; border-radius: var(--radius); pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.14) 0 1px, transparent 1px 3px);
+  }
+
+  .avatar-wrap { position: relative; width: var(--avatar-px); height: var(--avatar-px); }
+  .member.streamer .avatar-wrap { width: var(--streamer-px); height: var(--streamer-px); }
+  .avatar { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block;
+            opacity: .82; filter: brightness(70%) saturate(85%);
+            box-shadow: 0 0 0 2px rgba(255,255,255,.10);
+            transition: opacity .15s ease, filter .15s ease, box-shadow .2s ease; }
+  .member.speaking .avatar { opacity: 1; filter: brightness(112%) saturate(112%);
+            box-shadow: 0 0 0 3px rgba(var(--accent), .95), 0 0 22px 6px rgba(var(--accent), .8);
+            animation: roster-blink var(--blink-s) ease-in-out infinite; }
+  body.no-blink .member.speaking .avatar { animation: none; }
+  @keyframes roster-blink {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(var(--accent), .9), 0 0 12px 3px rgba(var(--accent), .6); }
+    50%      { box-shadow: 0 0 0 3px rgba(var(--accent), 1), 0 0 26px 8px rgba(var(--accent), 1); }
+  }
+
+  .badges { position: absolute; right: -4px; bottom: -4px; display: flex; gap: 2px; }
+  .badge { width: calc(var(--avatar-px) * .38); height: calc(var(--avatar-px) * .38);
+           min-width: 18px; min-height: 18px; border-radius: 50%; background: var(--badge-bg);
+           display: none; align-items: center; justify-content: center; }
+  .member.streamer .badge { width: calc(var(--streamer-px) * .34); height: calc(var(--streamer-px) * .34); }
+  .badge svg { width: 68%; height: 68%; fill: var(--badge-fg); }
+  .member.muted .badge.mute { display: flex; }
+  .member.deafened .badge.deaf { display: flex; }
+  .member.deafened .badge.mute { display: none; } /* deaf implies mute — show one badge, like Discord */
+
+  .name { font-size: var(--name-size); color: var(--name-color); max-width: calc(var(--avatar-px) + 34px);
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,.7); }
+  body.no-labels .name { display: none; }
+
+  .overflow-chip { align-self: center; background: var(--chip-bg); border-radius: var(--radius);
+          padding: 8px 12px; color: var(--name-color); font-size: calc(var(--name-size) + 2px); }
+
+  /* ── ?theme=plain — the second look: quiet, chip-less, thin speaking ring ── */
+  body.theme-plain .member { background: transparent; padding: 0; }
+  body.theme-plain .member::after { content: none; }
+  body.theme-plain .avatar { opacity: 1; filter: none; box-shadow: 0 0 0 2px rgba(255,255,255,.18); }
+  body.theme-plain .member.speaking .avatar { animation: none;
+          box-shadow: 0 0 0 3px rgb(var(--accent)); filter: none; }
+  body.theme-plain .name { text-shadow: 0 1px 2px rgba(0,0,0,.45); } /* softer, but never invisible on light scenes */
+</style>
+<script>
+  window.__SB_SYNC_ACTION = 'VDO Sync';
+</script>
+<script src="panel-client-sb.js"></script>
+</head>
+<body>
+<div id="stage"><div id="roster" class="layout-row"></div></div>
+<script>
+(function () {
+  'use strict';
+
+  const P = new URLSearchParams(location.search);
+  const numOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; };
+  const boolOr = (v, d) => (v === '1' ? true : v === '0' ? false : d);
+
+  const ACCENTS = { cyan: '34, 211, 238', magenta: '255, 0, 229', 'neon-green': '57, 255, 20' };
+  function accentTriplet(name) {
+    if (!name) return null;
+    if (ACCENTS[name]) return ACCENTS[name];
+    return /^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$/.test(name) ? name : null;
+  }
+
+  const URL_CFG = {
+    layout: P.get('layout'),
+    labels: P.get('labels'),
+    avatarPx: P.get('avatar'),
+    streamerPx: P.get('streamerpx'),
+    accent: P.get('accent'),
+    streamer: P.get('streamer'),
+    hideWhenAbsent: P.get('hidewhenabsent'),
+    theme: P.get('theme'),
+    max: P.get('max'),
+  };
+
+  const roster = document.getElementById('roster');
+  let lastDiscord = null;
+  let lastSig = '';
+  const nodes = new Map(); // uid -> { root, img, name }
+
+  function defaultAvatar(userId) {
+    let idx = 0;
+    try { idx = Number((BigInt(userId) >> 22n) % 6n); } catch (_) { idx = 0; }
+    return 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
+  }
+
+  // Effective config: URL param > payload settings > default.
+  function effective(settings) {
+    const s = settings || {};
+    return {
+      layout: URL_CFG.layout === 'grid' ? 'grid' : 'row',
+      labels: boolOr(URL_CFG.labels, true),
+      avatarPx: numOr(URL_CFG.avatarPx, numOr(s.avatarPx, 56)),
+      streamerPx: numOr(URL_CFG.streamerPx, numOr(s.streamerPx, 72)),
+      accent: accentTriplet(URL_CFG.accent) || accentTriplet(s.accent) || ACCENTS.cyan,
+      streamer: (URL_CFG.streamer || s.streamerUserId || '').trim(),
+      hideWhenAbsent: boolOr(URL_CFG.hideWhenAbsent, s.hideWhenAbsent !== false),
+      scanlines: s.scanlines !== false,
+      neonBlink: s.neonBlink !== false,
+      plain: URL_CFG.theme === 'plain',
+      max: numOr(URL_CFG.max, 0),
+    };
+  }
+
+  const SVG_MUTE = '<svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5.5-3a5.5 5.5 0 0 1-8.9 4.32l1.45-1.45A3.5 3.5 0 0 0 15.5 11H17.5zm-11 0c0 .6.1 1.19.28 1.73l-1.55 1.55A7.4 7.4 0 0 1 4.5 11h2zM12 18.4c.72 0 1.41-.12 2.06-.33l1.62 1.62A7.9 7.9 0 0 1 13 20.43V22h-2v-1.57a8 8 0 0 1-6.32-5.19l1.62-.6A6.4 6.4 0 0 0 12 18.4zM4.27 3 21 19.73 19.73 21 3 4.27 4.27 3z"/></svg>';
+  const SVG_DEAF = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5.06A7 7 0 0 1 12 5a7 7 0 0 1 6.94 7H17a2 2 0 0 0-2 2v1.1l4.86 4.86c.66-.55 1.14-1.37 1.14-2.36v-5a9 9 0 0 0-9-9zM4.27 4 21 20.73 19.73 22 3 5.27 4.27 4z"/></svg>';
+
+  function buildMember(uid) {
+    const root = document.createElement('div');
+    root.className = 'member';
+    root.dataset.uid = uid;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'avatar-wrap';
+    const img = document.createElement('img');
+    img.className = 'avatar';
+    img.alt = '';
+    img.addEventListener('error', () => {
+      const fb = defaultAvatar(uid);
+      if (img.getAttribute('src') !== fb) img.src = fb;
+    });
+    const badges = document.createElement('div');
+    badges.className = 'badges';
+    badges.innerHTML = '<span class="badge mute" title="muted">' + SVG_MUTE + '</span>'
+      + '<span class="badge deaf" title="deafened">' + SVG_DEAF + '</span>';
+    wrap.appendChild(img);
+    wrap.appendChild(badges);
+
+    const name = document.createElement('div');
+    name.className = 'name';
+
+    root.appendChild(wrap);
+    root.appendChild(name);
+    return { root, img, name };
+  }
+
+  function orderedIds(users, streamerId) {
+    return Object.keys(users).sort((a, b) => {
+      if (a === streamerId) return -1;
+      if (b === streamerId) return 1;
+      const ua = (users[a].username || '').toLowerCase();
+      const ub = (users[b].username || '').toLowerCase();
+      return ua < ub ? -1 : ua > ub ? 1 : a < b ? -1 : 1;
+    });
+  }
+
+  function render() {
+    const dv = lastDiscord;
+    const cfg = effective(dv && dv.settings);
+
+    // Theme/effect classes + variables (cheap; applied every render so a
+    // set-settings push restyles live).
+    const rootStyle = document.documentElement.style;
+    rootStyle.setProperty('--accent', cfg.accent);
+    rootStyle.setProperty('--avatar-px', cfg.avatarPx + 'px');
+    rootStyle.setProperty('--streamer-px', cfg.streamerPx + 'px');
+    document.body.classList.toggle('theme-plain', cfg.plain);
+    document.body.classList.toggle('no-labels', !cfg.labels);
+    document.body.classList.toggle('no-blink', !cfg.neonBlink || cfg.plain);
+    document.body.classList.toggle('fx-scanlines', cfg.scanlines && !cfg.plain);
+    roster.className = 'layout-' + cfg.layout;
+
+    const users = (dv && dv.users) || {};
+    const absent = !dv || !dv.connected || !dv.hostInChannel || Object.keys(users).length === 0;
+    document.body.classList.toggle('absent', cfg.hideWhenAbsent && absent);
+
+    let ids = orderedIds(users, cfg.streamer);
+    let overflow = 0;
+    if (cfg.max > 0 && ids.length > cfg.max) {
+      overflow = ids.length - cfg.max;
+      ids = ids.slice(0, cfg.max);
+    }
+
+    // Membership-keyed DOM diff: rebuild only when the member list (or order)
+    // changes; speaking/mute/deaf are in-place class flips. This is what keeps a
+    // 20-user channel at the sidecar's 100 ms coalesce cheap to render.
+    const sig = JSON.stringify([ids, overflow, cfg.layout, cfg.labels]);
+    if (sig !== lastSig) {
+      lastSig = sig;
+      roster.textContent = '';
+      for (const uid of ids) {
+        if (!nodes.has(uid)) nodes.set(uid, buildMember(uid));
+        roster.appendChild(nodes.get(uid).root);
+      }
+      for (const uid of [...nodes.keys()]) if (!ids.includes(uid)) nodes.delete(uid);
+      if (overflow > 0) {
+        const chip = document.createElement('div');
+        chip.className = 'overflow-chip';
+        chip.textContent = '+' + overflow;
+        roster.appendChild(chip);
+      }
+    }
+
+    for (const uid of ids) {
+      const u = users[uid];
+      const n = nodes.get(uid);
+      if (!u || !n) continue;
+      const avatarUrl = u.avatarUrl || defaultAvatar(uid);
+      if (n.img.getAttribute('src') !== avatarUrl) n.img.src = avatarUrl;
+      const label = u.username || uid;
+      if (n.name.textContent !== label) { n.name.textContent = label; n.name.title = label; }
+      n.root.classList.toggle('streamer', uid === cfg.streamer);
+      n.root.classList.toggle('speaking', !!u.speaking);
+      n.root.classList.toggle('muted', !!u.mute);
+      n.root.classList.toggle('deafened', !!u.deaf);
+    }
+  }
+
+  window.addEventListener('svc:message', (e) => {
+    const msg = e.detail;
+    if (!msg) return;
+    if (msg.type === 'discord:voice:update') {
+      lastDiscord = msg.discordVoice || null;
+      render();
+    } else if (msg.type === 'sync' && msg.discordVoice !== undefined) {
+      lastDiscord = msg.discordVoice || null;
+      render();
+    }
+  });
+
+  render(); // initial paint (absent state) so hideWhenAbsent applies before first push
+})();
+</script>
+</body>
+</html>

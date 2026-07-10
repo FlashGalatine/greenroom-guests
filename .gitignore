@@ -1,0 +1,14 @@
+# Dependencies (package-lock.json IS committed — root and sidecar)
+node_modules/
+
+# Secrets + per-install runtime state (seeded from discord-voice-config.example.json)
+sidecar/discord-tokens.json
+sidecar/discord-voice-config.json
+
+# verify scratch files
+.verify-bridge-config.json
+.verify-bridge-tokens.json
+
+# verify-render screenshots (docs/ screenshots ARE committed)
+roster-check.png
+control-check.png
