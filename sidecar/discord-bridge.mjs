@@ -286,7 +286,9 @@ function startBot() {
   if (bot) return;
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
   bot = client;
-  client.once('ready', () => { onBotReady().catch((e) => log(`ready handler: ${e.message}`)); });
+  // discord.js ≥14.22 name — 'ready' is deprecated (removal in v15) and logs a
+  // DeprecationWarning on every login.
+  client.once('clientReady', () => { onBotReady().catch((e) => log(`ready handler: ${e.message}`)); });
   client.on('voiceStateUpdate', onVoiceStateUpdate);
   client.on('error', (e) => log(`bot error: ${e.message}`));
   // discord.js auto-reconnects the gateway; just reflect the state.
