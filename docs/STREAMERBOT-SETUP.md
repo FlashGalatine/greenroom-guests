@@ -15,8 +15,13 @@ bot token file.
 
   | Path | Folder |
   |---|---|
-  | `control` | `<this repo>\control` |
-  | `overlay` | `<this repo>\overlay` |
+  | `greenroom-control` | `<this repo>\control` |
+  | `greenroom-overlay` | `<this repo>\overlay` |
+
+  The prefixes are namespaced on purpose: sibling components on the same SB may
+  already claim the generic ones (SlowPan maps `overlay`, Tally maps `shared` +
+  `themes`). Any prefix works — the pages load all their assets relatively —
+  just keep your OBS URLs consistent with whatever you map.
 
   Serving over `http://127.0.0.1` is load-bearing twice: the embedded vdo.ninja
   WebRTC viewer renders **black** inside a `file://` page (non-secure context),
@@ -57,17 +62,17 @@ All **Browser Source → URL** (never "Local file"):
 
 | Source | URL |
 |---|---|
-| Guest slot 1–4 | `http://127.0.0.1:7474/overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`) |
-| Discord roster | `http://127.0.0.1:7474/overlay/discord-roster.html?layout=row` |
-| Always-on director | `http://127.0.0.1:7474/control/director-min.html` as a **1×1 px** source |
+| Guest slot 1–4 | `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`) |
+| Discord roster | `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` |
+| Always-on director | `http://127.0.0.1:7474/greenroom-control/director-min.html` as a **1×1 px** source |
 
 Every page fires the `VDO Sync` action on connect, so a source added mid-stream
 paints immediately.
 
 ## 4. The control page + the director
 
-`http://127.0.0.1:7474/control/control.html` — open as a browser tab or an OBS
-**Custom Browser Dock** (Docks → Custom Browser Docks…).
+`http://127.0.0.1:7474/greenroom-control/control.html` — open as a browser tab
+or an OBS **Custom Browser Dock** (Docks → Custom Browser Docks…).
 
 Auto-follow needs **one director page open somewhere** (it hosts the hidden
 vdo.ninja director iframe that re-resolves labels → streamIDs every 2.5 s).

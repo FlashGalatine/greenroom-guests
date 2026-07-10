@@ -46,8 +46,8 @@ still paints (every page replays state via the `VDO Sync` action on connect).
    `overlay` to this repo's folders, paste the 4 core actions (skip
    `Discord Bridge Start`).
 2. Add OBS Browser Sources:
-   `http://127.0.0.1:7474/overlay/vdoninja-guest.html?slot=1` (…2, 3, 4).
-3. Open `http://127.0.0.1:7474/control/control.html`, set your room + password,
+   `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…2, 3, 4).
+3. Open `http://127.0.0.1:7474/greenroom-control/control.html`, set your room + password,
    enable the director, and bind slots to guest labels. Keep one director page
    open (a 1×1 source running `director-min.html` is the set-and-forget option).
    The invite builder hands you guest links (`&hash=` password mode included).
@@ -59,8 +59,8 @@ still paints (every page replays state via the `VDO Sync` action on connect).
    `sidecar/discord-tokens.json` — file-only, never enters the control page.
 3. Run `start-discord-bridge.bat` (or the optional `Discord Bridge Start`
    action), add
-   `http://127.0.0.1:7474/overlay/discord-roster.html?layout=row` as a source,
-   pick a channel in the control page and press USE → Connect.
+   `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` as a
+   source, pick a channel in the control page and press USE → Connect.
 
 Serve over `http://`, never as an OBS "Local file" — the VDO viewer renders
 black in a `file://` parent and `file://` sources ignore URL params.

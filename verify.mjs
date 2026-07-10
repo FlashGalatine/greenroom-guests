@@ -369,6 +369,12 @@ async function main() {
     check('/control/director-min.html 200 + wired (VDO Push, vdo-parse.js)', minRes.status === 200 && minBody.includes("'VDO Push'") && minBody.includes('vdo-parse.js'));
     const mockDirRes = await fetch(`${BASE}/mock/vdo-director.html`);
     check('/mock/vdo-director.html 200 + speaks getGuestList', mockDirRes.status === 200 && (await mockDirRes.text()).includes('getGuestList'));
+    const nsCtrl = await fetch(`${BASE}/greenroom-control/control.html`);
+    await nsCtrl.arrayBuffer();
+    const nsOv = await fetch(`${BASE}/greenroom-overlay/vdoninja-guest.html`);
+    await nsOv.arrayBuffer();
+    check('namespaced aliases serve too (/greenroom-control/, /greenroom-overlay/ — the real-SB map names)',
+      nsCtrl.status === 200 && nsOv.status === 200);
 
     // C# ↔ mock parity greps: the .cs files must carry the exact contract strings
     // the mock (and the producers) rely on. A drift here is a live-only bug.

@@ -2,10 +2,12 @@
 // install, for local development and the verify suites. It faithfully mimics the
 // two SB surfaces Greenroom depends on:
 //
-//   • HTTP Server on :7474 — SB Path->Folder file serving. Maps (identical to the
-//     real-SB config in docs/STREAMERBOT-SETUP.md):
-//       /control/*  -> control/  (control.html, director-min.html, vdo-parse.js)
-//       /overlay/*  -> overlay/  (panel-client-sb.js, vdoninja-guest.html, discord-roster.html)
+//   • HTTP Server on :7474 — SB Path->Folder file serving. Both the short and the
+//     namespaced prefixes work (docs/STREAMERBOT-SETUP.md recommends the
+//     `greenroom-*` ones for real SB, where sibling components may already claim
+//     `overlay`/`shared`/`themes`):
+//       /control/* or /greenroom-control/*  -> control/
+//       /overlay/* or /greenroom-overlay/*  -> overlay/
 //     Plus mock-only routes:
 //       /mock/vdo-director.html -> the fake vdo.ninja director (offline auto-follow tests)
 //       /mock/actions[?clear=1] -> ring buffer of every DoAction {t, name, args} received
@@ -176,13 +178,16 @@ const http = createServer(async (req, res) => {
     res.end(landingHtml());
     return;
   }
-  // The two SB HTTP maps, identical to the real-SB config.
+  // The two SB HTTP maps — short prefixes plus the namespaced aliases the
+  // real-SB docs recommend, so every documented URL also works against the mock.
   let file = null;
-  if (path.startsWith('/control/')) file = safeResolve(CONTROL_DIR, path.slice('/control'.length));
+  if (path.startsWith('/greenroom-control/')) file = safeResolve(CONTROL_DIR, path.slice('/greenroom-control'.length));
+  else if (path.startsWith('/greenroom-overlay/')) file = safeResolve(OVERLAY_DIR, path.slice('/greenroom-overlay'.length));
+  else if (path.startsWith('/control/')) file = safeResolve(CONTROL_DIR, path.slice('/control'.length));
   else if (path.startsWith('/overlay/')) file = safeResolve(OVERLAY_DIR, path.slice('/overlay'.length));
   if (!file) {
     res.writeHead(404, { 'content-type': 'text/plain' });
-    res.end('Map /control/ (control/) or /overlay/ (overlay/).');
+    res.end('Map /greenroom-control/ (control/) or /greenroom-overlay/ (overlay/).');
     return;
   }
   return serveFile(res, file);
