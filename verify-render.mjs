@@ -241,6 +241,14 @@ async function main() {
     check('hydrates room from the persisted vdo.state (VDO Sync replay)', hydrated,
       await ctrlPage.evaluate(() => document.getElementById('vdoRoom')?.value));
 
+    const slotSrc = await ctrlPage.evaluate(() => {
+      const b = document.querySelector('.vdo-slot-row[data-slot="2"] .vdo-src-copy');
+      const a = document.querySelector('.vdo-slot-row[data-slot="2"] .vdo-src-open');
+      return { url: b && b.dataset.url, href: a && a.getAttribute('href') };
+    });
+    check('each slot row exposes Copy + Open for its OBS Browser Source URL (?slot=N)',
+      !!slotSrc.url && /vdoninja-guest\.html\?slot=2/.test(slotSrc.url) && slotSrc.href === slotSrc.url, JSON.stringify(slotSrc));
+
     await fetch(`${BASE}/mock/actions?clear=1`);
     await ctrlPage.fill('#vdoViewFlags', '&solo&render-test');
     await ctrlPage.click('#btnVdoSave');

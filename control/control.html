@@ -75,6 +75,8 @@
   .vdo-id.live { color: var(--green); }
   .vdo-mirror { display: inline-flex; gap: 4px; align-items: center; color: var(--dim); cursor: pointer; }
   .vdo-discord-id { width: 20ch; font-family: Consolas, monospace; }
+  .vdo-slot-src { display: inline-flex; gap: 4px; align-items: center; margin-left: auto; }
+  .vdo-slot-src .vdo-src-copy, .vdo-slot-src .btn-open { font-size: 12px; padding: 4px 9px; }
 
   /* Invite grid */
   .vdo-invite-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -591,7 +593,26 @@
       }
       discordWrap.append(discId, pick);
 
-      row.append(name, modeSel, webcamWrap, discordWrap);
+      // Per-slot OBS Browser Source URL (same in either mode — keyed on ?slot=N).
+      const srcWrap = document.createElement('span');
+      srcWrap.className = 'vdo-slot-src';
+      const srcUrl = guestSourceUrl(i);
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'vdo-src-copy';
+      copyBtn.textContent = 'Copy';
+      copyBtn.title = `Copy the OBS Browser Source URL for Guest ${i}`;
+      copyBtn.dataset.url = srcUrl;
+      const openA = document.createElement('a');
+      openA.className = 'btn-open vdo-src-open';
+      openA.textContent = 'Open';
+      openA.href = srcUrl;
+      openA.target = '_blank';
+      openA.rel = 'noreferrer';
+      openA.title = `Preview Guest ${i}'s overlay in a new tab`;
+      srcWrap.append(copyBtn, openA);
+
+      row.append(name, modeSel, webcamWrap, discordWrap, srcWrap);
       els.slots.appendChild(row);
     }
   }
@@ -631,6 +652,11 @@
     cfg.slots = slotsFromDom();
     slotsSig = ''; // slot ids/labels may need a rebuild on the next render
     assembleAndPush(false); // update overlays now, don't wait for the next poll
+  });
+
+  els.slots.addEventListener('click', (e) => {
+    const copyBtn = e.target.closest('.vdo-src-copy');
+    if (copyBtn) copyText(copyBtn.dataset.url, copyBtn);
   });
 
   function saveRoom() {
@@ -773,6 +799,38 @@
     const orig = btn.textContent;
     btn.textContent = 'Copied';
     setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+  async function copyText(text, btn) {
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch {}
+      document.body.removeChild(ta);
+    }
+    const orig = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+
+  // The OBS Browser Source URL for a guest slot, derived from where THIS control
+  // page is served: same origin, the sibling overlay map (…-control → …-overlay,
+  // or the mock's short control → overlay), and the same ?sbport the control page
+  // carries (dev/mock). Falls back to the documented default over file:// (not a
+  // supported deployment). No hardcoded host/port to drift from the real mapping.
+  function guestSourceUrl(slot) {
+    let base = 'http://127.0.0.1:7474/greenroom-overlay/';
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      const prefix = location.pathname.split('/').filter(Boolean)[0] || '';
+      const overlayPrefix = prefix.endsWith('-control') ? prefix.replace(/-control$/, '-overlay')
+        : prefix === 'control' ? 'overlay'
+        : 'greenroom-overlay';
+      base = location.origin + '/' + overlayPrefix + '/';
+    }
+    const sbport = P.get('sbport');
+    return base + 'vdoninja-guest.html?slot=' + slot + (sbport ? '&sbport=' + encodeURIComponent(sbport) : '');
   }
   $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')));
   $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
