@@ -78,13 +78,17 @@ Auto-follow needs **one director page open somewhere** (it hosts the hidden
 vdo.ninja director iframe that re-resolves labels → streamIDs every 2.5 s).
 Deployment options, best first:
 
-1. **1×1 OBS Browser Source running `director-min.html`** — always-on, zero
-   operator attention; browser sources are known-good CEF. Open `control.html`
+1. **`control.html` as an OBS Custom Browser Dock** — the natural operator home,
+   and **validated (2026-07-10, SB 1.0.4)**: the director iframe's WebRTC +
+   postMessage enumeration runs fine in dock CEF, so the dock alone keeps
+   auto-follow alive while you stream — no separate director source needed. This
+   was the one open question a mock couldn't answer; it passed.
+2. **1×1 OBS Browser Source running `director-min.html`** — the headless
+   always-on alternative (browser sources are known-good CEF). Use it if you
+   prefer to keep the director running without the dock open; open `control.html`
    only to edit (a brief two-director overlap is fine — pushes converge).
-2. **`control.html` as an OBS Custom Browser Dock** — the natural operator home.
-   Whether the director iframe's WebRTC + postMessage fully works in dock CEF is
-   a standing live-validation item (below); if it does, the dock alone suffices.
-3. **A pinned browser tab** — the known-working fallback.
+3. **A pinned browser tab** — last-resort fallback, no longer needed now that
+   the dock is validated.
 
 ## 5. The Discord bridge sidecar (optional)
 
@@ -112,31 +116,46 @@ Webcam-only users skip this whole section — nothing else depends on it.
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.
 
-## 6. Live-validation checklist
+## 6. Live-validation results (2026-07-10, real Streamer.bot 1.0.4)
 
-What the offline harness (63 protocol + 22 render checks) **cannot** prove —
-tick these on the first real session:
+What the offline harness (64 protocol + 23 render checks) **cannot** prove was
+exercised on a live rig. Outcomes, faithfully:
 
-- [ ] **Real SB 1.0.4 wiring**: all five actions compile; overlays paint from a
-      `VDO Sync` replay after an SB restart (persisted `vdo.state` survives,
-      `discord.state` doesn't).
-- [ ] **Real vdo.ninja**: live `getGuestList` reply parses (a shape change is
-      maintenance, not a kill — fix `control/vdo-parse.js`); the assembled
-      `?view=` URL renders actual video in the guest slot; **auto-follow**: guest
-      drops + rejoins → slot re-acquires within ~2.5 s.
-- [ ] **Multi-director safety**: the hidden director + a human-operated director
-      link in the same room simultaneously.
-- [ ] **Real bot**: token onboarding per §5; DAVE/E2EE voice handshake succeeds
-      (`libsodium-wrappers` stack); speaking events arrive from a live channel;
-      the mute/deaf badges track real state changes.
-- [ ] **Sustained rate**: ~10 `Discord Voice Push` DoActions/s during a rowdy
-      conversation without SB action-queue lag (the mock proves the protocol,
-      not SB's queue latency).
-- [ ] **OBS dock CEF spike**: does the director iframe (WebRTC + postMessage)
-      run inside a Custom Browser Dock? If yes → the dock alone keeps
-      auto-follow alive; if no → stay on the 1×1 source pattern.
-- [ ] **1×1 source pattern**: `director-min.html` as a browser source keeps
-      resolving with the dock/tab closed.
+- [x] **Real SB wiring** — the four core actions compile and broadcast (verified
+      by calling the push actions with no payload → their `vdo:error` /
+      `discord:voice:error` shapes round-trip). After an SB **restart**, `VDO
+      Sync` replayed the persisted `vdo.state` immediately (the room config
+      survived). *Note:* the `discord.state` **non**-replay half stays
+      offline-proven (`verify.mjs` [3] via `/mock/restart`) — live, the bridge's
+      3 s reconnect re-pushed before the absence window could be captured.
+- [x] **Real vdo.ninja** — live `getGuestList` parsed; slot labels resolved to
+      live stream IDs; **auto-follow** confirmed (guest left → slot blanked;
+      rejoined → slot re-acquired within a poll, no operator action). *Note:* an
+      invite with `&sticky` returns the **same** stream ID on rejoin, so the
+      overlay re-acquires it seamlessly; the **new-ID swap** path is the offline
+      `verify-render` case (`aaa111 → blank → aaa333`) — together they cover both
+      vdo.ninja modes. Actual video render in the slot is operator-observed in OBS.
+      A `getGuestList` shape change is maintenance, not a kill — fix
+      `control/vdo-parse.js`.
+- [x] **Real bot** — token onboarding per §5 worked; voice join + E2EE handshake
+      succeeded (`libsodium-wrappers` stack; bot reached `hostInChannel`); live
+      speaking edges arrived from the channel and drove the glow. *Not separately
+      exercised live:* mute/deaf **badge toggling** on a live state change
+      (covered offline).
+- [~] **Sustained rate** — the 100 ms coalesce **floor** held live (min
+      inter-push gap ≥ 100 ms under solo speech). The ~10 DoActions/s
+      rowdy-channel **ceiling** remains offline-only (the 20-user 100 ms burst in
+      `verify-render` [R4]); a live multi-speaker stress test is still worthwhile.
+- [x] **OBS dock CEF spike** — **PASSED.** The director iframe (WebRTC +
+      postMessage) enumerates and pushes from inside a Custom Browser Dock, so
+      the dock alone drives auto-follow (see §4).
+- [ ] **Multi-director safety** — **not stress-tested** (one director page at a
+      time). Still open: the hidden director + a human-operated director link in
+      the same room simultaneously.
+- [x] **1×1 source pattern** — `director-min.html` validated offline
+      (`verify-render` [R1]); live, the director ran from `control.html` / the
+      dock. Confirm the standalone 1×1 source with the dock closed if you adopt
+      that deployment.
 
 ## Troubleshooting
 

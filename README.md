@@ -86,12 +86,12 @@ There are deliberately no per-slot HTML stubs: stubs only ever served OBS
 
 ```
 npm install          # root dev deps (ws)
-npm run verify       # 63 checks: transport, both push round-trips, persisted-vs-
+npm run verify       # 64 checks: transport, both push round-trips, persisted-vs-
                      # non-persisted restart semantics, the command bus, the REAL
                      # sidecar token-less over the bus, malformed-guestList parser,
                      # HTTP serving + tripwires (incl. "no token string in control.html")
 npm install --no-save playwright-core
-npm run verify:render  # 22 real-browser checks: guest slot URL assembly + the
+npm run verify:render  # 23 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,
                        # PFP glow, roster badges/order/hide, a 20-user 100 ms burst,
                        # control page hydrate/edit/USE
@@ -101,8 +101,11 @@ npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
 
 The mocks prove the protocol and the pixels; what only a live session can prove
 (real vdo.ninja shapes, real bot voice handshake, SB action-queue latency, the
-OBS-dock CEF question) is an explicit checklist in
-[docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-checklist).
+OBS-dock CEF question) was then exercised on a real Streamer.bot 1.0.4 rig —
+including the OBS Custom Browser Dock running the director, a real-room
+drop/rejoin auto-follow, and live Discord speaking events. Results and the
+remaining open item (multi-director safety) are in
+[docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-results-2026-07-10-real-streamerbot-104).
 
 ## Security posture
 
