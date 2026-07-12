@@ -71,7 +71,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
     "quality": "", "width": "", "height": "", "fps": "", "codec": "",
     "audioBitrate": "", "stereo": false, "noVideo": false, "noAudio": false,
     "capture": "", "broadcast": false, "meshcast": false, "autostart": false,
-    "requireApproval": false, "roomCap": "", "extraFlags": "" }
+    "requireApproval": false, "roomCap": "", "extraFlags": "" },
+  "directory": [                    // guest directory → nameplates (optional)
+    { "vdoLabel": "John-T", "discordUserId": "",
+      "displayName": "John the Tyrant",
+      "socials": [ { "platform": "twitch", "handle": "TyrannyTimeTV" } ] }
+  ]
 }
 ```
 
@@ -81,7 +86,23 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   the config store — the control page rehydrates from a `VDO Sync` replay and
   holds no authoritative state of its own. The guest overlay reads only
   `room`/`password`/`viewFlags`/`slots[].{streamID,mirror,mode,discordUserId}`
-  and ignores the rest.
+  plus `directory`, and ignores the rest.
+- **`directory` (guest directory → nameplates).** Each entry maps a guest to a
+  preferred on-stream `displayName` + optional social handles. Match keys —
+  either or both: `vdoLabel` (compared against `slots[].label`, stored as typed
+  but matched **case-insensitively**) and `discordUserId` (exact snowflake
+  string, digits-only). Entries missing `displayName` or missing both keys are
+  dropped by the assemblers' sanitizers. `socials[].platform` is lowercase
+  (`twitch` `discord` `twitter` `bluesky` `youtube` `instagram` `tiktok`
+  `website`; unknown → globe icon); `handle` is verbatim. Consumers: the guest
+  overlay's built-in lower-third, the standalone `nameplate.html?slot=N`
+  source, and the roster overlay's chip-name override. A guest with **no
+  matching entry gets no nameplate** (no raw-label fallback); a webcam slot's
+  plate shows only while its label is resolved to a live `streamID`, a
+  discord-mode slot's whenever a user is bound (mirroring the PFP placeholder).
+  `director-min.html` carries `directory` through its re-assembled pushes
+  untouched — verify.mjs tripwires this, since a page that dropped it would
+  silently erase the directory on the next auto-follow push.
 
 ## `discordVoice` payload (assembled only by the sidecar)
 

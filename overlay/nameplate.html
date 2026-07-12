@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Greenroom — Guest nameplate</title>
+<!--
+  Greenroom standalone nameplate — one optional OBS Browser Source per slot,
+  positioned freely (e.g. under the cam frame):
+    http://127.0.0.1:7474/greenroom-overlay/nameplate.html?slot=1   (…2, 3, 4)
+
+  Shows the slot's guest directory entry (control page: Nameplates & Guest
+  Directory): display name + rotating social handles. Follows the same rule as
+  the guest overlay's built-in lower-third — no directory entry, or the slot
+  isn't actively rendering a guest → nothing shows.
+
+  Config (URL params; SERVE OVER HTTP, file:// sources ignore query params):
+    ?slot=N                 which guest slot to follow (default 1)
+    ?accent=<name|R,G,B>    cyan | magenta | neon-green | "R,G,B" triplet
+    ?size=<px>              display-name font size (handle/icon scale with it)
+    ?align=left|center|right   plate alignment in the source box (default center)
+    ?sbport=<n> ?sbdebug=1  transport knobs (overlay/panel-client-sb.js)
+
+  Re-theming = overriding the CSS custom properties in :root below (Cadence-style;
+  see docs/THEMING.md for the variable reference).
+-->
+<style>
+  :root {
+    /* ── Theme variables — override these to re-skin (docs/THEMING.md) ── */
+    --np-accent: 34, 211, 238;                     /* edge bar + icons, R,G,B triplet (cyan) */
+    --np-bg: rgba(10, 14, 18, .72);                /* plate backing */
+    --np-radius: 10px;
+    --np-pad: 8px 14px;
+    --np-name-font: 'Segoe UI', system-ui, sans-serif;
+    --np-name-size: 20px;
+    --np-name-weight: 700;
+    --np-name-color: #eef2f5;
+    --np-handle-size: 13px;
+    --np-handle-color: #b9c4cd;
+    --np-icon-size: 15px;
+  }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body.offline #stage { opacity: .35; filter: grayscale(1); }
+  #stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           padding: 4px; transition: opacity .3s ease; }
+  #stage.align-left { justify-content: flex-start; }
+  #stage.align-right { justify-content: flex-end; }
+</style>
+<script>
+  window.__SB_SYNC_ACTION = 'VDO Sync';
+</script>
+<script src="panel-client-sb.js"></script>
+<script src="nameplate-shared.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+(function () {
+  'use strict';
+
+  const P = new URLSearchParams(location.search);
+  const n = parseInt(P.get('slot'), 10);
+  const SLOT = Number.isFinite(n) && n >= 1 ? n : 1;
+  const ALIGN = ['left', 'right'].includes(P.get('align')) ? P.get('align') : 'center';
+
+  const stage = document.getElementById('stage');
+  if (ALIGN !== 'center') stage.classList.add('align-' + ALIGN);
+
+  GRNameplate.injectCss();
+  const plate = GRNameplate.buildPlate(stage, {
+    accent: GRNameplate.accentTriplet(P.get('accent')),
+    nameSizePx: parseInt(P.get('size'), 10) || 0,
+  });
+
+  let lastVdo = null;
+
+  function render() {
+    plate.setEntry(GRNameplate.resolvePlateEntry(lastVdo, SLOT));
+  }
+
+  // Only the vdoninja payload matters here — resolvePlateEntry never needs the
+  // discord voice feed, so discord:voice:update is deliberately ignored.
+  window.addEventListener('svc:message', (e) => {
+    const msg = e.detail;
+    if (!msg) return;
+    if (msg.type === 'vdoninja:update') {
+      lastVdo = msg.vdoninja || null;
+      render();
+    } else if (msg.type === 'sync' && msg.vdoninja !== undefined) {
+      lastVdo = msg.vdoninja || null;
+      render();
+    }
+  });
+})();
+</script>
+</body>
+</html>

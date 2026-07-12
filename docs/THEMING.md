@@ -67,3 +67,53 @@ lights the single-avatar discord mode in the guest slots
 (`overlay/vdoninja-guest.html`, hardcoded neon-green there) and the roster
 members (accent-colored here). Idle members sit at reduced
 opacity/brightness; speaking members brighten and gain the ring + bloom.
+
+## Nameplates
+
+Guests with a **guest directory** entry (control page: Nameplates & Guest
+Directory) get a nameplate — display name + rotating social handles — on two
+surfaces: a lower-third inside `vdoninja-guest.html`, and the standalone
+`nameplate.html?slot=N` source you position freely.
+
+![nameplate](nameplate.png)
+
+The plate look lives in
+`overlay/nameplate-shared.js` and routes everything through `var(--np-*,
+fallback)`:
+
+| Variable | Default | What it drives |
+|---|---|---|
+| `--np-accent` | `34, 211, 238` (cyan) | left edge bar + social icons — an `R, G, B` **triplet** |
+| `--np-bg` | `rgba(10, 14, 18, .72)` | plate backing |
+| `--np-radius` / `--np-pad` | `10px` / `8px 14px` | plate corners / padding |
+| `--np-name-font` | Segoe UI stack | both text rows |
+| `--np-name-size` / `--np-name-weight` / `--np-name-color` | `20px` / `700` / `#eef2f5` | display name |
+| `--np-handle-size` / `--np-handle-color` | `13px` / `#b9c4cd` | social handle text |
+| `--np-icon-size` | `15px` | social platform icon |
+
+**Where to override:** `nameplate.html` declares the full set in its `:root`
+block — edit there (or per-source via URL params). The guest overlay injects its
+CSS from JS, so its plate is styled **via URL params only**.
+
+URL params — `nameplate.html`:
+
+| Param | Values | Meaning |
+|---|---|---|
+| `?slot=` | 1–4 (default 1) | which guest slot to follow |
+| `?accent=` | `cyan` \| `magenta` \| `neon-green` \| `R,G,B` | edge bar + icon color |
+| `?size=` | px | display-name font size (handle/icon scale with it) |
+| `?align=` | `left` \| `center` (default) \| `right` | plate alignment in the source box |
+
+URL params — the guest overlay's built-in lower-third (`vdoninja-guest.html`):
+
+| Param | Values | Meaning |
+|---|---|---|
+| `?nameplate=` | `1` (default) \| `0` | disable the lower-third entirely |
+| `?nppos=` | `bl` (default) \| `br` \| `tl` \| `tr` | which corner of the video |
+| `?npaccent=` | accent name or `R,G,B` | edge bar + icon color |
+| `?npsize=` | px | display-name font size |
+
+Social platform icons are inline SVGs tinted by the accent (`currentColor`):
+`twitch` `discord` `twitter` `bluesky` `youtube` `instagram` `tiktok` `website`
+— an unknown platform falls back to the `website` globe. One handle renders
+static; two or more rotate on a 5 s cycle.

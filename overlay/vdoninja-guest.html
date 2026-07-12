@@ -17,13 +17,22 @@
     • discord — a placeholder showing the bound Discord user's avatar, lit up when
                 they speak (fed by the Discord bridge sidecar).
 
+  A guest matched by the payload's `directory` (control page: Nameplates & Guest
+  Directory) also gets a lower-third nameplate — display name + rotating social
+  handles. No directory entry → no nameplate.
+
   Config (URL params, since this is http-served): ?slot=N · ?sbport=<n> · ?sbdebug=1
+    ?nameplate=0             disable the lower-third (default on)
+    ?nppos=bl|br|tl|tr       nameplate corner (default bl = bottom-left)
+    ?npaccent=<name|R,G,B>   accent: cyan | magenta | neon-green | triplet
+    ?npsize=<px>             display-name font size (handle/icon scale with it)
 -->
 <script>
   // The sync action replays both cached blobs on connect (see actions/vdo-sync.cs).
   window.__SB_SYNC_ACTION = 'VDO Sync';
 </script>
 <script src="panel-client-sb.js"></script>
+<script src="nameplate-shared.js"></script>
 </head>
 <body>
 <script>
@@ -38,6 +47,12 @@
     return Number.isFinite(n) && n >= 1 ? n : 1;
   }
   const SLOT = resolveSlot();
+
+  const Q = new URLSearchParams(location.search);
+  const NP_ON = Q.get('nameplate') !== '0'; // lower-third on by default
+  const NP_POS = ['bl', 'br', 'tl', 'tr'].includes(Q.get('nppos')) ? Q.get('nppos') : 'bl';
+  const NP_ACCENT = GRNameplate.accentTriplet(Q.get('npaccent'));
+  const NP_SIZE = parseInt(Q.get('npsize'), 10) || 0;
 
   // Transparent + size-agnostic: the OBS source dimensions decide. The speaking
   // glow reuses the neon-green (57,255,20) language shared with the roster overlay.
@@ -56,7 +71,14 @@
       'animation:dpfp-blink .9s ease-in-out infinite}' +
     '@keyframes dpfp-blink{' +
       '0%,100%{box-shadow:0 0 0 3px rgba(57,255,20,.9),0 0 12px 3px rgba(57,255,20,.6)}' +
-      '50%{box-shadow:0 0 0 3px rgba(57,255,20,1),0 0 26px 8px rgba(57,255,20,1)}}';
+      '50%{box-shadow:0 0 0 3px rgba(57,255,20,1),0 0 26px 8px rgba(57,255,20,1)}}' +
+    // Nameplate positioning only — the plate's own look lives in
+    // nameplate-shared.js (var(--np-*)-driven, docs/THEMING.md).
+    '.np-plate{position:absolute;z-index:3;max-width:calc(100% - 24px)}' +
+    'body[data-nppos="bl"] .np-plate{left:12px;bottom:12px}' +
+    'body[data-nppos="br"] .np-plate{right:12px;bottom:12px}' +
+    'body[data-nppos="tl"] .np-plate{left:12px;top:12px}' +
+    'body[data-nppos="tr"] .np-plate{right:12px;top:12px}';
   document.head.appendChild(style);
 
   const frame = document.createElement('iframe');
@@ -73,6 +95,14 @@
   dpfpImg.alt = '';
   dpfp.appendChild(dpfpImg);
   document.body.appendChild(dpfp);
+
+  // Lower-third nameplate (?nameplate=0 → never created; a test asserts absence).
+  let plate = null;
+  if (NP_ON) {
+    GRNameplate.injectCss();
+    document.body.dataset.nppos = NP_POS;
+    plate = GRNameplate.buildPlate(document.body, { accent: NP_ACCENT, nameSizePx: NP_SIZE });
+  }
 
   let lastUrl = '';
   let lastVdo = null;       // latest vdoninja config payload (slots, room, flags…)
@@ -113,6 +143,9 @@
     const mine = slotFor(lastVdo);
     if (mine && mine.mode === 'discord') renderDiscord(mine);
     else renderWebcam(lastVdo, mine);
+    // setEntry is signature-deduped, so the ~10/s voice feed never restarts the
+    // social rotator mid-cycle.
+    if (plate) plate.setEntry(GRNameplate.resolvePlateEntry(lastVdo, SLOT));
   }
 
   function renderWebcam(v, mine) {

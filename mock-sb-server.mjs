@@ -124,6 +124,7 @@ function landingHtml() {
 <h2>Overlays (open as OBS Browser Sources or tabs)</h2>
 <ul>
 ${link(`/overlay/vdoninja-guest.html?slot=1&sbport=${WS_PORT}`, 'Guest slot 1')}
+${link(`/overlay/nameplate.html?slot=1&sbport=${WS_PORT}`, 'Nameplate (slot 1, standalone)')}
 ${link(`/overlay/discord-roster.html?layout=row&sbport=${WS_PORT}`, 'Discord roster (row)')}
 ${link(`/overlay/discord-roster.html?layout=grid&sbport=${WS_PORT}`, 'Discord roster (grid)')}
 </ul>

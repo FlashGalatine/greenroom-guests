@@ -5,8 +5,9 @@
 //   [1] transport — the REAL overlay/panel-client-sb.js runs in a minimal browser
 //       sandbox (real `ws` WebSocket): Subscribe ack shape, DoAction "VDO Sync" fired
 //       on connect, and SILENCE when both caches are empty.
-//   [2] VDO Push — full payload round-trip (slots + labels + invite intact), the
-//       persisted-cache replay to a late joiner via VDO Sync, /mock/state parses.
+//   [2] VDO Push — full payload round-trip (slots + labels + invite + guest
+//       directory intact), the persisted-cache replay to a late joiner via
+//       VDO Sync, /mock/state parses.
 //   [3] Discord Voice Push — settings/rpc/favorites/current intact; VDO Sync replays
 //       BOTH caches vdo-first; after /mock/restart (SB restart analog) VDO Sync
 //       replays ONLY the persisted vdoninja blob.
@@ -14,7 +15,8 @@
 //       broadcasts and echoes state changes back through the REAL bus path.
 //   [5] defensive parser — control/vdo-parse.js never throws on malformed guestLists.
 //   [6] HTTP + tripwires — SB-style Path->Folder serving, load-bearing strings in
-//       every wired file, and control.html must NOT contain "botToken".
+//       every wired file (incl. the nameplate surfaces + the director-min
+//       directory strip-guard), and control.html must NOT contain "botToken".
 //
 // It does NOT render pixels; verify-render.mjs does that in a real browser.
 
@@ -175,6 +177,11 @@ const VDO_PAYLOAD = {
     fps: '', codec: '', audioBitrate: '', stereo: false, noVideo: false, noAudio: false, capture: '',
     broadcast: false, meshcast: false, autostart: false, requireApproval: false, roomCap: '', extraFlags: '',
   },
+  directory: [
+    { vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime',
+      socials: [{ platform: 'twitch', handle: 'AlphaPrimeTV' }, { platform: 'bluesky', handle: '@alpha.bsky' }] },
+    { vdoLabel: '', discordUserId: '110457699291906048', displayName: 'Ashe of Outland', socials: [] },
+  ],
 };
 
 const DISCORD_PAYLOAD = {
@@ -227,6 +234,11 @@ async function main() {
     check('slot 1 label+streamID intact (superset field `label`)', v1.vdoninja.slots[0].label === 'ALPHA' && v1.vdoninja.slots[0].streamID === 'aaa111');
     check('slot 3 discord mode + discordUserId intact', v1.vdoninja.slots[2].mode === 'discord' && v1.vdoninja.slots[2].discordUserId === '110457699291906048');
     check('invite block carried (control-page rehydration source)', v1.vdoninja.invite && v1.vdoninja.invite.passwordMode === 'hash' && v1.vdoninja.enabled === true);
+    check('directory carried (guest-directory/nameplate source)',
+      Array.isArray(v1.vdoninja.directory) && v1.vdoninja.directory.length === 2
+      && v1.vdoninja.directory[0].displayName === 'Alpha Prime'
+      && v1.vdoninja.directory[0].socials[0].platform === 'twitch'
+      && v1.vdoninja.directory[1].discordUserId === '110457699291906048');
 
     const shimB = await runShim();
     const v2 = await shimB.inbox.next(4000, byType('vdoninja:update'), 'late-joiner vdoninja:update');
@@ -356,9 +368,19 @@ async function main() {
     const guestRes = await fetch(`${BASE}/overlay/vdoninja-guest.html`);
     const guestBody = await guestRes.text();
     check('/overlay/vdoninja-guest.html 200 + wired (vdoninja:update, shim)', guestRes.status === 200 && guestBody.includes('vdoninja:update') && guestBody.includes('panel-client-sb.js'));
+    check('guest overlay wired for nameplates (nameplate-shared.js)', guestBody.includes('nameplate-shared.js'));
     const rosterRes = await fetch(`${BASE}/overlay/discord-roster.html`);
     const rosterBody = await rosterRes.text();
     check('/overlay/discord-roster.html 200 + wired (discord:voice:update, CSS vars)', rosterRes.status === 200 && rosterBody.includes('discord:voice:update') && rosterBody.includes('--accent'));
+    check('roster overlay consumes the directory (vdoninja:update)', rosterBody.includes('vdoninja:update'));
+    const npRes = await fetch(`${BASE}/overlay/nameplate.html`);
+    const npBody = await npRes.text();
+    check('/overlay/nameplate.html 200 + wired (vdoninja:update, both scripts)',
+      npRes.status === 200 && npBody.includes('vdoninja:update') && npBody.includes('panel-client-sb.js') && npBody.includes('nameplate-shared.js'));
+    const npjsRes = await fetch(`${BASE}/overlay/nameplate-shared.js`);
+    const npjsBody = await npjsRes.text();
+    check('/overlay/nameplate-shared.js 200 javascript + exports GRNameplate',
+      npjsRes.status === 200 && (npjsRes.headers.get('content-type') || '').includes('javascript') && npjsBody.includes('GRNameplate'));
     const ctrlRes = await fetch(`${BASE}/control/control.html`);
     const ctrlBody = await ctrlRes.text();
     check('/control/control.html 200 + wired (VDO Push, Discord Voice Command, VDO Sync)',
@@ -367,6 +389,7 @@ async function main() {
     const minRes = await fetch(`${BASE}/control/director-min.html`);
     const minBody = await minRes.text();
     check('/control/director-min.html 200 + wired (VDO Push, vdo-parse.js)', minRes.status === 200 && minBody.includes("'VDO Push'") && minBody.includes('vdo-parse.js'));
+    check('TRIPWIRE: director-min carries the directory through its pushes (strip guard)', minBody.includes('directory:'));
     const mockDirRes = await fetch(`${BASE}/mock/vdo-director.html`);
     check('/mock/vdo-director.html 200 + speaks getGuestList', mockDirRes.status === 200 && (await mockDirRes.text()).includes('getGuestList'));
     const nsCtrl = await fetch(`${BASE}/greenroom-control/control.html`);

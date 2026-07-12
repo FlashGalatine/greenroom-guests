@@ -14,12 +14,17 @@
 //        errors, member count stable, speaking classes actually mutate.
 //   [R5] control.html: hydrates from the persisted cache, an edit fires a captured
 //        VDO Push, USE on a favorite fires set-current, live status pill.
+//   [R6] nameplates: the standalone nameplate.html renders the directory entry
+//        (name + socials), the rotator advances, an unmatched live guest stays
+//        hidden, and ?nameplate=0 keeps the guest overlay plate-free. R1/R2 also
+//        assert the guest overlay's built-in lower-third through the real
+//        director loop (which doubles as the director-min strip-guard at runtime).
 //
 // Requires a Chromium channel on the machine (system Edge/Chrome):
 //   npm install --no-save playwright-core
 // External hosts (vdo.ninja, Discord CDN) are route-blocked — we assert iframe/img
 // URL assembly and classes, never remote content. Screenshots (gitignored):
-// roster-check.png, control-check.png.
+// roster-check.png, control-check.png, nameplate-check.png.
 
 import { spawn } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
@@ -76,15 +81,26 @@ const VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cl
 const STREAMER = '110457699291906048';
 const slot = (n, extra) => Object.assign({ slot: n, label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' }, extra);
 
+// Guest directory: 'alpha' is lowercase ON PURPOSE — the live label is 'ALPHA',
+// proving the case-insensitive match. Guest One / BRAVO have no entry (the
+// no-fallback rule).
+const DIRECTORY = [
+  { vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime',
+    socials: [{ platform: 'twitch', handle: 'AlphaPrimeTV' }, { platform: 'bluesky', handle: '@alpha.bsky' }] },
+  { vdoLabel: '', discordUserId: STREAMER, displayName: 'Ashe of Outland',
+    socials: [{ platform: 'twitch', handle: 'AsheTV' }] },
+];
 const SEED_VDO = {
   enabled: true, room: 'testroom', password: 'pw1', viewFlags: VIEWFLAGS,
   slots: [slot(1, { label: 'ALPHA' }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)],
   invite: { passwordMode: 'hash' },
+  directory: DIRECTORY,
 };
 const DISCORD_SLOT_VDO = {
   enabled: true, room: 'testroom', password: 'pw1', viewFlags: VIEWFLAGS,
   slots: [slot(1, { mode: 'discord', discordUserId: STREAMER }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)],
   invite: { passwordMode: 'hash' },
+  directory: DIRECTORY,
 };
 const embed = (n) => `https://cdn.discordapp.com/embed/avatars/${n}.png`;
 const ROSTER_STATE = (patch) => JSON.stringify(Object.assign({
@@ -136,13 +152,27 @@ async function main() {
     check('slot 1 iframe assembles the ALPHA view URL (room+password+viewFlags)', gotAlpha,
       await guestPage.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
 
+    // The resolving push came from director-min's own re-assembly, so this also
+    // proves it carries the directory through (the strip guard) at runtime.
+    const plateShown = await wait(guestPage, () => {
+      const p = document.querySelector('.np-plate');
+      return p && !p.hidden && p.querySelector('.np-name')?.textContent === 'Alpha Prime'
+        && (p.querySelector('.np-rot')?.textContent || '').includes('AlphaPrimeTV');
+    }, null, 8000);
+    check('lower-third renders from the directory (case-insensitive label match)', plateShown,
+      await guestPage.evaluate(() => document.querySelector('.np-plate')?.outerHTML?.slice(0, 200)));
+
     const wentBlank = await wait(guestPage, () => (document.getElementById('frame')?.getAttribute('src') || '') === 'about:blank', null, 15000);
     check('ALPHA leaves → slot 1 blanks (no stale view URL)', wentBlank,
       await guestPage.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+    const plateHid = await wait(guestPage, () => document.querySelector('.np-plate')?.hidden === true, null, 6000);
+    check('guest left → nameplate hides with the slot', plateHid);
 
     const swapped = await wait(guestPage, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa333'), null, 20000);
     check('ALPHA REJOINS with a new streamID → slot 1 auto-follows to aaa333', swapped,
       await guestPage.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+    const plateBack = await wait(guestPage, () => document.querySelector('.np-plate')?.hidden === false, null, 6000);
+    check('rejoin → nameplate re-shows', plateBack);
 
     const log1 = await (await fetch(`${BASE}/mock/actions`)).json();
     const pushes = log1.actions.filter((a) => a.name === 'VDO Push').map((a) => a.args && a.args.payload);
@@ -162,6 +192,12 @@ async function main() {
     }, null, 8000);
     check('discord mode: iframe blanked, PFP visible with avatar URL', pfpShown,
       await guestPage.evaluate(() => document.getElementById('dpfp')?.querySelector('img')?.getAttribute('src')));
+
+    const discPlate = await wait(guestPage, () => {
+      const p = document.querySelector('.np-plate');
+      return p && !p.hidden && p.querySelector('.np-name')?.textContent === 'Ashe of Outland';
+    }, null, 6000);
+    check('discord-mode slot renders the directory nameplate (userId match)', discPlate);
 
     const talking = JSON.parse(ROSTER_STATE());
     talking.users[STREAMER].speaking = true;
@@ -189,8 +225,12 @@ async function main() {
       deafBadgeShown: getComputedStyle(document.querySelector('.member[data-uid="200000000000000002"] .badge.deaf')).display !== 'none',
     }));
     check('mute + deaf badges shown on the right members', badges.mute && badges.deaf && badges.muteBadgeShown && badges.deafBadgeShown, JSON.stringify(badges));
+    // The sync replay carries DISCORD_SLOT_VDO.directory, so the streamer's chip
+    // is labeled with the directory override, not the live Discord name.
     const label = await rosterPage.evaluate(() => document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent);
-    check("name labels render ('Ashe')", label === 'Ashe', label);
+    check("directory override labels the streamer chip ('Ashe of Outland')", label === 'Ashe of Outland', label);
+    const rawLabel = await rosterPage.evaluate(() => document.querySelector('.member[data-uid="200000000000000001"] .name')?.textContent);
+    check("no directory entry → live username ('Guest One')", rawLabel === 'Guest One', rawLabel);
     await rosterPage.screenshot({ path: resolve(__dirname, 'roster-check.png') });
 
     const noLabels = await newPage(browser, { width: 900, height: 240 });
@@ -280,8 +320,46 @@ async function main() {
     check('USE on a favorite fires Discord Voice Command set-current', useSent);
 
     await ctrlPage.screenshot({ path: resolve(__dirname, 'control-check.png'), fullPage: true });
-    console.log('  screenshots → roster-check.png, control-check.png');
     await ctrlPage.close();
+
+    // ── R6: nameplates — standalone page, rotator, no-fallback, hide toggle ─────
+    // Control page is closed → no director runs, so the pushed state is
+    // deterministic (pre-resolved streamIDs).
+    console.log('\n[R6] nameplates: standalone page, rotator, unmatched → hidden, ?nameplate=0');
+    const NAMEPLATE_VDO = { ...SEED_VDO,
+      slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)] };
+    prod.doAction('VDO Push', { payload: JSON.stringify(NAMEPLATE_VDO) });
+
+    const npPage = await newPage(browser, { width: 420, height: 120 });
+    await npPage.goto(`${BASE}/overlay/nameplate.html?slot=1&sbport=${WS_PORT}`, { waitUntil: 'load' });
+    const npShown = await wait(npPage, () => {
+      const p = document.querySelector('.np-plate');
+      return p && !p.hidden && p.querySelector('.np-name')?.textContent === 'Alpha Prime'
+        && (p.querySelector('.np-rot')?.textContent || '').includes('AlphaPrimeTV');
+    }, null, 8000);
+    check('standalone nameplate renders name + first social', npShown,
+      await npPage.evaluate(() => document.querySelector('.np-plate')?.outerHTML?.slice(0, 200)));
+    const rotated = await wait(npPage, () => (document.querySelector('.np-rot')?.textContent || '').includes('@alpha.bsky'), null, 9000);
+    check('social rotator advances to the second handle (5 s cycle)', rotated);
+    await npPage.screenshot({ path: resolve(__dirname, 'nameplate-check.png') });
+    await npPage.close();
+
+    const npPage2 = await newPage(browser, { width: 420, height: 120 });
+    await npPage2.goto(`${BASE}/overlay/nameplate.html?slot=2&sbport=${WS_PORT}`, { waitUntil: 'load' });
+    await wait(npPage2, () => !!document.querySelector('.np-plate'), null, 4000);
+    await new Promise((r) => setTimeout(r, 1200)); // let the sync replay land
+    const npHidden = await npPage2.evaluate(() => document.querySelector('.np-plate')?.hidden === true);
+    check('live but unmatched guest (BRAVO) → standalone nameplate stays hidden (no fallback)', npHidden);
+    await npPage2.close();
+
+    const gp0 = await newPage(browser, { width: 640, height: 360 });
+    await gp0.goto(`${BASE}/overlay/vdoninja-guest.html?slot=1&nameplate=0&sbport=${WS_PORT}`, { waitUntil: 'load' });
+    const gp0Rendering = await wait(gp0, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 8000);
+    const gp0NoPlate = await gp0.evaluate(() => !document.querySelector('.np-plate'));
+    check('?nameplate=0 → guest overlay renders video with NO plate ever created', gp0Rendering && gp0NoPlate);
+    await gp0.close();
+
+    console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {
     failed++;
     console.log('\n  ERROR ' + ((err && err.stack) || err));

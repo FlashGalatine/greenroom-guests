@@ -9,6 +9,9 @@ Discord voice-channel overlay (the StreamKit-style roster, rebuilt): avatars
 with a speaking glow, **mute/deaf badges**, streamer-first ordering, themeable
 with CSS variables. A guest slot can also show a Discord user's avatar instead
 of a camera — the "voice-only guest" placeholder that lights up when they talk.
+A **guest directory** maps a VDO.ninja label and/or Discord user to an on-stream
+display name + social handles, rendered as a **nameplate** (lower-third in the
+slot, or a freely positioned standalone source) whenever that guest is live.
 
 ![roster](docs/roster-row.png)
 
@@ -51,6 +54,11 @@ still paints (every page replays state via the `VDO Sync` action on connect).
    enable the director, and bind slots to guest labels. Keep one director page
    open (a 1×1 source running `director-min.html` is the set-and-forget option).
    The invite builder hands you guest links (`&hash=` password mode included).
+4. *(optional)* Add guests to **Nameplates & Guest Directory** for on-stream
+   names + socials. The lower-third appears in each slot automatically
+   (`?nameplate=0` to hide); for a freely positioned plate add
+   `…/greenroom-overlay/nameplate.html?slot=1` as its own source
+   (docs/THEMING.md).
 
 **B — add Discord voice (roster overlay + voice-only slots):**
 1. `cd sidecar && npm install` (Node ≥ 22.12).
@@ -71,6 +79,7 @@ black in a `file://` parent and `file://` sources ignore URL params.
 control/    control.html (director + slot editor + invite builder + Discord section)
             director-min.html (1×1 always-on director) · vdo-parse.js (defensive parser)
 overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|grid)
+            nameplate.html (?slot=N standalone nameplate) · nameplate-shared.js
             panel-client-sb.js (SB transport shim)
 actions/    the five Streamer.bot C# actions (paste + compile)
 sidecar/    discord-bridge.mjs (optional discord.js bot) · its package.json
@@ -86,15 +95,18 @@ There are deliberately no per-slot HTML stubs: stubs only ever served OBS
 
 ```
 npm install          # root dev deps (ws)
-npm run verify       # 64 checks: transport, both push round-trips, persisted-vs-
-                     # non-persisted restart semantics, the command bus, the REAL
-                     # sidecar token-less over the bus, malformed-guestList parser,
-                     # HTTP serving + tripwires (incl. "no token string in control.html")
+npm run verify       # 70 checks: transport, both push round-trips (incl. the guest
+                     # directory), persisted-vs-non-persisted restart semantics, the
+                     # command bus, the REAL sidecar token-less over the bus,
+                     # malformed-guestList parser, HTTP serving + tripwires (incl.
+                     # "no token string in control.html" and the director-min
+                     # directory strip-guard)
 npm install --no-save playwright-core
-npm run verify:render  # 23 real-browser checks: guest slot URL assembly + the
+npm run verify:render  # 32 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,
-                       # PFP glow, roster badges/order/hide, a 20-user 100 ms burst,
-                       # control page hydrate/edit/USE
+                       # nameplates (lower-third + standalone + rotator + hide rules),
+                       # PFP glow, roster badges/order/hide + directory name override,
+                       # a 20-user 100 ms burst, control page hydrate/edit/USE
 npm start            # mock Streamer.bot (:7474/:8080) for hands-on dev
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
 ```

@@ -11,8 +11,13 @@
   OBS Browser Source URL (docs/STREAMERBOT-SETUP.md):
     http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row
 
-  Fed by the Discord bridge sidecar's `discord:voice:update`. Config precedence per
-  render: URL param > payload settings block > built-in default (docs/THEMING.md):
+  Fed by the Discord bridge sidecar's `discord:voice:update`. It also consumes
+  `vdoninja:update` for the guest `directory` (control page: Nameplates & Guest
+  Directory): a member whose user id matches a directory entry is labeled with
+  that entry's displayName instead of their live Discord name.
+
+  Config precedence per render: URL param > payload settings block > built-in
+  default (docs/THEMING.md):
 
     ?layout=row|grid       row = one horizontal strip (default); grid = wrapping panel
     ?labels=0|1            show usernames under avatars (default 1)
@@ -108,6 +113,7 @@
   window.__SB_SYNC_ACTION = 'VDO Sync';
 </script>
 <script src="panel-client-sb.js"></script>
+<script src="nameplate-shared.js"></script><!-- directory lookup only (no injectCss) -->
 </head>
 <body>
 <div id="stage"><div id="roster" class="layout-row"></div></div>
@@ -140,6 +146,7 @@
 
   const roster = document.getElementById('roster');
   let lastDiscord = null;
+  let directory = []; // sanitized guest directory (rides vdoninja:update)
   let lastSig = '';
   const nodes = new Map(); // uid -> { root, img, name }
 
@@ -262,7 +269,10 @@
       if (!u || !n) continue;
       const avatarUrl = u.avatarUrl || defaultAvatar(uid);
       if (n.img.getAttribute('src') !== avatarUrl) n.img.src = avatarUrl;
-      const label = u.username || uid;
+      // Directory override happens here (outside the membership sig) so a
+      // directory edit restyles chips live without a rebuild.
+      const dirEntry = GRNameplate.findByUserId(directory, uid);
+      const label = (dirEntry && dirEntry.displayName) || u.username || uid;
       if (n.name.textContent !== label) { n.name.textContent = label; n.name.title = label; }
       n.root.classList.toggle('streamer', uid === cfg.streamer);
       n.root.classList.toggle('speaking', !!u.speaking);
@@ -277,8 +287,14 @@
     if (msg.type === 'discord:voice:update') {
       lastDiscord = msg.discordVoice || null;
       render();
-    } else if (msg.type === 'sync' && msg.discordVoice !== undefined) {
-      lastDiscord = msg.discordVoice || null;
+    } else if (msg.type === 'vdoninja:update') {
+      // Stored and applied on every render — VDO Sync replays vdo before
+      // discord, so never assume arrival order.
+      directory = GRNameplate.sanitizeDirectory(msg.vdoninja && msg.vdoninja.directory);
+      render();
+    } else if (msg.type === 'sync') {
+      if (msg.vdoninja !== undefined) directory = GRNameplate.sanitizeDirectory(msg.vdoninja && msg.vdoninja.directory);
+      if (msg.discordVoice !== undefined) lastDiscord = msg.discordVoice || null;
       render();
     }
   });

@@ -63,6 +63,7 @@ All **Browser Source → URL** (never "Local file"):
 | Source | URL |
 |---|---|
 | Guest slot 1–4 | `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`) |
+| Guest nameplate *(optional)* | `http://127.0.0.1:7474/greenroom-overlay/nameplate.html?slot=1` — freely positioned name + socials plate (e.g. under the cam frame). The slot overlay also has a built-in lower-third; `?nameplate=0` hides it (docs/THEMING.md) |
 | Discord roster | `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` |
 | Always-on director | `http://127.0.0.1:7474/greenroom-control/director-min.html` as a **1×1 px** source |
 

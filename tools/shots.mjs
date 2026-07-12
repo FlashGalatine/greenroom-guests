@@ -65,6 +65,12 @@ async function main() {
         { slot: 4, label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' },
       ],
       invite: { passwordMode: 'hash' },
+      directory: [
+        { vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime',
+          socials: [{ platform: 'twitch', handle: 'AlphaPrimeTV' }] },
+        { vdoLabel: '', discordUserId: STREAMER, displayName: 'Ashe of Outland',
+          socials: [{ platform: 'twitch', handle: 'AsheTV' }] },
+      ],
     }) });
     prod.doAction('Discord Voice Push', { payload: JSON.stringify({
       channelId: '222', connected: true, hostInChannel: true,
@@ -95,6 +101,7 @@ async function main() {
 
     await shoot(`${BASE}/overlay/discord-roster.html?layout=row&sbport=${WS_PORT}`, { width: 460, height: 150 }, 'roster-row.png');
     await shoot(`${BASE}/overlay/discord-roster.html?layout=grid&theme=plain&sbport=${WS_PORT}`, { width: 340, height: 240 }, 'roster-grid-plain.png');
+    await shoot(`${BASE}/overlay/nameplate.html?slot=1&sbport=${WS_PORT}`, { width: 300, height: 90 }, 'nameplate.png');
     await shoot(`${BASE}/control/control.html?sbport=${WS_PORT}`, { width: 920, height: 1200 }, 'control-page.png', 1600, true);
   } finally {
     if (prod) prod.close();

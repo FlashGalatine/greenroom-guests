@@ -6,8 +6,10 @@
 <!--
   Greenroom director-min — the always-on 1×1 variant of the control page: hidden
   vdo.ninja director iframe + the 2.5 s label→streamID resolution loop + VDO Push.
-  NO editor UI — it adopts its config (room/password/slot labels) from the
-  persisted vdo.state that "VDO Sync" replays, and from any control.html pushes.
+  NO editor UI — it adopts its config (room/password/slot labels, and the guest
+  `directory` which it carries through untouched so its pushes never strip it)
+  from the persisted vdo.state that "VDO Sync" replays, and from any
+  control.html pushes.
 
   Deploy as a tiny always-on OBS Browser Source (e.g. 1×1 px in a corner of every
   scene collection you stream with):
@@ -57,13 +59,42 @@
     for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
     return out;
   }
-  let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {} };
+  let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {}, directory: [] };
   let roster = [];
   let hasRoster = false;
   let hydrated = false;
   let lastPushedSig = '';
   let frameUrl = '';
   let pollTimer = null;
+
+  // ── Guest-directory sanitizers ──────────────────────────────────────────
+  // KEEP IN SYNC with the copies in control.html and overlay/nameplate-shared.js
+  // (same semantics, same key order). Idempotent by construction.
+  function sanitizeSocials(raw) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const s of raw) {
+      if (!s || typeof s !== 'object') continue;
+      const platform = String(s.platform ?? '').trim().toLowerCase();
+      const handle = String(s.handle ?? '').trim();
+      if (!platform || !handle) continue;
+      out.push({ platform, handle });
+    }
+    return out;
+  }
+  function sanitizeDirectory(raw) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const e of raw) {
+      if (!e || typeof e !== 'object') continue;
+      const vdoLabel = String(e.vdoLabel ?? '').trim();
+      const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
+      const displayName = String(e.displayName ?? '').trim();
+      if (!displayName || (!vdoLabel && !discordUserId)) continue;
+      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials) });
+    }
+    return out;
+  }
 
   function adoptCfg(v) {
     if (!v || typeof v !== 'object') return;
@@ -88,6 +119,7 @@
       viewFlags: String(v.viewFlags ?? ''),
       slots,
       invite: (v.invite && typeof v.invite === 'object') ? v.invite : {},
+      directory: sanitizeDirectory(v.directory),
     };
   }
 
@@ -108,7 +140,8 @@
       };
     });
     return { enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
-      viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {} };
+      viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {},
+      directory: sanitizeDirectory(cfg.directory) };
   }
 
   // This page only ever pushes ROSTER-driven resolutions (it has no editor), so

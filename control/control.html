@@ -15,7 +15,9 @@
   State lives in Streamer.bot's persisted `vdo.state` global, not in this page: on
   connect it fires "VDO Sync" and hydrates from the replayed vdoninja:update; every
   edit and every resolution change re-assembles the FULL payload and fires
-  "VDO Push". The Discord section drives the bridge sidecar via
+  "VDO Push". The Nameplates &amp; Guest Directory section rides the same payload
+  (top-level `directory`, docs/PROTOCOL.md) — the nameplate overlays and the
+  roster overlay consume it. The Discord section drives the bridge sidecar via
   "Discord Voice Command" broadcasts. The Discord bot token is deliberately NOT
   configurable here — it lives file-only in sidecar/discord-tokens.json, because
   every broadcast on this bus reaches every subscribed client.
@@ -78,6 +80,16 @@
   .vdo-slot-src { display: inline-flex; gap: 4px; align-items: center; margin-left: auto; }
   .vdo-slot-src .vdo-src-copy, .vdo-slot-src .btn-open { font-size: 12px; padding: 4px 9px; }
 
+  /* Guest directory (nameplates) */
+  .vdo-dir-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; margin: 0 0 6px;
+    background: var(--panel2); }
+  .vdo-dir-label, .vdo-dir-display { width: 16ch; }
+  .vdo-dir-discord-id { width: 20ch; font-family: Consolas, monospace; }
+  .vdo-dir-row textarea.vdo-dir-socials { flex-basis: 100%; min-height: 38px; }
+  .vdo-dir-remove { border-color: var(--red); color: var(--red); padding: 4px 9px; margin-left: auto; }
+  .np-src-copy { font-size: 12px; padding: 4px 9px; }
+
   /* Invite grid */
   .vdo-invite-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 6px 12px; margin: 0 0 10px; }
@@ -135,6 +147,24 @@
   <section>
     <h2>Guest Slots</h2>
     <div id="vdoSlots"></div>
+  </section>
+
+  <section>
+    <h2>Nameplates &amp; Guest Directory</h2>
+    <div class="hint" style="margin-bottom:10px">Map a vdo.ninja <b>label</b> and/or a Discord user to an
+      on-stream display name + rotating social handles (one per line: <code>platform handle</code>,
+      e.g. <code>twitch TyrannyTimeTV</code>). Matched guests get a lower-third inside their slot
+      overlay (hide with <code>?nameplate=0</code>) and on the standalone
+      <code>nameplate.html?slot=N</code> source. No entry &rarr; no nameplate.</div>
+    <div id="vdoDirectory"></div>
+    <div class="row">
+      <button id="btnDirAdd">Add guest</button>
+      <span class="hint" style="margin-left:8px">standalone source URL:</span>
+      <button type="button" class="np-src-copy" data-np-slot="1">Copy #1</button>
+      <button type="button" class="np-src-copy" data-np-slot="2">Copy #2</button>
+      <button type="button" class="np-src-copy" data-np-slot="3">Copy #3</button>
+      <button type="button" class="np-src-copy" data-np-slot="4">Copy #4</button>
+    </div>
   </section>
 
   <section>
@@ -252,7 +282,7 @@
   const els = {
     sbStatus: $('sbStatus'), vdoStatus: $('vdoStatus'), dvoStatus: $('dvoStatus'),
     room: $('vdoRoom'), password: $('vdoPassword'), viewFlags: $('vdoViewFlags'), enabled: $('vdoEnabled'),
-    slots: $('vdoSlots'), director: $('vdoDirector'), cryptoWarn: $('cryptoWarn'),
+    slots: $('vdoSlots'), directory: $('vdoDirectory'), director: $('vdoDirector'), cryptoWarn: $('cryptoWarn'),
     inviteLink: $('vdoInviteLink'), manageLink: $('vdoManageLink'),
     favs: $('dvoFavorites'), favName: $('dvoName'), favServer: $('dvoServerId'), favChannel: $('dvoChannelId'),
   };
@@ -283,16 +313,65 @@
     for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
     return out;
   }
-  let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(), invite: defaultInvite() };
+  let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(), invite: defaultInvite(), directory: [] };
   let roster = [];          // live [{label, streamID}] from the director iframe
   let hasRoster = false;    // at least one director reply this session
   let discord = null;       // last discordVoice payload
   let hydrated = false;     // set by the first vdoninja:update (or the timeout)
   let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
   let slotsSig = '';
+  let dirSig = '';
   let favsSig = '';
   let frameUrl = '';
   let pollTimer = null;
+
+  // ── Guest-directory sanitizers ────────────────────────────────────────────
+  // KEEP IN SYNC with the copies in director-min.html and
+  // overlay/nameplate-shared.js (same semantics, same key order). Idempotent by
+  // construction — the hydration baseline below depends on it.
+  function sanitizeSocials(raw) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const s of raw) {
+      if (!s || typeof s !== 'object') continue;
+      const platform = String(s.platform ?? '').trim().toLowerCase();
+      const handle = String(s.handle ?? '').trim();
+      if (!platform || !handle) continue;
+      out.push({ platform, handle });
+    }
+    return out;
+  }
+  function sanitizeDirectory(raw) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const e of raw) {
+      if (!e || typeof e !== 'object') continue;
+      const vdoLabel = String(e.vdoLabel ?? '').trim();
+      const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
+      const displayName = String(e.displayName ?? '').trim();
+      if (!displayName || (!vdoLabel && !discordUserId)) continue;
+      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials) });
+    }
+    return out;
+  }
+  // Textarea grammar — one social per line: "platform handle", split on the
+  // FIRST space (the handle may itself contain spaces). Control-page only;
+  // the wire always carries {platform, handle} objects.
+  function parseSocialsText(text) {
+    const out = [];
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const t = line.trim();
+      const sp = t.indexOf(' ');
+      if (sp <= 0) continue;
+      const platform = t.slice(0, sp).toLowerCase();
+      const handle = t.slice(sp + 1).trim();
+      if (handle) out.push({ platform, handle });
+    }
+    return out;
+  }
+  function socialsToText(socials) {
+    return (socials || []).map((s) => s.platform + ' ' + s.handle).join('\n');
+  }
 
   // Tolerant adoption of a broadcast payload (superset-safe, same spirit as the
   // old vdoninja-config.js sanitizers).
@@ -319,6 +398,7 @@
       viewFlags: String(v.viewFlags ?? DEFAULT_VIEWFLAGS),
       slots,
       invite: Object.assign(defaultInvite(), (v.invite && typeof v.invite === 'object') ? v.invite : {}),
+      directory: sanitizeDirectory(v.directory),
     };
   }
 
@@ -381,6 +461,7 @@
       discord = d.discordVoice || null;
       renderDiscordSection();
       renderSlots(); // pick-from-channel options (membership-sig guarded)
+      renderDirectory(); // same options in the directory rows
     } else if (d.type === 'vdo:error' || d.type === 'discord:voice:error') {
       setPill(els.sbStatus, 'SB action error: ' + (d.message || d.type), 'error');
     }
@@ -410,6 +491,7 @@
       viewFlags: cfg.viewFlags || '',
       slots,
       invite: Object.assign(defaultInvite(), cfg.invite),
+      directory: sanitizeDirectory(cfg.directory),
     };
   }
 
@@ -481,6 +563,7 @@
     hasRoster = true;
     setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}`, 'live');
     renderSlots();
+    renderDirectory(); // live-label picker options
     assembleAndPush(true); // auto-follow: re-resolve every poll
   });
 
@@ -496,6 +579,7 @@
     setIfNotFocused(els.viewFlags, cfg.viewFlags);
     setCheck(els.enabled, cfg.enabled);
     renderSlots(true);
+    renderDirectory(true);
     renderInvite();
     rebuildLinks();
     renderDiscordSection();
@@ -616,6 +700,153 @@
       els.slots.appendChild(row);
     }
   }
+
+  // ── Guest directory section (same guards as renderSlots) ──────────────────
+  function renderDirectory(force) {
+    const live = rosterLabels();
+    const sig = JSON.stringify({ dir: cfg.directory, live, dusers: discordUsersSig() });
+    if (!force && sig === dirSig && els.directory.childElementCount) return;
+    if (els.directory.contains(document.activeElement)) return; // operator mid-edit
+    dirSig = sig;
+
+    const users = Object.entries((discord && discord.users) || {});
+    els.directory.innerHTML = '';
+    if (!cfg.directory.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = 'No entries yet — "Add guest" maps a label or Discord user to an on-stream name.';
+      els.directory.appendChild(empty);
+      return;
+    }
+    for (const entry of cfg.directory) {
+      const row = document.createElement('div');
+      row.className = 'vdo-dir-row';
+
+      const labelIn = document.createElement('input');
+      labelIn.type = 'text';
+      labelIn.className = 'vdo-dir-label';
+      labelIn.placeholder = 'VDO label';
+      labelIn.spellcheck = false;
+      labelIn.value = String(entry.vdoLabel ?? '');
+
+      const labelPick = document.createElement('select');
+      labelPick.className = 'vdo-dir-label-pick';
+      labelPick.title = 'Pick a live vdo.ninja label';
+      const l0 = document.createElement('option');
+      l0.value = ''; l0.textContent = live.length ? 'live labels…' : '(no guests live)';
+      labelPick.appendChild(l0);
+      for (const l of live) {
+        const o = document.createElement('option');
+        o.value = l; o.textContent = l;
+        labelPick.appendChild(o);
+      }
+
+      const discIn = document.createElement('input');
+      discIn.type = 'text';
+      discIn.className = 'vdo-dir-discord-id';
+      discIn.placeholder = 'Discord User ID';
+      discIn.inputMode = 'numeric';
+      discIn.value = String(entry.discordUserId ?? '');
+
+      const discPick = document.createElement('select');
+      discPick.className = 'vdo-dir-discord-pick';
+      discPick.title = 'Pick a user currently in the voice channel';
+      const p0 = document.createElement('option');
+      p0.value = ''; p0.textContent = users.length ? 'in channel…' : '(no one in channel)';
+      discPick.appendChild(p0);
+      for (const [uid, u] of users) {
+        const o = document.createElement('option');
+        o.value = uid; o.textContent = (u && u.username) || uid;
+        discPick.appendChild(o);
+      }
+
+      const dispIn = document.createElement('input');
+      dispIn.type = 'text';
+      dispIn.className = 'vdo-dir-display';
+      dispIn.placeholder = 'On-stream display name';
+      dispIn.value = String(entry.displayName ?? '');
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'vdo-dir-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove entry';
+
+      const socialsTa = document.createElement('textarea');
+      socialsTa.className = 'vdo-dir-socials';
+      socialsTa.rows = 2;
+      socialsTa.spellcheck = false;
+      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social';
+      socialsTa.value = socialsToText(entry.socials);
+
+      row.append(labelIn, labelPick, discIn, discPick, dispIn, removeBtn, socialsTa);
+      els.directory.appendChild(row);
+    }
+  }
+
+  // Read the whole directory straight from the DOM (keeps half-complete rows —
+  // only the wire copy is sanitized, exactly like slotsFromDom).
+  function directoryFromDom() {
+    const out = [];
+    for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
+      const val = (cls) => { const el = row.querySelector(cls); return el ? el.value : ''; };
+      out.push({
+        vdoLabel: val('input.vdo-dir-label').trim(),
+        discordUserId: val('input.vdo-dir-discord-id').replace(/\D/g, ''),
+        displayName: val('input.vdo-dir-display').trim(),
+        socials: parseSocialsText(val('textarea.vdo-dir-socials')),
+      });
+    }
+    return out;
+  }
+
+  els.directory.addEventListener('change', (e) => {
+    const row = e.target.closest('.vdo-dir-row');
+    if (!row) return;
+    if (e.target.classList.contains('vdo-dir-label-pick') && e.target.value) {
+      const input = row.querySelector('input.vdo-dir-label');
+      if (input) input.value = e.target.value;
+      e.target.value = '';
+    }
+    if (e.target.classList.contains('vdo-dir-discord-pick') && e.target.value) {
+      const input = row.querySelector('input.vdo-dir-discord-id');
+      if (input) input.value = e.target.value;
+      e.target.value = '';
+    }
+    cfg.directory = directoryFromDom();
+    dirSig = '';
+    assembleAndPush(false);
+  });
+
+  els.directory.addEventListener('click', (e) => {
+    const btn = e.target.closest('.vdo-dir-remove');
+    if (!btn) return;
+    const rows = [...els.directory.querySelectorAll('.vdo-dir-row')];
+    const idx = rows.indexOf(btn.closest('.vdo-dir-row'));
+    if (idx < 0) return;
+    const entries = directoryFromDom();
+    const entry = entries[idx] || {};
+    const hasContent = entry.vdoLabel || entry.discordUserId || entry.displayName || entry.socials.length;
+    if (hasContent && !confirm(`Remove "${entry.displayName || entry.vdoLabel || entry.discordUserId}" from the directory?`)) return;
+    entries.splice(idx, 1);
+    cfg.directory = entries;
+    dirSig = '';
+    btn.blur(); // the focus guard would otherwise skip the forced re-render
+    renderDirectory(true);
+    assembleAndPush(false);
+  });
+
+  $('btnDirAdd').addEventListener('click', () => {
+    cfg.directory = directoryFromDom();
+    cfg.directory.push({ vdoLabel: '', discordUserId: '', displayName: '', socials: [] });
+    dirSig = '';
+    renderDirectory(true);
+    // Focus the draft row so an incoming push (director-min resolving a slot)
+    // can't re-render it away before the operator types anything.
+    const rows = els.directory.querySelectorAll('.vdo-dir-row');
+    const first = rows.length && rows[rows.length - 1].querySelector('input.vdo-dir-label');
+    if (first) first.focus();
+  });
 
   // Read every slot straight from the DOM so two quick changes both land.
   function slotsFromDom() {
@@ -820,7 +1051,7 @@
   // or the mock's short control → overlay), and the same ?sbport the control page
   // carries (dev/mock). Falls back to the documented default over file:// (not a
   // supported deployment). No hardcoded host/port to drift from the real mapping.
-  function guestSourceUrl(slot) {
+  function overlayBaseUrl() {
     let base = 'http://127.0.0.1:7474/greenroom-overlay/';
     if (location.protocol === 'http:' || location.protocol === 'https:') {
       const prefix = location.pathname.split('/').filter(Boolean)[0] || '';
@@ -829,9 +1060,19 @@
         : 'greenroom-overlay';
       base = location.origin + '/' + overlayPrefix + '/';
     }
-    const sbport = P.get('sbport');
-    return base + 'vdoninja-guest.html?slot=' + slot + (sbport ? '&sbport=' + encodeURIComponent(sbport) : '');
+    return base;
   }
+  function guestSourceUrl(slot) {
+    const sbport = P.get('sbport');
+    return overlayBaseUrl() + 'vdoninja-guest.html?slot=' + slot + (sbport ? '&sbport=' + encodeURIComponent(sbport) : '');
+  }
+  function nameplateSourceUrl(slot) {
+    const sbport = P.get('sbport');
+    return overlayBaseUrl() + 'nameplate.html?slot=' + slot + (sbport ? '&sbport=' + encodeURIComponent(sbport) : '');
+  }
+  document.querySelectorAll('.np-src-copy').forEach((btn) => {
+    btn.addEventListener('click', () => copyText(nameplateSourceUrl(btn.dataset.npSlot), btn));
+  });
   $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')));
   $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
   $('btnVdoInviteOpen').addEventListener('click', (e) => { if (!els.inviteLink.value) e.preventDefault(); });
