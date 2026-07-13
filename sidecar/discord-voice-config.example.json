@@ -11,6 +11,7 @@
     "accent": "cyan",
     "scanlines": true,
     "neonBlink": true,
-    "hideWhenAbsent": true
+    "hideWhenAbsent": true,
+    "exitOnSbClose": false
   }
 }

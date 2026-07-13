@@ -25,6 +25,8 @@
 //       "Discord Bridge Start" SB action. Requires Node >= 22.12 (discord.js 14 /
 //       @discordjs/voice 0.19 floor) and `npm install` in sidecar/.
 // Env:  SB_WS_URL (default ws://127.0.0.1:8080/) · GREENROOM_GUARD_PORT (7495)
+//       GREENROOM_EXIT_ON_SB_CLOSE (1/0 — override settings.exitOnSbClose) ·
+//       GREENROOM_SB_EXIT_GRACE_MS (default 8000, the leave-when-SB-closes window)
 //       DISCORD_BRIDGE_CONFIG / DISCORD_BRIDGE_TOKENS (test hooks: file paths)
 
 import { readFile, writeFile } from 'node:fs/promises';
@@ -44,6 +46,11 @@ const SB_WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_P
 // Single-instance guard: a second launch (double-click + SB action) exits cleanly
 // instead of double-pushing and fighting over the voice connection.
 const GUARD_PORT = Number(process.env.GREENROOM_GUARD_PORT) || 7495;
+// Exit-when-Streamer.bot-closes: how long to wait after the SB WebSocket drops
+// before deciding SB is gone for good and shutting down. A short blip or an SB
+// restart reconnects well inside this window and cancels the shutdown. The
+// behaviour itself is opt-in (settings.exitOnSbClose or the env override below).
+const SB_EXIT_GRACE_MS = Math.max(1000, Number(process.env.GREENROOM_SB_EXIT_GRACE_MS) || 8000);
 
 const DEFAULT_SETTINGS = {
   streamerUserId: '', // set yours in the control page (streamer-first roster order)
@@ -54,6 +61,11 @@ const DEFAULT_SETTINGS = {
   scanlines: true,
   neonBlink: true,
   hideWhenAbsent: true,
+  // Lifecycle (not a render setting): when true, the sidecar gracefully leaves
+  // the voice call and exits once Streamer.bot closes — so the bot doesn't linger
+  // in the channel after you close SB. The env var GREENROOM_EXIT_ON_SB_CLOSE
+  // overrides this when set. Opt-in (default off preserves reconnect-forever).
+  exitOnSbClose: false,
 };
 
 let state = {
@@ -87,6 +99,8 @@ let wantVoice = true;        // operator intent: should the bot be in voice? (a
 let sbWs = null;
 let sbReconnectTimer = null;
 let sbMsgId = 0;
+let sbEverConnected = false;  // gate exit-on-close on having actually reached SB
+let sbGoneTimer = null;       // grace countdown to graceful shutdown after SB drops
 
 // Throttle the voice feed: leading-edge push + ~100ms trailing coalesce.
 const PUSH_MIN_MS = 100;
@@ -205,6 +219,7 @@ async function setSettings(updates) {
   if (updates.scanlines !== undefined) next.scanlines = !!updates.scanlines;
   if (updates.neonBlink !== undefined) next.neonBlink = !!updates.neonBlink;
   if (updates.hideWhenAbsent !== undefined) next.hideWhenAbsent = !!updates.hideWhenAbsent;
+  if (updates.exitOnSbClose !== undefined) next.exitOnSbClose = !!updates.exitOnSbClose;
   state.settings = next;
   await persist();
   return true;
@@ -483,13 +498,16 @@ function connectSb() {
     sbWs = new WebSocket(SB_WS_URL);
     sbWs.on('open', () => {
       if (sbReconnectTimer) { clearTimeout(sbReconnectTimer); sbReconnectTimer = null; }
+      sbEverConnected = true;
+      // SB is back (or up for the first time) — cancel any pending exit countdown.
+      if (sbGoneTimer) { clearTimeout(sbGoneTimer); sbGoneTimer = null; log('Streamer.bot reconnected — cancelling shutdown.'); }
       // Lowercase `general` — the SB Subscribe case gotcha (delivered events carry
       // capitalized 'General'; a capitalized Subscribe silently receives nothing).
       sbWs.send(JSON.stringify({ request: 'Subscribe', id: String(++sbMsgId), events: { general: ['Custom'] } }));
       log(`Connected to Streamer.bot at ${SB_WS_URL}`);
       pushNow(); // hand the current roster to a freshly (re)connected SB
     });
-    sbWs.on('close', () => { sbWs = null; scheduleSbReconnect(); });
+    sbWs.on('close', () => { sbWs = null; scheduleSbReconnect(); armSbGoneTimer(); });
     sbWs.on('error', (e) => { log(`SB WS error: ${e.message} — is SB's WebSocket Server on ${SB_WS_URL} with auth OFF?`); });
     sbWs.on('message', (raw) => {
       let m;
@@ -511,6 +529,40 @@ function connectSb() {
 function scheduleSbReconnect() {
   if (sbReconnectTimer) return;
   sbReconnectTimer = setTimeout(() => { sbReconnectTimer = null; connectSb(); }, 3000);
+}
+
+// Opt-in: leave the call + shut down when Streamer.bot closes. The env var wins
+// when set (GREENROOM_EXIT_ON_SB_CLOSE=1/0); otherwise the persisted setting.
+function shouldExitOnSbClose() {
+  const env = process.env.GREENROOM_EXIT_ON_SB_CLOSE;
+  if (env !== undefined && env !== '') return /^(1|true|yes|on)$/i.test(env.trim());
+  return !!state.settings.exitOnSbClose;
+}
+
+// SB's WS just dropped. If the operator opted in and we had actually been
+// connected (so a never-yet-reached SB during dev doesn't quit us), start a
+// grace countdown. A reconnect within the window clears it (see the open
+// handler); if it fires, SB is gone for good — disconnect from voice and exit
+// so the bot doesn't linger in the channel.
+function armSbGoneTimer() {
+  if (!shouldExitOnSbClose() || !sbEverConnected || sbGoneTimer) return;
+  log(`Streamer.bot connection lost — will leave voice and exit in ${SB_EXIT_GRACE_MS}ms if it doesn't return (exitOnSbClose).`);
+  sbGoneTimer = setTimeout(() => {
+    sbGoneTimer = null;
+    if (sbWs && sbWs.readyState === WebSocket.OPEN) return; // came back in the meantime
+    log('Streamer.bot did not return within the grace window — disconnecting from voice and shutting down.');
+    gracefulExit();
+  }, SB_EXIT_GRACE_MS);
+}
+
+// Proper voice disconnect (not a kick) + gateway logout, then exit. stopBot()
+// destroys the voice connection and the discord.js client; the short delay lets
+// the leave/close frames flush before the process ends.
+function gracefulExit() {
+  stopBot();
+  if (sbReconnectTimer) { clearTimeout(sbReconnectTimer); sbReconnectTimer = null; }
+  try { sbWs?.close(); } catch {}
+  setTimeout(() => process.exit(0), 300);
 }
 
 // Command dispatch — the inbound half of the two-way bus. `value` is always a

@@ -69,6 +69,10 @@ still paints (every page replays state via the `VDO Sync` action on connect).
    action), add
    `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` as a
    source, pick a channel in the control page and press USE → Connect.
+4. *(optional)* Tick **"leave call & quit when Streamer.bot closes"** in the
+   control page so the bot hangs up and the sidecar exits when you close SB
+   instead of lingering in the call (an SB restart reconnects and stays;
+   docs/STREAMERBOT-SETUP.md).
 
 Serve over `http://`, never as an OBS "Local file" — the VDO viewer renders
 black in a `file://` parent and `file://` sources ignore URL params.
@@ -95,12 +99,13 @@ There are deliberately no per-slot HTML stubs: stubs only ever served OBS
 
 ```
 npm install          # root dev deps (ws)
-npm run verify       # 70 checks: transport, both push round-trips (incl. the guest
+npm run verify       # 74 checks: transport, both push round-trips (incl. the guest
                      # directory), persisted-vs-non-persisted restart semantics, the
-                     # command bus, the REAL sidecar token-less over the bus,
-                     # malformed-guestList parser, HTTP serving + tripwires (incl.
-                     # "no token string in control.html" and the director-min
-                     # directory strip-guard)
+                     # command bus, the REAL sidecar token-less over the bus, the
+                     # exit-when-Streamer.bot-closes lifecycle (opt-in leave+quit vs
+                     # default reconnect-forever), malformed-guestList parser, HTTP
+                     # serving + tripwires (incl. "no token string in control.html"
+                     # and the director-min directory strip-guard)
 npm install --no-save playwright-core
 npm run verify:render  # 32 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,

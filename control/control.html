@@ -225,6 +225,7 @@
       <button id="discordConnect" class="primary">Connect</button>
       <button id="discordLeave">Leave voice</button>
       <button id="discordResetAuth" class="danger">Reset auth</button>
+      <label style="margin-left:auto"><input type="checkbox" id="dvoExitOnSbClose" /> leave call &amp; quit when Streamer.bot closes</label>
     </div>
     <div class="hint" style="margin-bottom:10px">The bridge sidecar joins the current voice channel
       muted-but-listening and feeds the overlays. Its bot token is <b>file-only</b>:
@@ -299,6 +300,7 @@
     accent: $('dvoAccent'), avatarPx: $('dvoAvatarPx'), streamerPx: $('dvoStreamerPx'),
     streamerId: $('dvoStreamerId'), hideWhenAbsent: $('dvoHideWhenAbsent'),
     scanlines: $('dvoScanlines'), neonBlink: $('dvoNeonBlink'),
+    exitOnSbClose: $('dvoExitOnSbClose'),
   };
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -1107,6 +1109,7 @@
     setCheck(dvo.hideWhenAbsent, s.hideWhenAbsent !== false);
     setCheck(dvo.scanlines, s.scanlines !== false);
     setCheck(dvo.neonBlink, s.neonBlink !== false);
+    setCheck(dvo.exitOnSbClose, s.exitOnSbClose === true); // opt-in: default off
 
     // Favorites list (rebuild only when favorites/current change).
     const favs = (dv && dv.favorites) || [];
@@ -1182,6 +1185,7 @@
         hideWhenAbsent: dvo.hideWhenAbsent.checked,
         scanlines: dvo.scanlines.checked,
         neonBlink: dvo.neonBlink.checked,
+        exitOnSbClose: dvo.exitOnSbClose.checked,
       });
     }, 400);
   }

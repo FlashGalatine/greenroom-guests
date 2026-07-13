@@ -42,6 +42,15 @@ async function rejects(promise) {
   try { await promise; return false; } catch { return true; }
 }
 
+// Resolves true if the child exits within `ms`, false on timeout (still running).
+function waitExit(child, ms) {
+  return new Promise((res) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; res(false); } }, ms);
+    child.once('exit', () => { if (!done) { done = true; clearTimeout(t); res(true); } });
+  });
+}
+
 function startChild(script, readyText, extraEnv = {}) {
   return new Promise((res, rej) => {
     const child = spawn(process.execPath, [script], {
@@ -418,6 +427,9 @@ async function main() {
     check('sidecar: subscribes with LOWERCASE general', bridgeSrc.includes("events: { general: ['Custom'] }"));
     check("sidecar: pushes via DoAction 'Discord Voice Push'", bridgeSrc.includes("name: 'Discord Voice Push'"));
     check('sidecar: consumes ONLY discord:voice:command (echo-loop guard)', bridgeSrc.includes("d.type !== 'discord:voice:command'"));
+    check('sidecar: exit-on-SB-close wired (shouldExitOnSbClose + grace timer)',
+      bridgeSrc.includes('shouldExitOnSbClose') && bridgeSrc.includes('SB_EXIT_GRACE_MS') && bridgeSrc.includes('armSbGoneTimer'));
+    check('control.html: exit-on-SB-close toggle wired (exitOnSbClose set-setting)', ctrlBody.includes('exitOnSbClose'));
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
     // Proves discord-bridge.mjs's whole bus layer (subscribe, initial push, command
@@ -463,6 +475,41 @@ async function main() {
       (d) => byType('discord:voice:update')(d) && d.discordVoice.rpc && /no bot token/i.test(d.discordVoice.rpc.error || ''),
       'sidecar no-token error');
     check('connect without a token → visible file-onboarding error (token never on the bus)', !!sErr);
+
+    // ── 8. exit-on-SB-close lifecycle: closing SB leaves voice + quits (opt-in) ──
+    // Isolated on its own SB (separate ports) so killing it doesn't disturb the
+    // shared mock the earlier sections use. Two token-less sidecars share that SB:
+    // one with GREENROOM_EXIT_ON_SB_CLOSE=1 (must exit when SB drops), one with the
+    // feature off (must survive — the default reconnect-forever behaviour).
+    console.log('\n[8] exit-on-SB-close: closing Streamer.bot disconnects + quits (opt-in)');
+    const EXIT_WS = 8082, EXIT_HTTP = 7476;
+    const onCfg = resolve(__dirname, '.verify-exit-on-config.json');
+    const onTok = resolve(__dirname, '.verify-exit-on-tokens.json');
+    const offCfg = resolve(__dirname, '.verify-exit-off-config.json');
+    const offTok = resolve(__dirname, '.verify-exit-off-tokens.json');
+    let exitMock, onSc, offSc;
+    try {
+      await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
+      exitMock = await startChild('mock-sb-server.mjs', '[mock] WS', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
+      const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: '500' };
+      onSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
+        ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '7498',
+        DISCORD_BRIDGE_CONFIG: onCfg, DISCORD_BRIDGE_TOKENS: onTok,
+      });
+      offSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
+        ...common, GREENROOM_GUARD_PORT: '7499', // GREENROOM_EXIT_ON_SB_CLOSE unset → feature off
+        DISCORD_BRIDGE_CONFIG: offCfg, DISCORD_BRIDGE_TOKENS: offTok,
+      });
+      exitMock.kill(); exitMock = null; // "close Streamer.bot"
+      const onExited = await waitExit(onSc, 5000);
+      check('exitOnSbClose ON: SB closes → sidecar disconnects from voice and exits within grace', onExited);
+      check('exitOnSbClose OFF (default): SB closes → sidecar stays up (reconnect-forever)', offSc.exitCode === null);
+    } finally {
+      if (onSc) try { onSc.kill(); } catch {}
+      if (offSc) try { offSc.kill(); } catch {}
+      if (exitMock) try { exitMock.kill(); } catch {}
+      await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
+    }
 
     probe.close();
     producer.close();

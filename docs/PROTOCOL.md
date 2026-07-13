@@ -116,7 +116,8 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
                   "avatarUrl": "https://cdn.discordapp.com/…", "mute": false, "deaf": false }
   },
   "settings": { "streamerUserId": "", "avatarPx": 56, "streamerPx": 72, "height": 180,
-                "accent": "cyan", "scanlines": true, "neonBlink": true, "hideWhenAbsent": true },
+                "accent": "cyan", "scanlines": true, "neonBlink": true, "hideWhenAbsent": true,
+                "exitOnSbClose": false },
   "rpc": { "enabled": true, "hasToken": true, "error": "" },
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
   "current": { "serverId": "…", "channelId": "…" } | null
@@ -128,6 +129,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 - `settings`/`rpc`/`favorites`/`current` are superset fields for the control
   page (status pill, favorites list) and the roster overlay's styling. The
   **token itself is never in any payload** — only `hasToken`.
+- `settings.exitOnSbClose` (default `false`) is a **sidecar lifecycle** flag, not
+  a render setting (overlays ignore it): when `true`, the bridge gracefully leaves
+  the voice call and exits once Streamer.bot's WebSocket stays down past a grace
+  window (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms) — so the bot doesn't
+  linger in the channel after you close SB. The env var
+  `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set.
 - Pushed leading-edge with a 100 ms trailing coalesce: worst case ~10
   DoActions/s in a rowdy channel.
 

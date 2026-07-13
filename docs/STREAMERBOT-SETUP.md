@@ -117,6 +117,18 @@ Webcam-only users skip this whole section — nothing else depends on it.
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.
 
+**Auto-leave when you close Streamer.bot.** By default the bridge keeps running
+(and the bot stays in the call) after SB closes — it reconnects the moment SB
+returns. If you'd rather have the bot **hang up and the sidecar quit when you
+close SB**, tick *"leave call & quit when Streamer.bot closes"* in the control
+page's Discord Voice Bridge section (persists to `settings.exitOnSbClose`). When
+enabled, losing SB's WebSocket for longer than the grace window
+(`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms) makes the bridge disconnect from
+voice cleanly and exit; an SB **restart** reconnects inside the window and
+cancels the shutdown. The env var `GREENROOM_EXIT_ON_SB_CLOSE=1` forces it on (or
+`=0` off) regardless of the saved setting — handy for the `Discord Bridge Start`
+action or the `.bat`.
+
 ## 6. Live-validation results (2026-07-10, real Streamer.bot 1.0.4)
 
 What the offline harness (64 protocol + 23 render checks) **cannot** prove was
