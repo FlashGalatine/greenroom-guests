@@ -183,3 +183,8 @@ exercised on a live rig. Outcomes, faithfully:
   `:7495`), or Node < 22.12.
 - **`in voice` but no speaking glow** → the bot must join with `selfDeaf: false`
   (already the shipped default — check you didn't server-deafen the bot).
+- **Lost your room/slots/guest directory** (SB reinstall, wiped globals, moved
+  machines) → the dock config lives only in SB's persisted `vdo.state`. Keep a
+  file copy: the control page's **Export/Import config** buttons, or the CLI
+  (`npm run backup` / `npm run backup:restore -- <file>`). See the README's
+  **Backups** section. Snapshots include the room password — keep them private.

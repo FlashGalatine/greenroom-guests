@@ -5,9 +5,13 @@ node_modules/
 sidecar/discord-tokens.json
 sidecar/discord-voice-config.json
 
+# Config backups (backup.mjs) — contain the room password + resolved stream IDs
+backups/
+
 # verify scratch files
 .verify-bridge-config.json
 .verify-bridge-tokens.json
+.verify-backup.json
 
 # verify-render screenshots (docs/ screenshots ARE committed)
 roster-check.png

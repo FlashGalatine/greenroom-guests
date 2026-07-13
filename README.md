@@ -88,6 +88,7 @@ overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|gr
 actions/    the five Streamer.bot C# actions (paste + compile)
 sidecar/    discord-bridge.mjs (optional discord.js bot) · its package.json
 docs/       STREAMERBOT-SETUP.md · PROTOCOL.md · THEMING.md · screenshots
+backup.mjs  snapshot/restore the SB dock config (room/slots/directory) to a file
 mock-sb-server.mjs · mock-vdo-director.html · mock-discord-bridge.mjs
 verify.mjs · verify-render.mjs · tools/shots.mjs · start-discord-bridge.bat
 ```
@@ -95,17 +96,40 @@ verify.mjs · verify-render.mjs · tools/shots.mjs · start-discord-bridge.bat
 There are deliberately no per-slot HTML stubs: stubs only ever served OBS
 "Local file" mode, which can't host the VDO viewer anyway — `?slot=N` covers it.
 
+## Backups
+
+The dock config — room, password, slots, invite, and the **guest directory /
+nameplates** — lives only in Streamer.bot's persisted `vdo.state` global. Two ways
+to keep a file copy:
+
+- **In the control page:** the header's **Export config** / **Import config**
+  buttons. Export downloads a JSON snapshot; Import loads one and re-pushes it to
+  SB (so it persists like an edit — it *replaces* the current config).
+- **CLI** (SB or `npm start`'s mock must be running):
+  ```
+  npm run backup                       # → backups/vdo-state-<timestamp>.json
+  npm run backup:list
+  npm run backup:restore -- <file>     # push a snapshot back into SB
+  ```
+  `SB_WS_URL` / `SB_WS_PORT` (or `--url`) point it at a non-default SB.
+
+Snapshots contain the **room password**, so `backups/` is gitignored — treat the
+files as secret. The Discord bot's favorites/settings are already file-based in
+`sidecar/discord-voice-config.json` (copy it to back those up); the live voice
+roster is intentionally not snapshotted.
+
 ## Verification (no Streamer.bot, Discord, or camera needed)
 
 ```
 npm install          # root dev deps (ws)
-npm run verify       # 74 checks: transport, both push round-trips (incl. the guest
+npm run verify       # 81 checks: transport, both push round-trips (incl. the guest
                      # directory), persisted-vs-non-persisted restart semantics, the
                      # command bus, the REAL sidecar token-less over the bus, the
                      # exit-when-Streamer.bot-closes lifecycle (opt-in leave+quit vs
-                     # default reconnect-forever), malformed-guestList parser, HTTP
-                     # serving + tripwires (incl. "no token string in control.html"
-                     # and the director-min directory strip-guard)
+                     # default reconnect-forever), the backup CLI save+restore
+                     # round-trip, malformed-guestList parser, HTTP serving +
+                     # tripwires (incl. "no token string in control.html" and the
+                     # director-min directory strip-guard)
 npm install --no-save playwright-core
 npm run verify:render  # 32 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,

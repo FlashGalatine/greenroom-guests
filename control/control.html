@@ -121,6 +121,11 @@
   <h1><span>●</span> Greenroom Control</h1>
   <span id="sbStatus" class="pill">SB: connecting…</span>
   <span id="vdoStatus" class="pill">director: idle</span>
+  <span style="margin-left:auto; display:flex; gap:6px">
+    <button id="btnCfgExport" type="button" title="Download the current dock config (room, slots, guest directory) as a JSON backup">Export config</button>
+    <button id="btnCfgImport" type="button" title="Load a backup JSON and push it to Streamer.bot (replaces the current config)">Import config</button>
+    <input type="file" id="cfgImportFile" accept="application/json,.json" hidden />
+  </span>
 </header>
 <main>
 
@@ -1190,6 +1195,45 @@
     }, 400);
   }
   Object.values(dvo).forEach((el) => el.addEventListener('change', pushSettings));
+
+  // ── Config backup: export/import the whole vdo dock config (room/slots/directory) ──
+  // The persisted store lives inside Streamer.bot (global vdo.state); these give a
+  // file you can keep. Import re-pushes via VDO Push, so it persists like an edit.
+  // (Standalone CLI equivalent: `npm run backup` / `npm run backup:restore`.)
+  function twoDigit(n) { return String(n).padStart(2, '0'); }
+  $('btnCfgExport').addEventListener('click', () => {
+    const envelope = { kind: 'greenroom-vdo-backup', savedAt: new Date().toISOString(), vdoninja: assemblePayload() };
+    const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `greenroom-vdo-${d.getFullYear()}-${twoDigit(d.getMonth() + 1)}-${twoDigit(d.getDate())}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $('btnCfgImport').addEventListener('click', () => $('cfgImportFile').click());
+  $('cfgImportFile').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // let the same file be re-imported later
+    if (!file) return;
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); }
+    catch { alert('That file is not valid JSON.'); return; }
+    // Accept a backup envelope (has .vdoninja) or a raw vdoninja payload.
+    const payload = parsed && typeof parsed.vdoninja === 'object' && parsed.vdoninja ? parsed.vdoninja : parsed;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || (!Array.isArray(payload.slots) && !Array.isArray(payload.directory) && !('room' in payload))) {
+      alert('That does not look like a Greenroom config backup (no slots / directory / room).');
+      return;
+    }
+    const dirN = Array.isArray(payload.directory) ? payload.directory.length : 0;
+    if (!confirm(`Import this config and push it to Streamer.bot?\n\nThis REPLACES the current room, slots, and guest directory (${dirN} guest entr${dirN === 1 ? 'y' : 'ies'} in the file).`)) return;
+    adoptCfg(payload);
+    hydrated = true;
+    renderAll();
+    assembleAndPush(false); // persist to SB (VDO Push → vdo.state)
+  });
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   renderAll();

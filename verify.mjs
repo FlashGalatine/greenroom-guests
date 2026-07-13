@@ -70,6 +70,20 @@ function startChild(script, readyText, extraEnv = {}) {
 
 const startMock = () => startChild('mock-sb-server.mjs', '[mock] WS');
 
+// Run a short-lived node script to completion; resolves { code, out }.
+function runNode(args, extraEnv = {}) {
+  return new Promise((res) => {
+    const child = spawn(process.execPath, args, {
+      cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), ...extraEnv },
+    });
+    let out = '';
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => (out += d));
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', (d) => (out += d));
+    child.on('exit', (code) => res({ code, out }));
+  });
+}
+
 // A predicate-matched inbox: next() resolves with the first queued (or future) item
 // matching pred; unmatched items stay queued for other next() calls.
 function makeInbox() {
@@ -430,6 +444,8 @@ async function main() {
     check('sidecar: exit-on-SB-close wired (shouldExitOnSbClose + grace timer)',
       bridgeSrc.includes('shouldExitOnSbClose') && bridgeSrc.includes('SB_EXIT_GRACE_MS') && bridgeSrc.includes('armSbGoneTimer'));
     check('control.html: exit-on-SB-close toggle wired (exitOnSbClose set-setting)', ctrlBody.includes('exitOnSbClose'));
+    check('control.html: config Export/Import wired (backup buttons + file input + envelope)',
+      ctrlBody.includes('btnCfgExport') && ctrlBody.includes('cfgImportFile') && ctrlBody.includes('greenroom-vdo-backup'));
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
     // Proves discord-bridge.mjs's whole bus layer (subscribe, initial push, command
@@ -511,6 +527,40 @@ async function main() {
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
     }
 
+    // ── 9. config backup CLI: save + restore round-trip (backup.mjs vs the mock) ──
+    // The shared mock still holds VDO_PAYLOAD from [2] (room 'testroom', 2 directory
+    // entries). Snapshot it, mutate SB's vdo.state, restore the file, confirm revert.
+    console.log('\n[9] config backup CLI: backup.mjs save + restore round-trip');
+    const backupFile = resolve(__dirname, '.verify-backup.json');
+    await rm(backupFile, { force: true });
+    const saveRes = await runNode(['backup.mjs', 'save', backupFile]);
+    check('backup save exits 0', saveRes.code === 0, saveRes.out.trim());
+    let saved = null;
+    try { saved = JSON.parse(await readFile(backupFile, 'utf8')); } catch { /* left null */ }
+    check('backup file is an envelope with the vdo.state (room + directory intact)',
+      !!saved && saved.kind === 'greenroom-vdo-backup' && saved.vdoninja && saved.vdoninja.room === 'testroom'
+      && Array.isArray(saved.vdoninja.directory) && saved.vdoninja.directory.length === 2,
+      saved ? JSON.stringify({ kind: saved.kind, room: saved.vdoninja && saved.vdoninja.room }) : 'no file');
+
+    const mutator = await rawClient();
+    mutator.doAction('VDO Push', { payload: JSON.stringify({ ...VDO_PAYLOAD, room: 'CHANGED', directory: [] }) });
+    await new Promise((r) => setTimeout(r, 250));
+    const midState = await (await fetch(`${BASE}/mock/state`)).json();
+    check('precondition: SB vdo.state mutated to room "CHANGED", directory emptied',
+      midState.vdo && midState.vdo.room === 'CHANGED' && midState.vdo.directory.length === 0);
+
+    const restoreRes = await runNode(['backup.mjs', 'restore', backupFile]);
+    check('backup restore exits 0', restoreRes.code === 0, restoreRes.out.trim());
+    await new Promise((r) => setTimeout(r, 250));
+    const afterState = await (await fetch(`${BASE}/mock/state`)).json();
+    check('restore re-pushed the snapshot → SB vdo.state is "testroom" again with the 2 directory entries',
+      afterState.vdo && afterState.vdo.room === 'testroom' && Array.isArray(afterState.vdo.directory) && afterState.vdo.directory.length === 2);
+
+    const bogus = await runNode(['backup.mjs', 'restore', resolve(__dirname, '.verify-nope-missing.json')]);
+    check('restore of a missing/garbage file exits non-zero (refuses to push junk)', bogus.code !== 0, `code=${bogus.code}`);
+    mutator.close();
+    await rm(backupFile, { force: true });
+
     probe.close();
     producer.close();
   } catch (err) {
@@ -522,6 +572,7 @@ async function main() {
     if (mock) mock.kill();
     await rm(resolve(__dirname, '.verify-bridge-config.json'), { force: true });
     await rm(resolve(__dirname, '.verify-bridge-tokens.json'), { force: true });
+    await rm(resolve(__dirname, '.verify-backup.json'), { force: true });
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);

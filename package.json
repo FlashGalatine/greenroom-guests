@@ -9,6 +9,9 @@
     "start": "node mock-sb-server.mjs",
     "mock:bridge": "node mock-discord-bridge.mjs",
     "bridge": "node sidecar/discord-bridge.mjs",
+    "backup": "node backup.mjs save",
+    "backup:restore": "node backup.mjs restore",
+    "backup:list": "node backup.mjs list",
     "verify": "node verify.mjs",
     "verify:render": "node verify-render.mjs",
     "shots": "node tools/shots.mjs"
