@@ -165,4 +165,22 @@ bot became this sidecar, and Streamer.bot's WS replaced the relay). The
 battle-tested parts — rejoin races, the Discord error taxonomy, the BigInt
 default-avatar math, the 100 ms coalesce — carried over unchanged.
 
-MIT © Flash Galatine
+## Author & support
+
+Built by **Ashe "Flash" Galatine**.
+
+- Email — [AsheJunius@gmail.com](mailto:AsheJunius@gmail.com)
+- X — [@AsheJunius](https://x.com/AsheJunius) · BlueSky — [@projectgalatine.com](https://bsky.app/profile/projectgalatine.com)
+- Twitch — [FlashGalatine](https://www.twitch.tv/FlashGalatine) · Discord — [Newbie Fight Club](https://discord.gg/NewbieFightClub)
+- Support — Patreon [ProjectGalatine](https://www.patreon.com/ProjectGalatine) · CashApp [$ProjectGalatine](https://cash.app/$ProjectGalatine)
+
+## Credits & license
+
+MIT — see [LICENSE](LICENSE). Root runtime dependency is
+[ws](https://github.com/websockets/ws) (MIT). The optional Discord bridge
+sidecar depends on [discord.js](https://discord.js.org) +
+[@discordjs/voice](https://github.com/discordjs/discord.js/tree/main/packages/voice)
+(Apache-2.0) and [libsodium-wrappers](https://github.com/jedisct1/libsodium.js)
+(ISC). The guest dock drives [VDO.ninja](https://vdo.ninja) via its public
+IFrame API — nothing from VDO.ninja is vendored here. Greenroom is not
+affiliated with Streamer.bot, VDO.ninja, or Discord.

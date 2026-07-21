@@ -4,7 +4,7 @@
   "description": "VDO.ninja guest dock + Discord voice roster overlays for OBS, driven by Streamer.bot — control page, five SB actions, optional Discord bot sidecar",
   "type": "module",
   "license": "MIT",
-  "author": "Flash Galatine",
+  "author": "Ashe \"Flash\" Galatine",
   "scripts": {
     "start": "node mock-sb-server.mjs",
     "mock:bridge": "node mock-discord-bridge.mjs",

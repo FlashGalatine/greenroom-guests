@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "license": "MIT",
-  "author": "Flash Galatine",
+  "author": "Ashe \"Flash\" Galatine",
   "engines": {
     "node": ">=22.12"
   },
