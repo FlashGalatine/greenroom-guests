@@ -43,6 +43,14 @@ still paints (every page replays state via the `VDO Sync` action on connect).
 
 ## Quick start
 
+First, get the code onto the machine that runs Streamer.bot — either
+
+```
+git clone https://github.com/FlashGalatine/greenroom-guests.git
+```
+
+or click **<> Code → Download ZIP** on the repo page and extract it.
+
 **A — webcam slots only (no Node, no installs):**
 1. Follow [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md): enable SB's
    WebSocket (:8080, auth off) + HTTP (:7474) servers, map `control` and
