@@ -203,8 +203,10 @@ const VDO_PAYLOAD = {
   directory: [
     { vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime',
       socials: [{ platform: 'twitch', handle: 'AlphaPrimeTV' }, { platform: 'bluesky', handle: '@alpha.bsky' }] },
-    { vdoLabel: '', discordUserId: '110457699291906048', displayName: 'Ashe of Outland', socials: [] },
+    { vdoLabel: '', discordUserId: '110457699291906048', displayName: 'Ashe of Outland', socials: [], auto: true },
   ],
+  directoryAutoAdd: true,
+  directoryIgnored: ['discord:200000000000000009', 'vdo:leavemealone'],
 };
 
 const DISCORD_PAYLOAD = {
@@ -262,6 +264,11 @@ async function main() {
       && v1.vdoninja.directory[0].displayName === 'Alpha Prime'
       && v1.vdoninja.directory[0].socials[0].platform === 'twitch'
       && v1.vdoninja.directory[1].discordUserId === '110457699291906048');
+    check('auto-add companions carried (auto flag + directoryAutoAdd + directoryIgnored)',
+      v1.vdoninja.directory[1].auto === true && v1.vdoninja.directoryAutoAdd === true
+      && Array.isArray(v1.vdoninja.directoryIgnored) && v1.vdoninja.directoryIgnored.length === 2
+      && v1.vdoninja.directoryIgnored.includes('vdo:leavemealone'),
+      JSON.stringify(v1.vdoninja.directoryIgnored));
 
     const shimB = await runShim();
     const v2 = await shimB.inbox.next(4000, byType('vdoninja:update'), 'late-joiner vdoninja:update');
@@ -374,6 +381,93 @@ async function main() {
       check('parser never throws', false, String(e));
     }
 
+    // ── 5b. Guest-directory core: sanitizers + the auto-populate rule ───────────
+    // control/directory-core.js is the shared brain both control pages load, so it
+    // gets unit-tested directly here (same trick as vdo-parse.js above).
+    console.log('\n[5b] guest directory core: control/directory-core.js sanitizers + auto-populate');
+    const dirCoreSrc = await readFile(resolve(__dirname, 'control', 'directory-core.js'), 'utf8');
+    new Function(dirCoreSrc)();
+    const D = globalThis.GRDir;
+
+    const sanitized = D.sanitizeDirectory([
+      { vdoLabel: '  ALPHA  ', discordUserId: '<@110457699291906048>', displayName: ' Alpha Prime ',
+        socials: [{ platform: ' Twitch ', handle: ' AlphaPrimeTV ' }, { platform: '', handle: 'dropme' }], auto: 1 },
+      { vdoLabel: 'NONAME', discordUserId: '', displayName: '   ' },     // no displayName → dropped
+      { vdoLabel: '', discordUserId: '', displayName: 'No Keys' },       // no match key → dropped
+      null,
+    ]);
+    check('sanitizeDirectory: trims, digit-strips ids, lowercases platforms, drops keyless/nameless',
+      sanitized.length === 1 && sanitized[0].vdoLabel === 'ALPHA' && sanitized[0].discordUserId === '110457699291906048'
+      && sanitized[0].displayName === 'Alpha Prime' && sanitized[0].socials.length === 1
+      && sanitized[0].socials[0].platform === 'twitch' && sanitized[0].auto === true,
+      JSON.stringify(sanitized));
+    check('sanitizeDirectory is idempotent (the hydration-baseline requirement)',
+      JSON.stringify(D.sanitizeDirectory(sanitized)) === JSON.stringify(sanitized));
+    check('sanitizeDirectory key order matches the wire shape',
+      Object.keys(sanitized[0]).join(',') === 'vdoLabel,discordUserId,displayName,socials,auto');
+
+    const ign = D.sanitizeIgnored(['vdo:ALPHA', 'vdo:alpha', 'discord:110457699291906048', 'discord:nope', 'junk', '', null]);
+    check('sanitizeIgnored: lowercases labels, dedupes, sorts, drops junk keys',
+      JSON.stringify(ign) === JSON.stringify(['discord:110457699291906048', 'vdo:alpha']), JSON.stringify(ign));
+    check('ignore keys are built the same way the pages match them',
+      D.labelKey(' Alpha ') === 'vdo:alpha' && D.userKey('<@1104>') === 'discord:1104');
+
+    const socialsRt = D.parseSocialsText('twitch AlphaPrimeTV\n  bluesky @alpha.bsky  \nnohandle\nwebsite my site.example');
+    check('socials textarea grammar: first-space split, blank/handle-less lines dropped, spaces kept',
+      socialsRt.length === 3 && socialsRt[1].handle === '@alpha.bsky' && socialsRt[2].handle === 'my site.example',
+      JSON.stringify(socialsRt));
+    check('socials round-trip text → objects → text',
+      D.parseSocialsText(D.socialsToText(socialsRt)).length === 3);
+
+    const AUTO_USERS = {
+      '110457699291906048': { username: 'Ashe' },
+      '200000000000000001': { username: 'Guest One' },
+      '200000000000000009': { username: 'Blocked Guy' },   // in directoryIgnored below
+    };
+    const autoBase = [
+      { vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [], auto: false }, // lowercase on purpose
+      { vdoLabel: 'Ashe', discordUserId: '', displayName: 'Ashe of Outland', socials: [], auto: false },
+    ];
+    const auto1 = D.autoPopulate({
+      directory: autoBase, ignored: ['discord:200000000000000009', 'vdo:lurker'],
+      labels: ['ALPHA', 'BRAVO', 'LURKER', ' BRAVO '], users: AUTO_USERS,
+    });
+    const byLabel = (l) => auto1.directory.find((e) => e.vdoLabel === l);
+    check('autoPopulate: a new live label becomes an auto entry named after itself',
+      !!byLabel('BRAVO') && byLabel('BRAVO').displayName === 'BRAVO' && byLabel('BRAVO').auto === true,
+      JSON.stringify(auto1.directory));
+    check('autoPopulate: an already-known label is not duplicated (case-insensitive)',
+      auto1.directory.filter((e) => e.vdoLabel.toLowerCase() === 'alpha').length === 1);
+    check('autoPopulate: an ignored label stays out', !byLabel('LURKER'));
+    check('autoPopulate: a new voice user becomes an auto entry named after their Discord name',
+      auto1.directory.some((e) => e.discordUserId === '200000000000000001' && e.displayName === 'Guest One' && e.auto === true));
+    check('autoPopulate: an ignored user id stays out',
+      !auto1.directory.some((e) => e.discordUserId === '200000000000000009'));
+    check('autoPopulate: a Discord name matching an existing entry fills that entry\'s id (no twin)',
+      auto1.directory.filter((e) => e.displayName === 'Ashe of Outland').length === 1
+      && auto1.directory.find((e) => e.displayName === 'Ashe of Outland').discordUserId === '110457699291906048');
+    check('autoPopulate: reported changed=true and left the operator\'s names alone',
+      auto1.changed === true && auto1.directory[0].displayName === 'Alpha Prime' && auto1.directory[0].auto === false);
+    const auto2 = D.autoPopulate({ directory: auto1.directory, ignored: ['discord:200000000000000009', 'vdo:lurker'],
+      labels: ['ALPHA', 'BRAVO'], users: AUTO_USERS });
+    check('autoPopulate is a fixpoint: a second pass over the same room changes nothing',
+      auto2.changed === false && JSON.stringify(auto2.directory) === JSON.stringify(auto1.directory));
+    const auto3 = D.autoPopulate({ directory: autoBase, ignored: ['discord:200000000000000009', 'vdo:lurker'],
+      labels: [' BRAVO ', 'LURKER', 'ALPHA'], users: AUTO_USERS });
+    check('autoPopulate is order-independent (two director pages converge, no push ping-pong)',
+      JSON.stringify(auto3.directory) === JSON.stringify(auto1.directory));
+    check('autoPopulate: no live guests → no change',
+      D.autoPopulate({ directory: autoBase, ignored: [], labels: [], users: {} }).changed === false);
+    check('autoPopulate never throws on junk input',
+      D.autoPopulate({}).changed === false && D.autoPopulate({ directory: null, labels: 'nope', users: 7 }).directory.length === 0);
+
+    // The overlays can't load directory-core.js (other SB Path->Folder prefix), so
+    // nameplate-shared.js keeps a copy of the sanitizers. Same line, same key order.
+    const npSrc = await readFile(resolve(__dirname, 'overlay', 'nameplate-shared.js'), 'utf8');
+    const PUSH_LINE = 'out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });';
+    check('TRIPWIRE: the two sanitizer copies agree (directory-core.js ↔ nameplate-shared.js)',
+      dirCoreSrc.includes(PUSH_LINE) && npSrc.includes(PUSH_LINE));
+
     // ── 6. HTTP + tripwires: served files carry their load-bearing strings ──────
     console.log('\n[6] HTTP + tripwires: SB-style serving, wired strings, no token in control');
     const shimRes = await fetch(`${BASE}/overlay/panel-client-sb.js`);
@@ -387,6 +481,10 @@ async function main() {
 
     const parserRes = await fetch(`${BASE}/control/vdo-parse.js`);
     check('/control/vdo-parse.js 200 + exports VdoParse', parserRes.status === 200 && (await parserRes.text()).includes('globalThis.VdoParse'));
+    const dirCoreRes = await fetch(`${BASE}/control/directory-core.js`);
+    check('/control/directory-core.js 200 javascript + exports GRDir',
+      dirCoreRes.status === 200 && (dirCoreRes.headers.get('content-type') || '').includes('javascript')
+      && (await dirCoreRes.text()).includes('globalThis.GRDir'));
 
     const guestRes = await fetch(`${BASE}/overlay/vdoninja-guest.html`);
     const guestBody = await guestRes.text();
@@ -409,10 +507,17 @@ async function main() {
     check('/control/control.html 200 + wired (VDO Push, Discord Voice Command, VDO Sync)',
       ctrlRes.status === 200 && ctrlBody.includes("'VDO Push'") && ctrlBody.includes("'Discord Voice Command'") && ctrlBody.includes("'VDO Sync'"));
     check('TRIPWIRE: control.html contains no botToken string (token never leaves the sidecar)', !/botToken/.test(ctrlBody));
+    check('control.html: directory UI wired (directory-core.js, search, live-only, auto-add)',
+      ctrlBody.includes('directory-core.js') && ctrlBody.includes('dirSearch')
+      && ctrlBody.includes('dirLiveOnly') && ctrlBody.includes('dirAutoAdd') && ctrlBody.includes('GRDir.autoPopulate'));
     const minRes = await fetch(`${BASE}/control/director-min.html`);
     const minBody = await minRes.text();
     check('/control/director-min.html 200 + wired (VDO Push, vdo-parse.js)', minRes.status === 200 && minBody.includes("'VDO Push'") && minBody.includes('vdo-parse.js'));
-    check('TRIPWIRE: director-min carries the directory through its pushes (strip guard)', minBody.includes('directory:'));
+    check('TRIPWIRE: director-min carries the directory through its pushes (strip guard)',
+      minBody.includes('directory:') && minBody.includes('directoryAutoAdd:') && minBody.includes('directoryIgnored:'));
+    check('director-min auto-populates too (shared core + the Discord-feed source)',
+      minBody.includes('directory-core.js') && minBody.includes('GRDir.autoPopulate')
+      && minBody.includes("d.type === 'discord:voice:update'"));
     const mockDirRes = await fetch(`${BASE}/mock/vdo-director.html`);
     check('/mock/vdo-director.html 200 + speaks getGuestList', mockDirRes.status === 200 && (await mockDirRes.text()).includes('getGuestList'));
     const nsCtrl = await fetch(`${BASE}/greenroom-control/control.html`);
@@ -463,7 +568,10 @@ async function main() {
       SB_WS_URL: WS_URL,
       DISCORD_BRIDGE_CONFIG: scratchCfg,
       DISCORD_BRIDGE_TOKENS: scratchTok,
-      GREENROOM_GUARD_PORT: '7497',
+      // Scratch guard ports live OUTSIDE the 749x block the components claim
+      // (Fortuna 7493, Greenroom 7495, Zipper 7496, Octet 7498) — otherwise this
+      // suite fails whenever a sibling component's sidecar is running for real.
+      GREENROOM_GUARD_PORT: '7591',
     });
     const shimF = await runShim();
     const sInit = await shimF.inbox.next(4000,
@@ -509,11 +617,11 @@ async function main() {
       exitMock = await startChild('mock-sb-server.mjs', '[mock] WS', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
       const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: '500' };
       onSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
-        ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '7498',
+        ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '7592',
         DISCORD_BRIDGE_CONFIG: onCfg, DISCORD_BRIDGE_TOKENS: onTok,
       });
       offSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
-        ...common, GREENROOM_GUARD_PORT: '7499', // GREENROOM_EXIT_ON_SB_CLOSE unset → feature off
+        ...common, GREENROOM_GUARD_PORT: '7593', // GREENROOM_EXIT_ON_SB_CLOSE unset → feature off
         DISCORD_BRIDGE_CONFIG: offCfg, DISCORD_BRIDGE_TOKENS: offTok,
       });
       exitMock.kill(); exitMock = null; // "close Streamer.bot"
@@ -555,6 +663,10 @@ async function main() {
     const afterState = await (await fetch(`${BASE}/mock/state`)).json();
     check('restore re-pushed the snapshot → SB vdo.state is "testroom" again with the 2 directory entries',
       afterState.vdo && afterState.vdo.room === 'testroom' && Array.isArray(afterState.vdo.directory) && afterState.vdo.directory.length === 2);
+    check('backup round-trip keeps the auto-add companions (autoAdd flag + ignore list)',
+      afterState.vdo && afterState.vdo.directoryAutoAdd === true
+      && Array.isArray(afterState.vdo.directoryIgnored) && afterState.vdo.directoryIgnored.includes('vdo:leavemealone'),
+      JSON.stringify(afterState.vdo && afterState.vdo.directoryIgnored));
 
     const bogus = await runNode(['backup.mjs', 'restore', resolve(__dirname, '.verify-nope-missing.json')]);
     check('restore of a missing/garbage file exits non-zero (refuses to push junk)', bogus.code !== 0, `code=${bogus.code}`);

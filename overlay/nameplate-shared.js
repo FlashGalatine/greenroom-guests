@@ -35,10 +35,12 @@ window.GRNameplate = (function () {
   }
 
   // ── Directory sanitizers ────────────────────────────────────────────────────
-  // KEEP IN SYNC with the copies in control/control.html and
-  // control/director-min.html (same semantics, same key order). Both must be
-  // idempotent: sanitize(sanitize(x)) === sanitize(x), or the control pages'
-  // hydration baselines would drift and trigger spurious pushes.
+  // KEEP IN SYNC with the copy in control/directory-core.js (same semantics, same
+  // key order) — the overlays can't load that file, it lives behind the other SB
+  // Path->Folder prefix. Both must be idempotent: sanitize(sanitize(x)) ===
+  // sanitize(x), or the control pages' hydration baselines would drift and
+  // trigger spurious pushes. `auto` (a placeholder name the control page invented
+  // from a live guest) is carried through for parity; no overlay reads it.
   function sanitizeSocials(raw) {
     const out = [];
     if (!Array.isArray(raw)) return out;
@@ -61,7 +63,7 @@ window.GRNameplate = (function () {
       const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
       const displayName = String(e.displayName ?? '').trim();
       if (!displayName || (!vdoLabel && !discordUserId)) continue;
-      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials) });
+      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });
     }
     return out;
   }

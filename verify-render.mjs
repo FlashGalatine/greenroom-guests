@@ -13,7 +13,10 @@
 //   [R4] 20-user burst @ 100 ms for 5 s (the doc-06 scale question): zero page
 //        errors, member count stable, speaking classes actually mutate.
 //   [R5] control.html: hydrates from the persisted cache, an edit fires a captured
-//        VDO Push, USE on a favorite fires set-current, live status pill.
+//        VDO Push, USE on a favorite fires set-current, live status pill, and the
+//        guest directory's collapsed rows / search filter / auto-populate loop
+//        (live VDO label + voice user → placeholder entries, rename clears the
+//        "auto" badge, remove records the ignore key and it stays gone).
 //   [R6] nameplates: the standalone nameplate.html renders the directory entry
 //        (name + socials), the rotator advances, an unmatched live guest stays
 //        hidden, and ?nameplate=0 keeps the guest overlay plate-free. R1/R2 also
@@ -318,6 +321,124 @@ async function main() {
       if (!useSent) await new Promise((r) => setTimeout(r, 250));
     }
     check('USE on a favorite fires Discord Voice Command set-current', useSent);
+
+    // ── R5b: guest directory — collapsed rows, search, auto-populate, ignore ────
+    // Live inputs at this point: the mock director's room (ALPHA + BRAVO) and the
+    // mock bridge's channel (Ashe + Guest One + Guest Two). The seeded directory
+    // knows 'alpha' and Ashe's id, so BRAVO / Guest One / Guest Two are the guests
+    // auto-add has to invent placeholder names for.
+    console.log('\n[R5b] guest directory: collapsed rows, search, auto-populate, remove→ignored');
+    ctrlPage.on('dialog', (d) => d.accept()); // remove/clear confirms
+
+    // The newest VDO Push whose payload satisfies pred (the control page pushes
+    // continuously, so we poll the captured action log).
+    const pushedPayload = async (pred, tries = 32) => {
+      for (let i = 0; i < tries; i++) {
+        const log = await (await fetch(`${BASE}/mock/actions`)).json();
+        const hit = log.actions.filter((a) => a.name === 'VDO Push' && a.args && a.args.payload)
+          .map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } })
+          .filter(Boolean).reverse().find(pred);
+        if (hit) return hit;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return null;
+    };
+    // Rows are keyed by their directory index (the inputs carry live values, not
+    // value= attributes, so CSS can't match on the name).
+    const rowByName = async (name) => {
+      const idx = await ctrlPage.evaluate((n) => {
+        const row = [...document.querySelectorAll('.vdo-dir-row')]
+          .find((r) => r.querySelector('input.vdo-dir-display')?.value === n);
+        return row ? row.dataset.idx : null;
+      }, name);
+      return idx === null ? null : `.vdo-dir-row[data-idx="${idx}"]`;
+    };
+
+    const autoRow = await wait(ctrlPage, () => {
+      const rows = [...document.querySelectorAll('.vdo-dir-row')];
+      const bravo = rows.find((r) => r.querySelector('input.vdo-dir-display')?.value === 'BRAVO');
+      const guest = rows.find((r) => r.querySelector('input.vdo-dir-display')?.value === 'Guest One');
+      return !!bravo && !!bravo.querySelector('.dir-badge') && !!guest;
+    }, null, 15000);
+    check('auto-add: live VDO label + voice user become "auto"-badged rows', autoRow,
+      await ctrlPage.evaluate(() => [...document.querySelectorAll('.vdo-dir-row input.vdo-dir-display')].map((i) => i.value).join(' | ')));
+
+    const autoPushed = await pushedPayload((p) => Array.isArray(p.directory)
+      && p.directory.some((e) => e.vdoLabel === 'BRAVO' && e.displayName === 'BRAVO' && e.auto === true)
+      && p.directoryAutoAdd === true);
+    check('auto-add pushes the placeholder entry (auto:true) with directoryAutoAdd', !!autoPushed);
+
+    const collapsed = await ctrlPage.evaluate(() => {
+      const row = document.querySelector('.vdo-dir-row');
+      return { body: getComputedStyle(row.querySelector('.dir-body')).display,
+        meta: !!row.querySelector('.dir-meta')?.textContent, dot: !!row.querySelector('.dir-dot') };
+    });
+    check('rows render collapsed (summary + live dot, editor hidden)',
+      collapsed.body === 'none' && collapsed.meta && collapsed.dot, JSON.stringify(collapsed));
+
+    await ctrlPage.click('.vdo-dir-row .dir-toggle');
+    const expanded = await wait(ctrlPage, () => {
+      const row = document.querySelector('.vdo-dir-row.open');
+      return row && getComputedStyle(row.querySelector('.dir-body')).display !== 'none'
+        && !!row.querySelector('input.vdo-dir-label') && !!row.querySelector('textarea.vdo-dir-socials');
+    }, null, 5000);
+    check('clicking a row expands its editor (label + Discord + socials fields)', expanded);
+
+    const totalRows = await ctrlPage.evaluate(() => document.querySelectorAll('.vdo-dir-row').length);
+    await ctrlPage.fill('#dirSearch', 'bravo');
+    const searched = await wait(ctrlPage, () => {
+      const rows = [...document.querySelectorAll('.vdo-dir-row')];
+      return rows.length === 1 && rows[0].querySelector('input.vdo-dir-display')?.value === 'BRAVO';
+    }, null, 5000);
+    check(`search "bravo" filters ${totalRows} rows down to the one match`, searched,
+      await ctrlPage.evaluate(() => document.querySelectorAll('.vdo-dir-row').length));
+    await ctrlPage.fill('#dirSearch', '110457699291906048'); // by Discord ID
+    const searchedById = await wait(ctrlPage, () => {
+      const rows = [...document.querySelectorAll('.vdo-dir-row')];
+      return rows.length === 1 && rows[0].querySelector('input.vdo-dir-display')?.value === 'Ashe of Outland';
+    }, null, 5000);
+    check('search by Discord ID finds the mapped guest', searchedById);
+    await ctrlPage.fill('#dirSearch', '');
+    const restored = await wait(ctrlPage, (n) => document.querySelectorAll('.vdo-dir-row').length === n, totalRows, 5000);
+    check('clearing the search restores every row (filtered entries were never lost)', restored,
+      await ctrlPage.evaluate(() => document.querySelectorAll('.vdo-dir-row').length));
+
+    // Renaming an auto entry is how the operator takes ownership of the name.
+    await fetch(`${BASE}/mock/actions?clear=1`);
+    const bravoRow = await rowByName('BRAVO');
+    await ctrlPage.fill(`${bravoRow} input.vdo-dir-display`, 'Bravo the Brave');
+    await ctrlPage.locator(`${bravoRow} input.vdo-dir-display`).blur();
+    const renamePushed = await pushedPayload((p) => (p.directory || [])
+      .some((e) => e.vdoLabel === 'BRAVO' && e.displayName === 'Bravo the Brave' && e.auto === false));
+    check('renaming an auto entry clears the auto flag on the wire', !!renamePushed);
+    const badgeGone = await wait(ctrlPage, () => {
+      const rows = [...document.querySelectorAll('.vdo-dir-row')];
+      const r = rows.find((x) => x.querySelector('input.vdo-dir-display')?.value === 'Bravo the Brave');
+      return !!r && !r.querySelector('.dir-badge');
+    }, null, 8000);
+    check('the "auto" badge disappears once the name is the operator\'s', badgeGone);
+
+    // Removing a guest records the ignore key — and BRAVO is STILL live, so the
+    // next auto-add pass is what would resurrect them if the guard didn't work.
+    await fetch(`${BASE}/mock/actions?clear=1`);
+    await ctrlPage.click(`${await rowByName('Bravo the Brave')} .vdo-dir-remove`);
+    const removePushed = await pushedPayload((p) => Array.isArray(p.directoryIgnored)
+      && p.directoryIgnored.includes('vdo:bravo')
+      && !(p.directory || []).some((e) => e.vdoLabel === 'BRAVO'));
+    check('removing a guest pushes the ignore key and drops the entry', !!removePushed,
+      JSON.stringify((await pushedPayload(() => true) || {}).directoryIgnored));
+    await new Promise((r) => setTimeout(r, 4000)); // ≥ one director poll + one push
+    const stayedGone = await ctrlPage.evaluate(() => ![...document.querySelectorAll('.vdo-dir-row input.vdo-dir-display')]
+      .some((i) => i.value === 'BRAVO' || i.value === 'Bravo the Brave'));
+    check('the removed guest is NOT auto-added again while still live (ignore list holds)', stayedGone);
+
+    const untickPushed = await (async () => {
+      await fetch(`${BASE}/mock/actions?clear=1`);
+      await ctrlPage.uncheck('#dirAutoAdd');
+      return pushedPayload((p) => p.directoryAutoAdd === false);
+    })();
+    check('unticking "auto-add guests" pushes directoryAutoAdd:false', !!untickPushed);
+    await ctrlPage.check('#dirAutoAdd');
 
     await ctrlPage.screenshot({ path: resolve(__dirname, 'control-check.png'), fullPage: true });
     await ctrlPage.close();

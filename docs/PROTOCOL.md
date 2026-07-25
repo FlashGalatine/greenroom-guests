@@ -74,9 +74,11 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
     "requireApproval": false, "roomCap": "", "extraFlags": "" },
   "directory": [                    // guest directory → nameplates (optional)
     { "vdoLabel": "John-T", "discordUserId": "",
-      "displayName": "John the Tyrant",
+      "displayName": "John the Tyrant", "auto": false,
       "socials": [ { "platform": "twitch", "handle": "TyrannyTimeTV" } ] }
-  ]
+  ],
+  "directoryAutoAdd": true,         // auto-populate new guests (absent → true)
+  "directoryIgnored": [ "vdo:lurker", "discord:200000000000000009" ]
 }
 ```
 
@@ -100,9 +102,28 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   matching entry gets no nameplate** (no raw-label fallback); a webcam slot's
   plate shows only while its label is resolved to a live `streamID`, a
   discord-mode slot's whenever a user is bound (mirroring the PFP placeholder).
-  `director-min.html` carries `directory` through its re-assembled pushes
-  untouched — verify.mjs tripwires this, since a page that dropped it would
-  silently erase the directory on the next auto-follow push.
+  `director-min.html` carries `directory` (and the two fields below) through its
+  re-assembled pushes untouched — verify.mjs tripwires this, since a page that
+  dropped them would silently erase the directory on the next auto-follow push.
+- **`directory[].auto`, `directoryAutoAdd`, `directoryIgnored` (auto-populate).**
+  Both control pages run the same rule (`control/directory-core.js`) on every
+  director poll and every `discord:voice:update`: a live VDO label or a
+  voice-channel user with no directory entry gets one appended, named after them
+  (the label / the Discord username) and flagged `auto: true` — so a guest who
+  joins mid-stream has a nameplate without an operator present. `auto` means "this
+  name is a placeholder"; the control page badges those rows and clears the flag
+  the moment the operator edits the name. A Discord user whose username equals an
+  existing entry's `displayName` or `vdoLabel` fills that entry's empty
+  `discordUserId` instead of creating a twin.
+  `directoryAutoAdd: false` disables the whole pass (absent → **on**, so
+  pre-upgrade `vdo.state` blobs opt in). `directoryIgnored` is the
+  anti-resurrection list — sorted, deduped keys `vdo:<lowercased label>` /
+  `discord:<snowflake>` that auto-add always skips; the control page adds a key
+  when the operator removes an entry or clears one of its match keys, and its
+  "Un-ignore removed" button empties the list. The pass is a **fixpoint** and
+  **order-independent** (candidates are sorted before appending) — two director
+  pages seeing the same room must produce byte-identical payloads, or their pushes
+  would ping-pong forever.
 
 ## `discordVoice` payload (assembled only by the sidecar)
 

@@ -11,7 +11,10 @@ with CSS variables. A guest slot can also show a Discord user's avatar instead
 of a camera — the "voice-only guest" placeholder that lights up when they talk.
 A **guest directory** maps a VDO.ninja label and/or Discord user to an on-stream
 display name + social handles, rendered as a **nameplate** (lower-third in the
-slot, or a freely positioned standalone source) whenever that guest is live.
+slot, or a freely positioned standalone source) whenever that guest is live. It
+**fills itself in**: anyone who joins the room or the voice channel is added with
+a placeholder name (their label / Discord name) that you rename when you want
+something better — searchable, one collapsed row per guest.
 
 ![roster](docs/roster-row.png)
 
@@ -62,9 +65,13 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
    enable the director, and bind slots to guest labels. Keep one director page
    open (a 1×1 source running `director-min.html` is the set-and-forget option).
    The invite builder hands you guest links (`&hash=` password mode included).
-4. *(optional)* Add guests to **Nameplates & Guest Directory** for on-stream
-   names + socials. The lower-third appears in each slot automatically
-   (`?nameplate=0` to hide); for a freely positioned plate add
+4. *(optional)* Give guests on-stream names + socials in **Nameplates & Guest
+   Directory**. Guests who are live show up there on their own with a placeholder
+   name (badged `auto`) — click a row to rename them and add social handles, or
+   `×` to drop them (they stay out; "Un-ignore removed" undoes that). The search
+   box filters by name, label, Discord ID or Discord username, and the **auto-add
+   guests** tick turns the whole thing off. The lower-third appears in each slot
+   automatically (`?nameplate=0` to hide); for a freely positioned plate add
    `…/greenroom-overlay/nameplate.html?slot=1` as its own source
    (docs/THEMING.md).
 
@@ -90,6 +97,8 @@ black in a `file://` parent and `file://` sources ignore URL params.
 ```
 control/    control.html (director + slot editor + invite builder + Discord section)
             director-min.html (1×1 always-on director) · vdo-parse.js (defensive parser)
+            directory-core.js (guest-directory sanitizers + the auto-add rule, shared
+              by both pages so the 1×1 director auto-populates on its own)
 overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|grid)
             nameplate.html (?slot=N standalone nameplate) · nameplate-shared.js
             panel-client-sb.js (SB transport shim)
@@ -130,20 +139,23 @@ roster is intentionally not snapshotted.
 
 ```
 npm install          # root dev deps (ws)
-npm run verify       # 81 checks: transport, both push round-trips (incl. the guest
+npm run verify       # 105 checks: transport, both push round-trips (incl. the guest
                      # directory), persisted-vs-non-persisted restart semantics, the
                      # command bus, the REAL sidecar token-less over the bus, the
                      # exit-when-Streamer.bot-closes lifecycle (opt-in leave+quit vs
                      # default reconnect-forever), the backup CLI save+restore
-                     # round-trip, malformed-guestList parser, HTTP serving +
-                     # tripwires (incl. "no token string in control.html" and the
-                     # director-min directory strip-guard)
+                     # round-trip, malformed-guestList parser, the directory core
+                     # (sanitizers + auto-add: fixpoint, order-independent, ignore
+                     # list), HTTP serving + tripwires (incl. "no token string in
+                     # control.html" and the director-min directory strip-guard)
 npm install --no-save playwright-core
-npm run verify:render  # 32 real-browser checks: guest slot URL assembly + the
+npm run verify:render  # 44 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,
                        # nameplates (lower-third + standalone + rotator + hide rules),
                        # PFP glow, roster badges/order/hide + directory name override,
-                       # a 20-user 100 ms burst, control page hydrate/edit/USE
+                       # a 20-user 100 ms burst, control page hydrate/edit/USE, and
+                       # the directory UI (collapsed rows, search, auto-populate,
+                       # rename-clears-auto, remove-stays-removed)
 npm start            # mock Streamer.bot (:7474/:8080) for hands-on dev
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
 ```

@@ -91,6 +91,15 @@ Deployment options, best first:
 3. **A pinned browser tab** — last-resort fallback, no longer needed now that
    the dock is validated.
 
+**Nameplates & Guest Directory** auto-populates from whichever of those pages is
+running (`director-min.html` does it too — the rule is shared in
+`control/directory-core.js`): a new VDO label or voice-channel user is appended
+with a placeholder name and an `auto` badge, so a mid-stream guest gets a
+nameplate with nobody at the keyboard. Rename a row to make the name yours, `×` to
+drop the guest for good (undo with **Un-ignore removed**), or untick **auto-add
+guests** to stop inventing names at all — see docs/PROTOCOL.md for the
+`directoryAutoAdd` / `directoryIgnored` wire fields.
+
 ## 5. The Discord bridge sidecar (optional)
 
 Webcam-only users skip this whole section — nothing else depends on it.
@@ -183,6 +192,15 @@ exercised on a live rig. Outcomes, faithfully:
   `:7495`), or Node < 22.12.
 - **`in voice` but no speaking glow** → the bot must join with `selfDeaf: false`
   (already the shipped default — check you didn't server-deafen the bot).
+- **An unwanted name appeared on stream** → auto-add invented a placeholder from a
+  guest's VDO label or Discord name. Rename that row (the `auto` badge clears), `×`
+  it, or untick **auto-add guests** in the directory bar; **Clear auto-added**
+  removes every placeholder at once.
+- **A removed guest keeps coming back** → they're live and auto-add is on, and the
+  ignore key is only recorded by the row's `×` (or by clearing its match key).
+  Blanking the *name* just drops the entry — a nameless entry never reaches the
+  wire, so the next poll re-invents it. **Un-ignore removed (N)** shows how many
+  guests are currently suppressed.
 - **Lost your room/slots/guest directory** (SB reinstall, wiped globals, moved
   machines) → the dock config lives only in SB's persisted `vdo.state`. Keep a
   file copy: the control page's **Export/Import config** buttons, or the CLI

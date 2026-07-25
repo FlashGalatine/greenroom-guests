@@ -7,9 +7,15 @@
   Greenroom director-min — the always-on 1×1 variant of the control page: hidden
   vdo.ninja director iframe + the 2.5 s label→streamID resolution loop + VDO Push.
   NO editor UI — it adopts its config (room/password/slot labels, and the guest
-  `directory` which it carries through untouched so its pushes never strip it)
-  from the persisted vdo.state that "VDO Sync" replays, and from any
-  control.html pushes.
+  `directory` + its `directoryAutoAdd`/`directoryIgnored` companions, which it
+  carries through untouched so its pushes never strip them) from the persisted
+  vdo.state that "VDO Sync" replays, and from any control.html pushes.
+
+  It DOES auto-populate the guest directory (control/directory-core.js, shared with
+  control.html): a new label in the room or a new user in the voice channel gets a
+  placeholder entry named after them, so nameplates appear with no operator
+  present. Editing the name in control.html makes it yours; removing the entry
+  there ignores that guest. `directoryAutoAdd:false` turns the whole thing off.
 
   Deploy as a tiny always-on OBS Browser Source (e.g. 1×1 px in a corner of every
   scene collection you stream with):
@@ -35,6 +41,7 @@
 <span id="status">greenroom director: boot…</span>
 <iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
 <script src="vdo-parse.js"></script>
+<script src="directory-core.js"></script>
 <script>
 (function () {
   'use strict';
@@ -59,42 +66,19 @@
     for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
     return out;
   }
-  let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {}, directory: [] };
+  let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {},
+    directory: [], directoryAutoAdd: true, directoryIgnored: [] };
   let roster = [];
   let hasRoster = false;
   let hydrated = false;
   let lastPushedSig = '';
   let frameUrl = '';
   let pollTimer = null;
+  let discordUsers = {};    // last discord:voice:update users map (auto-add input only)
 
-  // ── Guest-directory sanitizers ──────────────────────────────────────────
-  // KEEP IN SYNC with the copies in control.html and overlay/nameplate-shared.js
-  // (same semantics, same key order). Idempotent by construction.
-  function sanitizeSocials(raw) {
-    const out = [];
-    if (!Array.isArray(raw)) return out;
-    for (const s of raw) {
-      if (!s || typeof s !== 'object') continue;
-      const platform = String(s.platform ?? '').trim().toLowerCase();
-      const handle = String(s.handle ?? '').trim();
-      if (!platform || !handle) continue;
-      out.push({ platform, handle });
-    }
-    return out;
-  }
-  function sanitizeDirectory(raw) {
-    const out = [];
-    if (!Array.isArray(raw)) return out;
-    for (const e of raw) {
-      if (!e || typeof e !== 'object') continue;
-      const vdoLabel = String(e.vdoLabel ?? '').trim();
-      const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
-      const displayName = String(e.displayName ?? '').trim();
-      if (!displayName || (!vdoLabel && !discordUserId)) continue;
-      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials) });
-    }
-    return out;
-  }
+  // The directory sanitizers + auto-populate live in directory-core.js, shared
+  // verbatim with control.html so both pages produce identical payloads.
+  const sanitizeDirectory = (raw) => GRDir.sanitizeDirectory(raw);
 
   function adoptCfg(v) {
     if (!v || typeof v !== 'object') return;
@@ -120,7 +104,25 @@
       slots,
       invite: (v.invite && typeof v.invite === 'object') ? v.invite : {},
       directory: sanitizeDirectory(v.directory),
+      directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
+      directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
     };
+  }
+
+  // Auto-populate from whoever is live right now. Returns true if the directory
+  // grew/changed — the caller pushes. Deterministic (directory-core sorts its
+  // candidates), so control.html running the same inputs lands on the same array.
+  function runAutoAdd() {
+    if (!hydrated || !cfg.directoryAutoAdd) return false;
+    const res = GRDir.autoPopulate({
+      directory: cfg.directory,
+      ignored: cfg.directoryIgnored,
+      labels: roster.map((g) => g.label),
+      users: discordUsers,
+    });
+    if (!res.changed) return false;
+    cfg.directory = res.directory;
+    return true;
   }
 
   function assemblePayload() {
@@ -141,14 +143,19 @@
     });
     return { enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
       viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {},
-      directory: sanitizeDirectory(cfg.directory) };
+      directory: sanitizeDirectory(cfg.directory),
+      directoryAutoAdd: cfg.directoryAutoAdd !== false,
+      directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored) };
   }
 
-  // This page only ever pushes ROSTER-driven resolutions (it has no editor), so
-  // both gates apply to every push: hydrated (never clobber persisted state with
-  // defaults) and hasRoster (never blank slots before our director has spoken).
-  function assembleAndPush() {
-    if (!hydrated || !hasRoster) return;
+  // fromRoster: a resolution-driven push needs BOTH gates — hydrated (never
+  // clobber persisted state with defaults) and hasRoster (never blank slots
+  // before our own director has spoken). A directory-driven push (auto-add from
+  // the Discord feed, which needs no director at all) only needs hydrated;
+  // assemblePayload preserves the hydrated streamIDs while hasRoster is false.
+  function assembleAndPush(fromRoster) {
+    if (!hydrated) return;
+    if (fromRoster && !hasRoster) return;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig) return;
     lastPushedSig = payload;
@@ -189,13 +196,23 @@
       if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
       let d = m.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
-      if (!d || typeof d !== 'object' || d.type !== 'vdoninja:update') return;
-      const sig = JSON.stringify(d.vdoninja);
-      if (sig === lastPushedSig) return; // our own echo
-      adoptCfg(d.vdoninja);
-      hydrated = true;
-      lastPushedSig = JSON.stringify(assemblePayload());
-      syncDirectorFrame();
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'vdoninja:update') {
+        const sig = JSON.stringify(d.vdoninja);
+        if (sig === lastPushedSig) return; // our own echo
+        adoptCfg(d.vdoninja);
+        hydrated = true;
+        lastPushedSig = JSON.stringify(assemblePayload());
+        syncDirectorFrame();
+        if (runAutoAdd()) assembleAndPush(false); // late arrivals in a replayed room
+      } else if (d.type === 'discord:voice:update') {
+        // Voice-channel arrivals are an auto-add source of their own — no director
+        // and no room needed. This feed is chatty (~10/s while people talk); the
+        // push only happens when the directory actually grew.
+        const users = d.discordVoice && d.discordVoice.users;
+        discordUsers = (users && typeof users === 'object') ? users : {};
+        if (runAutoAdd()) assembleAndPush(false);
+      }
     };
     ws.onclose = () => {
       show('SB offline — retrying');
@@ -253,7 +270,8 @@
     roster = VdoParse.parseGuestList(d);
     hasRoster = true;
     show(`room ${cfg.room} · ${roster.length} guest(s)`);
-    assembleAndPush(); // auto-follow: re-resolve every poll
+    runAutoAdd(); // new label in the room → placeholder nameplate entry
+    assembleAndPush(true); // auto-follow: re-resolve every poll
   });
 
   show('connecting to SB…');

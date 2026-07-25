@@ -73,7 +73,10 @@ opacity/brightness; speaking members brighten and gain the ring + bloom.
 Guests with a **guest directory** entry (control page: Nameplates & Guest
 Directory) get a nameplate — display name + rotating social handles — on two
 surfaces: a lower-third inside `vdoninja-guest.html`, and the standalone
-`nameplate.html?slot=N` source you position freely.
+`nameplate.html?slot=N` source you position freely. Live guests get an entry
+automatically, named after their VDO label / Discord name until you rename it, so
+plates appear without prep — untick **auto-add guests** if you'd rather show a
+plate only for guests you've written up (docs/PROTOCOL.md, `directoryAutoAdd`).
 
 ![nameplate](nameplate.png)
 
