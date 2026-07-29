@@ -1,6 +1,6 @@
 {
   "name": "greenroom-discord-bridge",
-  "version": "0.1.0",
+  "version": "1.0.13",
   "description": "Greenroom's optional Discord voice bridge sidecar — a muted-but-listening discord.js bot feeding speaking/mute/deaf state to Streamer.bot",
   "type": "module",
   "private": true,
