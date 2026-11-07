@@ -190,3 +190,6 @@ view URLs) — same trust model as the toolkit it replaces. The Discord bot toke
 is **file-only** (`sidecar/discord-tokens.json`, gitignored) and has no bus
 command that can read or write it. Do not expose SB's WS/HTTP beyond localhost
 without adding SB's auth handshake to every client in this repo (unimplemented).
+Until it is implemented, any page running in OBS (a browser source or dock) or in
+a browser on the same PC can read the room password and drive Greenroom through
+the auth-off WebSocket, so only load pages you trust.

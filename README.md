@@ -176,6 +176,11 @@ token never does — it lives only in the gitignored `sidecar/discord-tokens.jso
 and no bus command can carry one (`verify` enforces that `control.html` doesn't
 even contain the string). Don't expose SB's servers beyond localhost.
 
+With authentication off (the only mode Greenroom supports today), any page
+running in OBS, as a browser source or a dock, or in a browser on the same PC can
+read the room password and drive Greenroom through the WebSocket. Only add
+sources and docks you trust.
+
 ## Origins
 
 Extracted from a personal streaming toolkit, where this ran as part of a bespoke

@@ -23,6 +23,14 @@ bot token file.
   `themes`). Any prefix works — the pages load all their assets relatively —
   just keep your OBS URLs consistent with whatever you map.
 
+  **Keep both servers on `127.0.0.1`.** While `greenroom-control` and
+  `greenroom-overlay` are mapped, Streamer.bot's HTTP server and its WebSocket
+  server (authentication off) must stay bound to loopback. On a network address
+  they are reachable from every device that can see the PC, and a
+  network-reachable Streamer.bot exposes more than Greenroom's pages. Moving
+  `sidecar/discord-tokens.json` somewhere else does not change that, so don't
+  rely on relocating files to keep them private.
+
   Serving over `http://127.0.0.1` is load-bearing twice: the embedded vdo.ninja
   WebRTC viewer renders **black** inside a `file://` page (non-secure context),
   and `file://` OBS sources ignore `?slot=`/`?sbport=` query params entirely.
