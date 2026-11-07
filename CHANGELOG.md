@@ -9,6 +9,33 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.17] — 2026-11-07
+
+Documentation only: no code changed, so nothing to copy or re-paste.
+
+### Documentation
+
+- **Keep Streamer.bot's servers on `127.0.0.1`.** Setup section 1 now says the
+  HTTP and WebSocket servers must stay on loopback while the Greenroom folders are
+  mapped, and that moving `sidecar/discord-tokens.json` elsewhere does not change
+  that.
+- **Interim warning about the auth-off WebSocket.** The README and PROTOCOL
+  security notes say that any page running in OBS (a browser source or dock) can
+  read the room password and drive Greenroom until authentication is supported.
+- **Blocking queue for the three state actions.** Setup section 2 adds the step:
+  create a new blocking Action Queue and put `VDO Push`, `Discord Voice Push` and
+  `VDO Sync` on it, never the Default queue.
+- **Protect your saved config.** Setup section 2 also advises ticking
+  *Precompile on Application Start* on the Greenroom actions and taking an Export
+  or `npm run backup` before every Streamer.bot upgrade.
+- **Tags and changelog links.** `v0.1.0` and `v1.0.13` tag the two earlier
+  releases and every release from here on is tagged. The preamble states the
+  version rule exactly and the compare links use the tags.
+
+**Deploy:** nothing to copy, re-paste, restart or refresh. Streamers set up the
+blocking queue themselves (setup section 2). `verify` 105/105, `verify:render`
+44/44.
+
 ## [1.0.13] — 2026-07-29
 
 ### Added
@@ -111,5 +138,6 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.17]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.13...v1.0.17
 [1.0.13]: https://github.com/FlashGalatine/greenroom-guests/compare/v0.1.0...v1.0.13
 [0.1.0]: https://github.com/FlashGalatine/greenroom-guests/releases/tag/v0.1.0
