@@ -513,7 +513,8 @@
   function renderSyncStatus() {
     const el = els.syncStatus;
     if (schemaTooNew) { el.hidden = false; el.textContent = MSG_RELOAD; return; }
-    if (synced || syncPhase === 0) { el.hidden = true; el.textContent = ''; return; }
+    // (while requests are being refused the SB pill says why; blaming VDO Sync would mislead)
+    if (synced || syncPhase === 0 || connFault) { el.hidden = true; el.textContent = ''; return; }
     el.hidden = false;
     el.textContent = syncPhase >= 2 ? MSG_SYNC_LONG : MSG_SYNC_SHORT;
   }
@@ -539,6 +540,8 @@
     synced = true;
     clearTimeout(syncTimer);
     renderSyncStatus();
+    // A refused request (VDO Sync, usually) is moot once the saved config has arrived another way.
+    if (pillFault === 'doaction') clearFault();
   }
   // Re-ask for the saved config until it arrives: after 2, 4, 8 s, then every 15 s.
   function scheduleResync(n) {
@@ -556,6 +559,7 @@
   // ask: an action that has its own confirm (Import) passes its text, so the operator
   // is asked exactly once, with the not-synced warning put in front when it applies.
   function operatorAction(fn, ask) {
+    if (!WS_URL) { setCfgStatus(MSG_BAD_PORT); return false; } // nothing to be asked about: this page never connects
     if (schemaTooNew) { alert(MSG_RELOAD); return false; }
     if (synced) {
       if (ask && !confirm(ask)) return false;
@@ -575,6 +579,7 @@
     return true;
   }
   const CONFIRM_DEFER_MS = 100;
+  const MSG_BAD_PORT = 'Not sent: this page was opened with an invalid ?sbport, so it is not connected to Streamer.bot. Fix the URL and reload.';
   const MSG_SYNC_ARRIVED = 'The saved config arrived from Streamer.bot while you were deciding, so nothing was pushed. Check it and make your change again.';
   const MSG_NOT_SENT = 'Not sent: Streamer.bot is not connected. Try again once it reconnects.';
   function setCfgStatus(text) { els.cfgStatus.textContent = text; }
@@ -592,16 +597,22 @@
   let msgId = 0;
   let subId = null;
   let reconnectTimer = null;
-  let authEnforced = false; // the last Hello carried an authentication block
+  // What the SB pill is showing as a fault ('auth' | 'subscribe' | 'doaction' | ''), so the next
+  // healthy event can put it right instead of leaving a stale notice up.
+  let pillFault = '';
+  let connFault = false; // this connection's requests are being refused (the sync status stays quiet)
   const backoff = sbBackoff();
-  const pendingActions = new Map(); // DoAction id -> action name, until its reply arrives
+  const pendingActions = new Map(); // DoAction id -> { name, payload }, until its reply arrives
+
+  function showFault(kind, text) { pillFault = kind; setPill(els.sbStatus, text, 'error'); }
+  function clearFault() { if (pillFault) { pillFault = ''; setPill(els.sbStatus, 'SB: connected', 'live'); } }
 
   // Returns whether the request was actually sent (false while the socket is down).
   function doAction(name, args) {
     if (!ws || ws.readyState !== 1) return false;
     const id = String(++msgId);
     ws.send(JSON.stringify({ request: 'DoAction', id, action: { name }, args }));
-    pendingActions.set(id, name);
+    pendingActions.set(id, { name, payload: args && args.payload });
     if (pendingActions.size > 200) pendingActions.delete(pendingActions.keys().next().value);
     return true;
   }
@@ -620,57 +631,71 @@
     catch (err) { setPill(els.sbStatus, 'SB: cannot connect — retrying', 'error'); scheduleReconnect(); return; }
     ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
-    let syncTimer = null;
+    let fallbackTimer = null;
     let healthy = false;
+    let authHello = false; // this socket's Hello carried an authentication block
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
-      clearTimeout(syncTimer);
+      clearTimeout(fallbackTimer);
       if (SYNC_ACTION) doAction(SYNC_ACTION, { reason: 'control-connect' });
       scheduleResync(0);
     };
-    // A healthy session (a valid Subscribe ack, or an event) resets the backoff; opening does not.
+    // A healthy session (a valid Subscribe ack, or an event) resets the backoff and puts right a
+    // notice about refused requests; merely opening does not.
     const markHealthy = () => {
       if (healthy) return;
       healthy = true;
+      connFault = false;
       backoff.reset();
-      if (authEnforced) { authEnforced = false; setPill(els.sbStatus, 'SB: connected', 'live'); } // we were accepted after all
+      if (pillFault === 'auth' || pillFault === 'subscribe') clearFault(); // accepted after all
     };
     sock.onopen = () => {
-      if (!authEnforced) setPill(els.sbStatus, 'SB: connected', 'live');
+      // (an authentication notice from the last connection stays until a healthy session replaces it)
+      if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, 'SB: connected', 'live'); }
       subId = String(++msgId);
       // Lowercase `general` — the SB Subscribe case gotcha.
       sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      syncTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
+      fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
       // The timer only makes the form usable and says so; it never marks the page synced.
-      setTimeout(() => { if (!synced) { hydrated = true; syncPhase = Math.max(syncPhase, 1); renderAll(); } }, HYDRATE_TIMEOUT_MS);
-      setTimeout(() => { if (!synced) { syncPhase = 2; renderSyncStatus(); } }, SYNC_NAME_CAUSES_MS);
+      setTimeout(() => { if (!synced) { hydrated = true; if (!connFault) syncPhase = Math.max(syncPhase, 1); renderAll(); } }, HYDRATE_TIMEOUT_MS);
+      setTimeout(() => { if (!synced && !connFault) { syncPhase = 2; renderSyncStatus(); } }, SYNC_NAME_CAUSES_MS);
     };
     sock.onmessage = (evt) => {
       if (ws !== sock) return;
       let m;
       try { m = JSON.parse(evt.data); } catch { return; }
       if (!m || typeof m !== 'object') return;
-      // Streamer.bot's Hello: an authentication block means "Enforce authentication" is on.
+      // Streamer.bot's Hello. An authentication block only means Authentication is switched on; with
+      // Enforce off Streamer.bot still serves every request. It is the likely reason only if requests
+      // are then refused, or the socket is closed.
       if (m.request === 'Hello') {
-        authEnforced = !!(m.authentication && typeof m.authentication === 'object');
-        if (authEnforced) setPill(els.sbStatus, MSG_AUTH, 'error');
+        authHello = !!(m.authentication && typeof m.authentication === 'object');
         return;
       }
       if (m.id && !m.event) {
         if (m.id === subId) {
-          if (isRefusal(m)) { // no sync without an accepted Subscribe
+          if (isRefusal(m)) { // no sync without an accepted Subscribe, and no retry loop on this socket
+            clearTimeout(fallbackTimer);
             clearTimeout(syncTimer);
             syncFired = true;
-            // (the more specific authentication notice, if one is showing, stays)
-            if (!authEnforced) setPill(els.sbStatus, 'SB: Subscribe refused (' + refusalText(m) + ')', 'error');
+            connFault = true;
+            if (authHello) showFault('auth', MSG_AUTH); else showFault('subscribe', 'SB: Subscribe refused (' + refusalText(m) + ')');
+            renderSyncStatus();
           } else { markHealthy(); fireSync(); }
           return;
         }
         if (pendingActions.has(m.id)) {
-          const name = pendingActions.get(m.id);
+          const req = pendingActions.get(m.id);
           pendingActions.delete(m.id);
-          if (isRefusal(m) && !authEnforced) setPill(els.sbStatus, 'SB: DoAction "' + name + '" refused (' + refusalText(m) + ')', 'error');
+          if (isRefusal(m)) {
+            if (authHello) showFault('auth', MSG_AUTH); else showFault('doaction', 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')');
+            if (req.name === PUSH_ACTION) {
+              // Streamer.bot did not save it, so it is not "pushed": let the next poll or edit send it again.
+              if (req.payload && req.payload === lastPushedSig) lastPushedSig = '';
+              setCfgStatus('Not accepted: Streamer.bot refused "' + PUSH_ACTION + '" (' + refusalText(m) + ').');
+            }
+          } else if (pillFault === 'doaction') clearFault(); // requests work again
           return;
         }
       }
@@ -682,11 +707,14 @@
       handle(d);
     };
     sock.onclose = () => {
+      clearTimeout(fallbackTimer);
       clearTimeout(syncTimer);
       syncFired = true;
       if (ws !== sock) return;
       pendingActions.clear();
-      setPill(els.sbStatus, authEnforced ? MSG_AUTH : 'SB: offline — retrying', 'error');
+      connFault = false;
+      if (authHello && !healthy) showFault('auth', MSG_AUTH); // hung up on after an authentication Hello
+      else { pillFault = ''; setPill(els.sbStatus, 'SB: offline — retrying', 'error'); }
       scheduleReconnect();
     };
     sock.onerror = () => {};

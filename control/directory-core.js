@@ -16,10 +16,9 @@
 // re-add the guest a second later.
 //
 // The sanitizers are duplicated in overlay/nameplate-shared.js (the overlays load
-// that file instead of this one — different SB Path->Folder prefix). Same key order;
-// verify.mjs greps both copies. This copy is SUPERSET-SAFE (unknown fields pass
-// through after the known ones); the overlays only read the directory, so their copy
-// stays strict until the release that ships the overlay brings it to the same form.
+// that file instead of this one — different SB Path->Folder prefix). Both copies are
+// SUPERSET-SAFE (unknown fields pass through after the known ones) and keep the same key
+// order; verify.mjs checks that their lines and their behaviour are identical.
 // They must stay IDEMPOTENT: sanitize(sanitize(x)) === sanitize(x), or the control
 // pages' hydration baselines drift and every hydration triggers a spurious push.
 

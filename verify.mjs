@@ -58,7 +58,7 @@ function startChild(script, readyText, extraEnv = {}) {
       env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), ...extraEnv },
     });
     let out = '';
-    const timer = setTimeout(() => rej(new Error(`${script} did not start in 8s\n` + out)), 8000);
+    const timer = setTimeout(() => { try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
     const onData = (d) => { out += d; if (out.includes(readyText)) { clearTimeout(timer); res(child); } };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', onData);
@@ -68,7 +68,7 @@ function startChild(script, readyText, extraEnv = {}) {
   });
 }
 
-const startMock = () => startChild('mock-sb-server.mjs', '[mock] WS');
+const startMock = () => startChild('mock-sb-server.mjs', '[mock] WS    ws://');
 
 // Run a short-lived node script to completion; resolves { code, out }.
 function runNode(args, extraEnv = {}) {
@@ -707,7 +707,7 @@ async function main() {
     let exitMock, onSc, offSc;
     try {
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
-      exitMock = await startChild('mock-sb-server.mjs', '[mock] WS', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
+      exitMock = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
       const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: '500' };
       onSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
         ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '7592',

@@ -104,7 +104,10 @@
   // connProblem is a connection fault that stays on screen until a healthy session replaces it
   // (a refused Subscribe or DoAction, an authentication-enforcing Streamer.bot, an invalid ?sbport).
   let connProblem = '';
-  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (connProblem || (schemaTooNew ? MSG_RELOAD : t)); };
+  // A refused DoAction is a current fault, not a permanent one: it shows until a request succeeds
+  // again or the socket closes.
+  let transientProblem = '';
+  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (connProblem || (schemaTooNew ? MSG_RELOAD : (transientProblem || t))); };
 
   function defaultSlots() {
     const out = [];
@@ -193,6 +196,7 @@
     if (synced) return;
     synced = true;
     clearTimeout(syncTimer);
+    transientProblem = ''; // a refused request (VDO Sync, usually) is moot once the saved config has arrived
   }
   // The status for a page that holds its config: idle when there is no director to run, else
   // the room and how many guests the last poll saw.
@@ -275,16 +279,16 @@
   let msgId = 0;
   let subId = null;
   let reconnectTimer = null;
-  let authEnforced = false; // the last Hello carried an authentication block
+  let waitText = 'connecting to SB…'; // what to show while the saved config has not come back
   const backoff = sbBackoff();
-  const pendingActions = new Map(); // DoAction id -> action name, until its reply arrives
+  const pendingActions = new Map(); // DoAction id -> { name, payload }, until its reply arrives
 
   // Returns whether the request was actually sent (false while the socket is down).
   function doAction(name, args) {
     if (!ws || ws.readyState !== 1) return false;
     const id = String(++msgId);
     ws.send(JSON.stringify({ request: 'DoAction', id, action: { name }, args }));
-    pendingActions.set(id, name);
+    pendingActions.set(id, { name, payload: args && args.payload });
     if (pendingActions.size > 200) pendingActions.delete(pendingActions.keys().next().value);
     return true;
   }
@@ -303,12 +307,13 @@
     catch (err) { connProblem = 'cannot open the WebSocket — retrying'; show(''); scheduleReconnect(); return; }
     ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
-    let syncTimer = null;
+    let fallbackTimer = null;
     let healthy = false;
+    let authHello = false; // this socket's Hello carried an authentication block
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
-      clearTimeout(syncTimer);
+      clearTimeout(fallbackTimer);
       doAction(SYNC_ACTION, { reason: 'director-min-connect' });
       scheduleResync(0);
     };
@@ -317,46 +322,59 @@
     const markHealthy = () => {
       if (healthy) return;
       healthy = true;
-      authEnforced = false;
       backoff.reset();
-      if (connProblem) { connProblem = ''; if (synced) showSteady(); else show('connected to SB — waiting for state'); }
+      if (connProblem) { connProblem = ''; if (synced) showSteady(); else show(waitText); }
     };
     sock.onopen = () => {
+      waitText = 'connected to SB — waiting for state';
       if (!connProblem) {
-        if (!synced) show('connected to SB — waiting for state');
+        if (!synced) show(waitText);
         else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
       }
       subId = String(++msgId);
       sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      syncTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
-      // Say why nothing is happening while the saved config has not come back.
-      setTimeout(() => { if (!synced) show(MSG_SYNC_SHORT); }, SYNC_SAY_MS);
-      setTimeout(() => { if (!synced) show(MSG_SYNC_LONG); }, SYNC_NAME_CAUSES_MS);
+      fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
+      // Say why nothing is happening while the saved config has not come back (a connection
+      // problem, if there is one, outranks these in show()).
+      setTimeout(() => { if (!synced) { waitText = MSG_SYNC_SHORT; show(waitText); } }, SYNC_SAY_MS);
+      setTimeout(() => { if (!synced) { waitText = MSG_SYNC_LONG; show(waitText); } }, SYNC_NAME_CAUSES_MS);
     };
     sock.onmessage = (evt) => {
       if (ws !== sock) return;
       let m;
       try { m = JSON.parse(evt.data); } catch { return; }
       if (!m || typeof m !== 'object') return;
-      // Streamer.bot's Hello: an authentication block means "Enforce authentication" is on.
+      // Streamer.bot's Hello. An authentication block only means Authentication is switched on; with
+      // Enforce off Streamer.bot still serves every request. It is the likely reason only if requests
+      // are then refused, or the socket is closed.
       if (m.request === 'Hello') {
-        authEnforced = !!(m.authentication && typeof m.authentication === 'object');
-        if (authEnforced) { connProblem = MSG_AUTH; show(''); }
+        authHello = !!(m.authentication && typeof m.authentication === 'object');
         return;
       }
       if (m.id && !m.event) {
         if (m.id === subId) {
-          if (isRefusal(m)) { // no sync without an accepted Subscribe
+          if (isRefusal(m)) { // no sync without an accepted Subscribe, and no retry loop on this socket
+            clearTimeout(fallbackTimer);
             clearTimeout(syncTimer);
             syncFired = true;
-            if (!authEnforced) { connProblem = 'SB: Subscribe refused (' + refusalText(m) + ')'; show(''); }
+            connProblem = authHello ? MSG_AUTH : 'SB: Subscribe refused (' + refusalText(m) + ')';
+            show('');
           } else { markHealthy(); fireSync(); }
           return;
         }
         if (pendingActions.has(m.id)) {
-          const name = pendingActions.get(m.id);
+          const req = pendingActions.get(m.id);
           pendingActions.delete(m.id);
-          if (isRefusal(m) && !authEnforced) { connProblem = 'SB: DoAction "' + name + '" refused (' + refusalText(m) + ')'; show(''); }
+          if (isRefusal(m)) {
+            if (authHello) connProblem = MSG_AUTH;
+            else transientProblem = 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')';
+            // Streamer.bot did not save it, so it is not "pushed": let the next poll send it again.
+            if (req.name === PUSH_ACTION && req.payload && req.payload === lastPushedSig) lastPushedSig = '';
+            show('');
+          } else if (transientProblem) { // requests work again
+            transientProblem = '';
+            if (synced) showSteady(); else show(waitText);
+          }
           return;
         }
       }
@@ -394,10 +412,15 @@
       }
     };
     sock.onclose = () => {
+      clearTimeout(fallbackTimer);
       clearTimeout(syncTimer);
       syncFired = true;
       if (ws !== sock) return;
       pendingActions.clear();
+      transientProblem = '';
+      // A dead connection is the more current fact; only an authentication Hello that was followed by a
+      // hang-up is kept, because it is the likely reason.
+      connProblem = authHello && !healthy ? MSG_AUTH : '';
       show('SB offline — retrying');
       scheduleReconnect();
     };

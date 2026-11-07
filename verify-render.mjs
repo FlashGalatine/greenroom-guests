@@ -56,7 +56,7 @@ function startChild(script, readyText, opts = {}) {
       env: { ...process.env, SB_HTTP_PORT: String(opts.httpPort || HTTP_PORT), SB_WS_PORT: String(opts.wsPort || WS_PORT), ...(opts.env || {}) },
     });
     let out = '';
-    const timer = setTimeout(() => rej(new Error(`${script} did not start in 8s\n` + out)), 8000);
+    const timer = setTimeout(() => { try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
     const onData = (d) => { out += d; if (out.includes(readyText)) { clearTimeout(timer); res(child); } };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', onData);
@@ -155,13 +155,14 @@ async function main() {
   const extraProds = []; // their producers
   let scratch = null; // R9's temp dir (an exported config holds the room password)
   try {
-    mock = await startChild('mock-sb-server.mjs', '[mock] WS');
+    mock = await startChild('mock-sb-server.mjs', '[mock] WS    ws://');
     console.log(`mock SB up (:${HTTP_PORT} HTTP, :${WS_PORT} WS)\n`);
     browser = await launch();
     prod = await producer();
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
+    if (ONLY && ONLY !== 'conn') throw new Error(`RENDER_ONLY=${ONLY}: the only supported value is 'conn' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -176,11 +177,12 @@ async function main() {
         const httpPort = await freePort();
         let wsPort = await freePort();
         while (wsPort === httpPort) wsPort = await freePort();
-        let m;
-        try { m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env }); }
-        catch (e) { lastErr = e; continue; }
+        let m, prod;
+        try {
+          m = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { httpPort, wsPort, env });
+          prod = await producer(wsPort);
+        } catch (e) { lastErr = e; if (m) { try { m.kill(); } catch {} } continue; }
         extra.push(m);
-        const prod = await producer(wsPort);
         extraProds.push(prod);
         return { api: mockApi(httpPort), prod, proc: m, http: httpPort, ws: wsPort };
       }
@@ -1209,6 +1211,102 @@ async function main() {
         await cC.evaluate(() => document.getElementById('sbStatus')?.textContent));
       await cC.close();
 
+      // Review findings on the above. A Hello whose authentication block means nothing (Authentication on,
+      // Enforce off: SB still serves every request) must not raise an alarm or grey the overlay.
+      const authServe = await startExtra({ SB_HELLO: 'auth', SB_AUTH: 'serve' });
+      await seedBoth(authServe);
+      const cV = await newPage(browser, { width: 920, height: 900 });
+      const dV = await newPage(browser, { width: 480, height: 120 });
+      const oV = await newPage(browser, { width: 640, height: 360 });
+      await Promise.all([cV.goto(`${authServe.api.base}/control/control.html?sbport=${authServe.ws}`), dV.goto(`${authServe.api.base}/control/director-min.html?sbport=${authServe.ws}`), oV.goto(guestUrl(authServe))]);
+      const servedPainted = await wait(oV, guestPainted, null, 6000);
+      await sleep(800);
+      const pillV = await cV.evaluate(() => document.getElementById('sbStatus')?.textContent || '');
+      check('R10d: a Hello with an authentication block that SB does not enforce raises no alarm: control pill stays "SB: connected"',
+        /SB: connected/.test(pillV) && !/auth/i.test(pillV), pillV);
+      check('R10d: …director-min shows no auth notice', !/auth enforced/i.test(await dV.evaluate(() => document.getElementById('status')?.textContent || '')));
+      check('R10d: …and the overlay is not greyed out and paints the guest', servedPainted && await oV.evaluate(() => !document.body.classList.contains('offline')));
+      await cV.close(); await dV.close(); await oV.close();
+      // Enforce turned off while the pages are open: the notice goes away on the next healthy connection.
+      const recov = await startExtra({ SB_HELLO: 'auth' });
+      const cW = await newPage(browser, { width: 920, height: 900 });
+      const dW = await newPage(browser, { width: 480, height: 120 });
+      const oW = await newPage(browser, { width: 640, height: 360 });
+      await Promise.all([cW.goto(`${recov.api.base}/control/control.html?sbport=${recov.ws}`), dW.goto(`${recov.api.base}/control/director-min.html?sbport=${recov.ws}`), oW.goto(guestUrl(recov))]);
+      await sleep(1500);
+      const noticeShown = /auth enforced/.test(await cW.evaluate(() => document.getElementById('sbStatus')?.textContent || ''));
+      await fetch(`${recov.api.base}/mock/mode?hello=plain&auth=serve`).then((r) => r.arrayBuffer());
+      await fetch(`${recov.api.base}/mock/dropall`).then((r) => r.arrayBuffer()); // SB restarts its WebSocket server
+      const noticeGoneC = await wait(cW, () => /SB: connected/.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000);
+      const noticeGoneD = await wait(dW, () => !/auth enforced/.test(document.getElementById('status')?.textContent || ''), null, 8000);
+      check('R10d: with Enforce turned off and a reconnect, control.html replaces the auth notice with "SB: connected"', noticeShown && noticeGoneC,
+        await cW.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      check('R10d: …director-min drops the notice too, and the overlay is online', noticeGoneD && await wait(oW, () => !document.body.classList.contains('offline'), null, 6000));
+      await cW.close(); await dW.close(); await oW.close();
+      // The auth notice is about the connection that got the Hello; when Streamer.bot is simply not running
+      // the pages say "offline", not "auth enforced".
+      const authDown = await startExtra({ SB_HELLO: 'auth' });
+      const cX = await newPage(browser, { width: 920, height: 900 });
+      const dX = await newPage(browser, { width: 480, height: 120 });
+      await Promise.all([cX.goto(`${authDown.api.base}/control/control.html?sbport=${authDown.ws}`), dX.goto(`${authDown.api.base}/control/director-min.html?sbport=${authDown.ws}`)]);
+      await sleep(1500);
+      authDown.proc.kill();
+      check('R10d: when Streamer.bot then stops, control.html says offline (not "auth enforced")',
+        await wait(cX, () => /offline/i.test(document.getElementById('sbStatus')?.textContent || '') && !/auth enforced/.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000),
+        await cX.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      check('R10d: …and so does director-min', await wait(dX, () => /offline/i.test(document.getElementById('status')?.textContent || '') && !/auth enforced/.test(document.getElementById('status')?.textContent || ''), null, 8000));
+      await cX.close(); await dX.close();
+      // A Subscribe refusal that arrives AFTER the 400 ms fallback has fired the sync: the page must not
+      // keep re-asking (2/4/8 s loops, the overlay's 2.5 s repeat), and must not blame VDO Sync.
+      const late = await startExtra({ SB_SUBSCRIBE: 'error', SB_SUBSCRIBE_DELAY_MS: '700' });
+      const cL = await newPage(browser, { width: 920, height: 900 });
+      const dL = await newPage(browser, { width: 480, height: 120 });
+      const oL = await newPage(browser, { width: 640, height: 360 });
+      await Promise.all([cL.goto(`${late.api.base}/control/control.html?sbport=${late.ws}`), dL.goto(`${late.api.base}/control/director-min.html?sbport=${late.ws}`), oL.goto(guestUrl(late))]);
+      await sleep(6500);
+      const lateSyncs = (await late.api.actions()).filter((a) => a.name === 'VDO Sync');
+      check('R10d: after a late Subscribe refusal no page sends another VDO Sync (only the three 400 ms fallbacks happened)',
+        lateSyncs.length <= 3 && !lateSyncs.some((a) => /retry|resync/.test((a.args && a.args.reason) || '')), JSON.stringify(lateSyncs.map((a) => a.args && a.args.reason)));
+      const lateTxt = await cL.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
+      check('R10d: …and control.html does not blame VDO Sync or a fresh install for a refused Subscribe', !/fresh install|not compiled/i.test(lateTxt), lateTxt);
+      await cL.close(); await dL.close(); await oL.close();
+      // A refused DoAction is a current fault, not a permanent one: it clears when requests work again.
+      const flip = await startExtra({ SB_DOACTION: 'error' });
+      const cF = await newPage(browser, { width: 920, height: 900 });
+      cF.on('dialog', (d) => d.accept());
+      const dF = await newPage(browser, { width: 480, height: 120 });
+      const oF = await newPage(browser, { width: 640, height: 360 });
+      await Promise.all([cF.goto(`${flip.api.base}/control/control.html?sbport=${flip.ws}`), dF.goto(`${flip.api.base}/control/director-min.html?sbport=${flip.ws}`), oF.goto(guestUrl(flip))]);
+      await sleep(1500);
+      const shownBefore = /DoAction .*refused/.test(await cF.evaluate(() => document.getElementById('sbStatus')?.textContent || ''))
+        && /DoAction .*refused/.test(await dF.evaluate(() => document.getElementById('status')?.textContent || ''))
+        && await oF.evaluate(() => document.body.classList.contains('offline'));
+      await fetch(`${flip.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
+      await cF.click('#btnVdoSave'); // a DoAction that now succeeds (control.html: the ok reply clears the pill)
+      check('R10d: control.html clears the refused-DoAction pill once a DoAction succeeds again',
+        shownBefore && await wait(cF, () => !/refused/.test(document.getElementById('sbStatus')?.textContent || ''), null, 5000), await cF.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      // director-min's own retry of VDO Sync is the request that succeeds
+      check('R10d: …director-min clears it on its next successful request', await wait(dF, () => !/refused/.test(document.getElementById('status')?.textContent || ''), null, 12000),
+        await dF.evaluate(() => document.getElementById('status')?.textContent));
+      await flip.api.broadcast({ type: 'vdoninja:update', vdoninja: SEED_CONN }); // live state keeps flowing to the overlay
+      check('R10d: …and the overlay, greyed by the refused sync, comes back as soon as live frames arrive (and paints)',
+        await wait(oF, () => !document.body.classList.contains('offline') && (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 5000));
+      await cF.close(); await dF.close(); await oF.close();
+      // A push that SB refused must be tried again; it was never saved.
+      const rej = await startExtra({});
+      const REJ_SEED = { ...SEED_CONN, slots: [slot(1, { label: 'ALPHA', streamID: '' }), slot(2, { label: 'BRAVO', streamID: '' }), slot(3), slot(4)] };
+      rej.prod.doAction('VDO Push', { payload: JSON.stringify(REJ_SEED) });
+      await sleep(300);
+      const dJ = await newPage(browser, { width: 480, height: 120 }, `${MOCK_DIRECTOR}?fixed=1`);
+      await dJ.goto(`${rej.api.base}/control/director-min.html?sbport=${rej.ws}`, { waitUntil: 'load' });
+      await wait(dJ, () => /room connroom/.test(document.getElementById('status')?.textContent || ''), null, 6000);
+      await fetch(`${rej.api.base}/mock/mode?doaction=error`).then((r) => r.arrayBuffer()); // before its first poll
+      await sleep(3000); // the first poll's push is refused
+      await fetch(`${rej.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
+      const resent = await (async () => { for (let i = 0; i < 28; i++) { const s = await rej.api.state(); if (s.vdo && s.vdo.slots && s.vdo.slots[0].streamID === 'aaa111') return true; await sleep(250); } return false; })();
+      check('R10d: director-min pushes again after SB refused a push (the refused payload is not remembered as sent)', resent);
+      await dJ.close();
+
       // R10e: ?sbport is a port number or nothing (GRN-27, GRN-100). A bad value never reaches a WebSocket.
       const BAD_PORTS = ['1%40example.invalid', '0', '65536', 'abc', '8080.5', ''];
       let sbOk = true; const sbDetail = [];
@@ -1218,12 +1316,16 @@ async function main() {
         await Promise.all(kinds.map(async ([name, path, kind]) => {
           const p = await newPage(browser, { width: 700, height: 500 });
           const w = watchPage(p);
+          // A fence: no WebSocket may open from these pages at all, so a regression can only fail the
+          // test and never reach a real Streamer.bot on :8080 (an empty ?sbport once meant 8080).
+          const fenced = [];
+          await p.routeWebSocket(/.*/, (sock) => { fenced.push(sock.url()); sock.close(); });
           await p.goto(`${BASE}${path}${path.includes('?') ? '&' : '?'}sbport=${bad}`, { waitUntil: 'load' });
           await sleep(1300);
           const status = await p.evaluate(() => ({ pill: document.getElementById('sbStatus')?.textContent || '', min: document.getElementById('status')?.textContent || '', off: document.body.classList.contains('offline') }));
           const shown = kind === 'control' ? /invalid \?sbport/i.test(status.pill) : kind === 'min' ? /invalid \?sbport/i.test(status.min)
             : status.off && w.console.some((c) => /^error/.test(c) && /invalid \?sbport/i.test(c));
-          if (w.ws.length !== 0 || !shown) { sbOk = false; sbDetail.push(`${name} ?sbport=${bad}: ws=${JSON.stringify(w.ws)} shown=${shown}`); }
+          if (w.ws.length !== 0 || fenced.length !== 0 || !shown) { sbOk = false; sbDetail.push(`${name} ?sbport=${bad}: ws=${JSON.stringify(w.ws.concat(fenced))} shown=${shown}`); }
           await p.close();
         }));
       }
@@ -1231,36 +1333,80 @@ async function main() {
         sbOk, sbDetail.slice(0, 3).join(' | '));
       const goodWs = []; const pGood = await newPage(browser, { width: 920, height: 900 });
       pGood.on('websocket', (s) => goodWs.push(s.url()));
+      // Both Copy buttons read the clipboard API at click time (the nameplate URL is not stored on the button),
+      // so record what they write.
+      const CLIP = 'Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (t) => { (window.__clip = window.__clip || []).push(String(t)); } } });';
+      await pGood.addInitScript(CLIP);
       await pGood.goto(`${BASE}/control/control.html?sbport=${WS_PORT}`, { waitUntil: 'load' });
       await sleep(1000);
       check('R10e: a valid ?sbport still connects, to 127.0.0.1 on that port', goodWs.length >= 1 && goodWs.every((u) => u === `ws://127.0.0.1:${WS_PORT}/`), JSON.stringify(goodWs));
-      const copied = await pGood.evaluate(() => document.querySelector('.vdo-slot-row[data-slot="1"] .vdo-src-copy')?.dataset.url || '');
-      check('R10e: a valid ?sbport is copied into the OBS source URLs', copied.includes(`&sbport=${WS_PORT}`), copied);
+      const copyAll = async (p) => {
+        for (const sel of ['.vdo-slot-row[data-slot="1"] .vdo-src-copy', '.np-src-copy[data-np-slot="1"]']) { await p.click(sel); await sleep(150); }
+        return p.evaluate(() => (window.__clip || []).slice());
+      };
+      const clipsGood = await copyAll(pGood);
+      check('R10e: a valid ?sbport is copied into both the guest and the nameplate OBS source URLs',
+        clipsGood.length === 2 && clipsGood[0].includes(`vdoninja-guest.html?slot=1&sbport=${WS_PORT}`) && clipsGood[1].includes(`nameplate.html?slot=1&sbport=${WS_PORT}`), JSON.stringify(clipsGood));
       await pGood.close();
       const pBad = await newPage(browser, { width: 920, height: 900 });
+      const badDialogs = [];
+      pBad.on('dialog', (d) => { badDialogs.push(d.message()); d.accept(); });
+      await pBad.routeWebSocket(/.*/, (sock) => sock.close()); // (fenced, as above)
+      await pBad.addInitScript(CLIP);
       await pBad.goto(`${BASE}/control/control.html?sbport=1%40example.invalid`, { waitUntil: 'load' });
       await sleep(600);
-      const copiedBad = await pBad.evaluate(() => [...document.querySelectorAll('.vdo-src-copy, .np-src-copy')].map((b) => b.dataset.url || ''));
-      check('R10e: an invalid ?sbport is never copied into an OBS source URL', copiedBad.length > 0 && copiedBad.every((u) => !/sbport/i.test(u) && !u.includes('example.invalid')), JSON.stringify(copiedBad.slice(0, 2)));
+      const clipsBad = await copyAll(pBad);
+      // The plan's rule: a crafted value is never copied; the URL is the plain one (no sbport). A bad value never
+      // reaches the page's own connection (above); the OBS URL is the same one a default-port streamer uses.
+      check('R10e: with an invalid ?sbport the copied guest and nameplate URLs are the plain ones (no sbport, nothing crafted)',
+        clipsBad.length === 2 && clipsBad.every((u) => !/sbport/i.test(u) && !u.includes('example.invalid')) && /vdoninja-guest\.html\?slot=1$/.test(clipsBad[0]) && /nameplate\.html\?slot=1$/.test(clipsBad[1]), JSON.stringify(clipsBad));
+      await pBad.fill('#vdoRoom', 'x');
+      await pBad.click('#btnVdoSave');
+      await sleep(400);
+      check('R10e: Save on a page with an invalid ?sbport does not ask to "replace" a config it cannot reach; it says the port is invalid',
+        badDialogs.length === 0 && /invalid \?sbport/i.test(await pBad.evaluate(() => document.getElementById('cfgStatus')?.textContent || '')),
+        JSON.stringify(badDialogs) + ' / ' + await pBad.evaluate(() => document.getElementById('cfgStatus')?.textContent));
       await pBad.close();
 
       // R10f: backoff. A server that accepts then drops must still reach the cap, and the cap is short
       // (GRN-162, GRN-215). Intervals between connects, with a server that closes each one after 100 ms.
-      const flapO = await startExtra({ SB_DROP: '1' });
-      const flapC = await startExtra({ SB_DROP: '1' });
-      const fO = await newPage(browser, { width: 640, height: 360 });
-      const fC = await newPage(browser, { width: 920, height: 900 });
-      await fO.goto(guestUrl(flapO), { waitUntil: 'load' });
-      await fC.goto(`${flapC.api.base}/control/control.html?sbport=${flapC.ws}`, { waitUntil: 'load' });
-      await sleep(16000);
-      for (const [name, x] of [['overlay shim', flapO], ['control.html', flapC]]) {
+      // Each gap is the reconnect delay plus the ~100 ms the mock keeps the socket: about 1.1, 1.6, 2.35, 3.5, then 4.1 s.
+      // One page at a time: tabs that are not in front get their timers throttled, which stretches the gaps.
+      const EXPECT = [1100, 1600, 2350, 3475, 4100];
+      for (const [name, kind] of [['overlay shim', 'overlay'], ['control.html', 'control'], ['director-min', 'min']]) {
+        const x = await startExtra({ SB_DROP: '1' });
+        const url = kind === 'overlay' ? guestUrl(x) : `${x.api.base}/control/${kind === 'control' ? 'control' : 'director-min'}.html?sbport=${x.ws}`;
+        await fetch(`${x.api.base}/mock/conns?clear=1`).then((r) => r.arrayBuffer()); // only the page's own connects count
+        const fp = await newPage(browser, { width: 640, height: 360 });
+        await fp.goto(url, { waitUntil: 'load' });
+        await sleep(13800);
         const t = (await (await fetch(`${x.api.base}/mock/conns`)).json()).conns.map((c) => c.t);
         const gaps = t.slice(1).map((v, i) => v - t[i]);
-        const last = gaps[gaps.length - 1];
-        check(`R10f: ${name}: reconnect delay grows across a server that accepts then drops, and stops near 4 s`,
-          t.length >= 5 && last >= 3500 && last <= 5500 && Math.max(...gaps) <= 5500, JSON.stringify(gaps));
+        check(`R10f: ${name}: the reconnect delay grows (1 s, x1.5) across a server that accepts then drops, and stops near 4 s`,
+          t.length >= 6 && EXPECT.every((e, i) => Math.abs(gaps[i] - e) <= 450) && Math.max(...gaps) <= 5500, JSON.stringify(gaps));
+        await fp.close();
       }
-      await fO.close(); await fC.close();
+
+      // R10h: the overlay's one-time repeat of VDO Sync (GRN-106's second safeguard).
+      const dropSync = await startExtra({ SB_SYNC_DROP: '1' });
+      await seedBoth(dropSync);
+      await dropSync.api.clear();
+      const gR = await newPage(browser, { width: 640, height: 360 });
+      await gR.goto(guestUrl(dropSync), { waitUntil: 'load' });
+      await sleep(4200);
+      const rs = (await dropSync.api.actions()).filter((a) => a.name === 'VDO Sync');
+      check('R10h: when the first sync replay is lost, the overlay repeats VDO Sync once after about 2.5 s and then paints',
+        rs.length === 2 && rs[0].args.reason === 'overlay-connect' && rs[1].args.reason === 'overlay-resync' && rs[1].t - rs[0].t >= 2000 && rs[1].t - rs[0].t <= 3500 && await gR.evaluate(guestPainted),
+        JSON.stringify(rs.map((a) => [a.args.reason, a.t - rs[0].t])));
+      await gR.close();
+      const okSync = await startExtra({});
+      await seedBoth(okSync);
+      await okSync.api.clear();
+      const gK = await newPage(browser, { width: 640, height: 360 });
+      await gK.goto(guestUrl(okSync), { waitUntil: 'load' });
+      await sleep(4200);
+      check('R10h: when state arrives, there is no repeat (exactly one VDO Sync in 4 s)', (await okSync.api.actions()).filter((a) => a.name === 'VDO Sync').length === 1);
+      await gK.close();
 
       // R10g: General.Custom data delivered as a JSON string (SB's schema allows it).
       const strData = await startExtra({ SB_DATA: 'string' });

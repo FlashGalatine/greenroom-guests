@@ -19,9 +19,12 @@
 // added mid-stream paints immediately instead of staying blank. If no vdoninja state
 // has arrived 2.5 s later the request is repeated once.
 //
-// A non-ok reply to the Subscribe or to the sync request, or a Hello frame that carries an
-// authentication block, puts the overlay in its offline state and warns on the console. On
-// close the window gets a `svc:disconnect` event so an overlay can drop live-only state.
+// A non-ok reply to the Subscribe puts the overlay in its offline state and warns on the
+// console; a refused sync request does the same until live frames arrive. A Hello frame that
+// carries an authentication block is only a hint (Streamer.bot sends it whenever Authentication
+// is on, and serves requests anyway unless Enforce is on): if requests are then refused, or the
+// socket is closed, the warning names authentication as the likely cause. On close the window
+// gets a `svc:disconnect` event so an overlay can drop live-only state.
 //
 // Config knobs (set before this script loads, or — only when served over http://
 // — via URL query; file:// OBS sources cannot take query params):
@@ -138,6 +141,9 @@
     let resyncTimer = null;
     let sawVdo = false;
     let healthy = false;
+    let subRefused = false;    // this socket's Subscribe was refused: nothing more is asked of it
+    let authHello = false;     // this socket's Hello carried an authentication block
+    let syncRefusedGrey = false; // greyed because the sync request was refused, until live frames arrive
     const syncIds = new Set();
 
     function send(obj) {
@@ -161,7 +167,7 @@
       // Second safeguard: one repeat if no vdoninja state has come back (a lost replay).
       resyncTimer = setTimeout(() => {
         resyncTimer = null;
-        if (sawVdo || ws !== sock) return;
+        if (sawVdo || subRefused || ws !== sock) return;
         log('no vdoninja state yet — requesting it once more');
         requestSync('overlay-resync');
       }, RESYNC_MS);
@@ -184,19 +190,23 @@
       try { m = JSON.parse(evt.data); } catch { return; }
       if (!m || typeof m !== 'object') return;
 
-      // Streamer.bot's Hello: an authentication block means "Enforce authentication" is on,
-      // and this client does not authenticate.
+      // Streamer.bot's Hello. An authentication block only means Authentication is switched on: with
+      // Enforce off Streamer.bot still serves every request, so this is a hint, not a fault. If the
+      // requests are then refused, or the socket is closed, it is the likely reason and is named.
       if (m.request === 'Hello') {
-        if (m.authentication && typeof m.authentication === 'object') { warn(MSG_AUTH); setOffline(true); }
+        authHello = !!(m.authentication && typeof m.authentication === 'object');
+        if (authHello) log('Hello carries an authentication block');
         return;
       }
 
       if (m.id && !m.event) {
         if (m.id === subId) {
           if (isRefusal(m)) {
-            warn('Subscribe refused: ' + refusal(m));
+            warn(authHello ? MSG_AUTH : 'Subscribe refused: ' + refusal(m));
             if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+            if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
             syncFired = true; // no sync without an accepted Subscribe
+            subRefused = true;
             setOffline(true);
           } else {
             if (!m.status) log('Subscribe ack carried no status field');
@@ -207,13 +217,20 @@
         }
         if (syncIds.has(m.id)) {
           syncIds.delete(m.id);
-          if (isRefusal(m)) { warn('DoAction "' + SYNC_ACTION + '" refused: ' + refusal(m)); setOffline(true); }
+          if (isRefusal(m)) {
+            warn(authHello ? MSG_AUTH : 'DoAction "' + SYNC_ACTION + '" refused: ' + refusal(m));
+            // Greyed only until live frames show the subscription works (a missing action must not
+            // leave a working overlay greyed out for the whole session).
+            syncRefusedGrey = true;
+            setOffline(true);
+          }
           return;
         }
       }
 
       if (m.event && m.event.source === 'General' && m.event.type === 'Custom') {
         healthy = healthy || (backoff.reset(), true);
+        if (syncRefusedGrey) { syncRefusedGrey = false; setOffline(false); }
         let d = m.data;
         if (typeof d === 'string') { try { d = JSON.parse(d); } catch { d = null; } }
         if (!d || typeof d !== 'object' || Array.isArray(d) || !d.type) { log('General.Custom with no data.type — ignored'); return; }
@@ -238,6 +255,7 @@
       if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
       syncFired = true;
       if (ws !== sock) return;
+      if (authHello && !healthy) warn(MSG_AUTH); // hung up on after an authentication Hello
       setOffline(true);
       window.dispatchEvent(new CustomEvent('svc:disconnect'));
       log('connection closed; reconnecting');

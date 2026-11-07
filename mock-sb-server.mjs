@@ -33,9 +33,15 @@
 //                               serve a file (by name, e.g. nameplate-shared.js) that many
 //                               ms late, so a script lands after the page has connected
 //       SB_SUBSCRIBE=none|error Subscribe is never answered, or answered {status:'error'}
+//       SB_SUBSCRIBE_DELAY_MS=<n>  the Subscribe reply (ok or error) comes n ms late
 //       SB_DOACTION=error       every DoAction is answered {status:'error'} and not run
-//       SB_HELLO=auth           send a Hello frame carrying an authentication block on connect
-//       SB_AUTH=close           with SB_HELLO=auth: close a client that sends any request
+//       SB_HELLO=plain|auth     send a Hello frame on connect: plain, or carrying an authentication block
+//       SB_AUTH=close|serve     with SB_HELLO=auth: close a client that sends any request, or serve
+//                               requests anyway (Authentication on, Enforce off); default: refuse them
+//       SB_SYNC_DROP=1          the first VDO Sync is acked but its replay is never broadcast
+//       The four mode options above can also be changed while running:
+//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve
+//       GET /mock/dropall       close every WebSocket client (they reconnect)
 //       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
 //       SB_DROP=1               accept each connection and close it ~100 ms later, unanswered
 //       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
@@ -71,10 +77,15 @@ const WS_PORT = Number(process.env.SB_WS_PORT) || 8080; // SB WebSocket Server d
 const SYNC_DELAY_MS = Number(process.env.SYNC_DELAY_MS) || 0;
 const WIRE_JSON = process.env.SB_WIRE === 'json';
 const EMPTY_MARKER = process.env.SB_EMPTY_MARKER === '1';
-const SUBSCRIBE_MODE = process.env.SB_SUBSCRIBE || 'ok';
-const DOACTION_ERROR = process.env.SB_DOACTION === 'error';
-const HELLO_AUTH = process.env.SB_HELLO === 'auth';
-const AUTH_CLOSE = process.env.SB_AUTH === 'close';
+// Mutable at run time (GET /mock/mode), so a test can flip a behaviour without respawning the mock.
+const modes = {
+  subscribe: process.env.SB_SUBSCRIBE || 'ok',
+  doaction: process.env.SB_DOACTION === 'error' ? 'error' : 'ok',
+  hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : 'none'),
+  auth: process.env.SB_AUTH === 'close' ? 'close' : (process.env.SB_AUTH === 'serve' ? 'serve' : 'refuse'),
+};
+const SUBSCRIBE_DELAY_MS = Number(process.env.SB_SUBSCRIBE_DELAY_MS) || 0;
+let syncDropsLeft = process.env.SB_SYNC_DROP === '1' ? 1 : 0;
 const DATA_STRING = process.env.SB_DATA === 'string';
 const DROP = process.env.SB_DROP === '1';
 const FILE_DELAY = Object.fromEntries((process.env.SB_FILE_DELAY || '').split(',').filter(Boolean)
@@ -200,6 +211,18 @@ const http = createServer(async (req, res) => {
     res.end(body);
     return;
   }
+  if (path === '/mock/mode') {
+    for (const k of Object.keys(modes)) if (query.get(k)) modes[k] = query.get(k);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, modes }));
+    return;
+  }
+  if (path === '/mock/dropall') {
+    for (const c of clients) { try { c.close(); } catch {} }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
   if (path === '/mock/conns') {
     const body = JSON.stringify({ conns: connLog });
     if (query.get('clear') === '1') connLog.length = 0;
@@ -281,18 +304,19 @@ wss.on('connection', (ws) => {
   connLog.push({ t: Date.now() });
   ws.subscribedCustom = false; // only a correctly-subscribed client receives broadcasts
   if (DROP) { setTimeout(() => { try { ws.close(); } catch {} }, 100); }
-  if (HELLO_AUTH) {
-    // The authentication block a Streamer.bot with "Authentication" enforced sends in Hello.
-    ws.send(JSON.stringify({ request: 'Hello', info: { name: 'Streamer.bot', version: 'mock' },
-      authentication: { challenge: 'mock-challenge', salt: 'mock-salt' } }));
+  if (modes.hello !== 'none') {
+    // Streamer.bot's Hello; it carries an authentication block when Authentication is on.
+    const hello = { request: 'Hello', info: { name: 'Streamer.bot', version: 'mock' } };
+    if (modes.hello === 'auth') hello.authentication = { challenge: 'mock-challenge', salt: 'mock-salt' };
+    ws.send(JSON.stringify(hello));
   }
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
     if (DROP) return;
-    if (HELLO_AUTH && m.request !== 'Authenticate') {
-      // Unauthenticated: a server that enforces authentication refuses (or, with SB_AUTH=close, hangs up on) the request.
-      if (AUTH_CLOSE) { try { ws.close(); } catch {} }
+    if (modes.hello === 'auth' && modes.auth !== 'serve' && m.request !== 'Authenticate') {
+      // Unauthenticated: a server that enforces authentication refuses (or, with auth=close, hangs up on) the request.
+      if (modes.auth === 'close') { try { ws.close(); } catch {} }
       else ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: authentication required' }));
       return;
     }
@@ -304,10 +328,13 @@ wss.on('connection', (ws) => {
       const gen = m.events && m.events.general;
       ws.subscribedCustom = Array.isArray(gen) && gen.includes('Custom');
       console.log('[mock] Subscribe', ws.subscribedCustom ? 'OK (general.Custom)' : 'IGNORED (expected lowercase events.general:["Custom"])');
-      if (SUBSCRIBE_MODE === 'none') return; // never answered
-      if (SUBSCRIBE_MODE === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: subscribe refused' })); return; }
-      // The documented flat reply: {status, id, events} (no 'result' wrapper).
-      ws.send(JSON.stringify({ status: 'ok', id: m.id, events: m.events }));
+      if (modes.subscribe === 'none') return; // never answered
+      const reply = modes.subscribe === 'error'
+        ? { status: 'error', id: m.id, error: 'mock: subscribe refused' }
+        // The documented flat reply: {status, id, events} (no 'result' wrapper).
+        : { status: 'ok', id: m.id, events: m.events };
+      const sendReply = () => { try { ws.send(JSON.stringify(reply)); } catch {} };
+      if (SUBSCRIBE_DELAY_MS > 0) setTimeout(sendReply, SUBSCRIBE_DELAY_MS); else sendReply();
       return;
     }
 
@@ -318,7 +345,7 @@ wss.on('connection', (ws) => {
       const name = (m.action && m.action.name) || '';
       const args = m.args || {};
       logAction(name, args);
-      if (DOACTION_ERROR) { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: action not found' })); return; }
+      if (modes.doaction === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: action not found' })); return; }
       ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
 
       if (name === 'VDO Push') {
@@ -334,6 +361,7 @@ wss.on('connection', (ws) => {
         return;
       }
       if (name === 'VDO Sync') {
+        if (syncDropsLeft > 0) { syncDropsLeft--; console.log('[mock] VDO Sync → replay dropped (SB_SYNC_DROP)'); return; }
         // Read at request time, broadcast SYNC_DELAY_MS later (the real action reads,
         // then broadcasts; a delay models a slow first sync).
         const snap = { vdo: caches.vdo, discord: caches.discord };
