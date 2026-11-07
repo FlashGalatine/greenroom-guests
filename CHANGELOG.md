@@ -1,12 +1,13 @@
 # Changelog
 
 All notable changes to **Greenroom** are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the patch number
-tracks the repository's commit count at release time.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the patch number is
+the number of commits on `main` before the release commit.
 
-Nothing was tagged between the initial release and 1.0.13, so that release
+Nothing was released between the initial release and 1.0.13, so that release
 collects every change in between. Commit hashes and landing dates are noted for
-traceability.
+traceability. Each release is tagged `v<version>` on its Release commit; the
+tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
 ## [1.0.13] — 2026-07-29
 
@@ -110,4 +111,5 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
-[1.0.13]: https://github.com/FlashGalatine/greenroom-guests/compare/98ae50d...main
+[1.0.13]: https://github.com/FlashGalatine/greenroom-guests/compare/v0.1.0...v1.0.13
+[0.1.0]: https://github.com/FlashGalatine/greenroom-guests/releases/tag/v0.1.0
