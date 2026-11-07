@@ -601,6 +601,12 @@
   // healthy event can put it right instead of leaving a stale notice up.
   let pillFault = '';
   let connFault = false; // this connection's requests are being refused (the sync status stays quiet)
+  // A push Streamer.bot refused is offered again, but not on every 2.5 s poll: refusedSig is that payload and
+  // refusedAt when it was refused. Any request that succeeds, or a new connection, lifts the hold at once.
+  let refusedSig = '';
+  let refusedAt = 0;
+  let cfgRefused = false; // cfgStatus currently says a push was not accepted
+  const REFUSED_RETRY_MS = 10000;
   const backoff = sbBackoff();
   const pendingActions = new Map(); // DoAction id -> { name, payload }, until its reply arrives
 
@@ -649,10 +655,12 @@
       connFault = false;
       backoff.reset();
       if (pillFault === 'auth' || pillFault === 'subscribe') clearFault(); // accepted after all
+      renderSyncStatus();
     };
     sock.onopen = () => {
       // (an authentication notice from the last connection stays until a healthy session replaces it)
       if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, 'SB: connected', 'live'); }
+      refusedSig = '';
       subId = String(++msgId);
       // Lowercase `general` — the SB Subscribe case gotcha.
       sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
@@ -688,14 +696,31 @@
         if (pendingActions.has(m.id)) {
           const req = pendingActions.get(m.id);
           pendingActions.delete(m.id);
-          if (isRefusal(m)) {
-            if (authHello) showFault('auth', MSG_AUTH); else showFault('doaction', 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')');
+          if (isRefusal(m) && req.name === SYNC_ACTION && synced) {
+            // moot: a sync request sent before the saved config arrived (by another route) was refused afterwards
+          } else if (isRefusal(m)) {
+            // Authentication is the likely cause only while this socket has not been served: an accepted
+            // Subscribe already shows Enforce is off, so a refusal after it is something else (say, an action
+            // that was never imported).
+            if (authHello && !healthy) { connFault = true; showFault('auth', MSG_AUTH); renderSyncStatus(); }
+            else showFault('doaction', 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')');
             if (req.name === PUSH_ACTION) {
-              // Streamer.bot did not save it, so it is not "pushed": let the next poll or edit send it again.
+              // Streamer.bot did not save it, so it is not "pushed": it is offered again after REFUSED_RETRY_MS
+              // (an operator Save always sends at once).
               if (req.payload && req.payload === lastPushedSig) lastPushedSig = '';
+              refusedSig = req.payload || '';
+              refusedAt = Date.now();
+              cfgRefused = true;
               setCfgStatus('Not accepted: Streamer.bot refused "' + PUSH_ACTION + '" (' + refusalText(m) + ').');
             }
-          } else if (pillFault === 'doaction') clearFault(); // requests work again
+          } else {
+            refusedSig = ''; // requests work again
+            if (pillFault === 'doaction') clearFault();
+            if (cfgRefused && req.name === PUSH_ACTION) {
+              cfgRefused = false;
+              if (els.cfgStatus.textContent.startsWith('Not accepted')) setCfgStatus('');
+            }
+          }
           return;
         }
       }
@@ -712,9 +737,10 @@
       syncFired = true;
       if (ws !== sock) return;
       pendingActions.clear();
-      connFault = false;
+      connFault = !!(authHello && !healthy); // (the sync line stays quiet under an authentication notice)
       if (authHello && !healthy) showFault('auth', MSG_AUTH); // hung up on after an authentication Hello
       else { pillFault = ''; setPill(els.sbStatus, 'SB: offline — retrying', 'error'); }
+      renderSyncStatus();
       scheduleReconnect();
     };
     sock.onerror = () => {};
@@ -818,6 +844,7 @@
     if (fromRoster && !hasRoster) return false;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig && !force && !unsyncedOverride) return false;
+    if (payload === refusedSig && !force && !unsyncedOverride && Date.now() - refusedAt < REFUSED_RETRY_MS) return false;
     // Record it as pushed only if it was sent: with the socket down the next poll must retry,
     // and a status line must not claim a push that never left.
     if (!doAction(PUSH_ACTION, { payload })) return false;

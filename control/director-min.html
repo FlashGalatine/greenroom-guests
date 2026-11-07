@@ -266,6 +266,7 @@
     if (fromRoster && !hasRoster) return;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig) return;
+    if (payload === refusedSig && Date.now() - refusedAt < REFUSED_RETRY_MS) return;
     // Record it as pushed only if it was sent: with the socket down the next poll must retry.
     if (!doAction(PUSH_ACTION, { payload })) return;
     lastPushedSig = payload;
@@ -280,6 +281,11 @@
   let subId = null;
   let reconnectTimer = null;
   let waitText = 'connecting to SB…'; // what to show while the saved config has not come back
+  // A push Streamer.bot refused is offered again, but not on every 2.5 s poll: refusedSig is that payload and
+  // refusedAt when it was refused. Any request that succeeds, or a new connection, lifts the hold at once.
+  let refusedSig = '';
+  let refusedAt = 0;
+  const REFUSED_RETRY_MS = 10000;
   const backoff = sbBackoff();
   const pendingActions = new Map(); // DoAction id -> { name, payload }, until its reply arrives
 
@@ -327,6 +333,7 @@
     };
     sock.onopen = () => {
       waitText = 'connected to SB — waiting for state';
+      refusedSig = '';
       if (!connProblem) {
         if (!synced) show(waitText);
         else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
@@ -365,15 +372,27 @@
         if (pendingActions.has(m.id)) {
           const req = pendingActions.get(m.id);
           pendingActions.delete(m.id);
-          if (isRefusal(m)) {
-            if (authHello) connProblem = MSG_AUTH;
+          if (isRefusal(m) && req.name === SYNC_ACTION && synced) {
+            // moot: a sync request sent before the saved config arrived (by another route) was refused afterwards
+          } else if (isRefusal(m)) {
+            // Authentication is the likely cause only while this socket has not been served: an accepted
+            // Subscribe already shows Enforce is off, so a refusal after it is something else (say, an action
+            // that was never imported).
+            if (authHello && !healthy) connProblem = MSG_AUTH;
             else transientProblem = 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')';
-            // Streamer.bot did not save it, so it is not "pushed": let the next poll send it again.
-            if (req.name === PUSH_ACTION && req.payload && req.payload === lastPushedSig) lastPushedSig = '';
+            // Streamer.bot did not save it, so it is not "pushed": it is offered again after REFUSED_RETRY_MS.
+            if (req.name === PUSH_ACTION && req.payload) {
+              if (req.payload === lastPushedSig) lastPushedSig = '';
+              refusedSig = req.payload;
+              refusedAt = Date.now();
+            }
             show('');
-          } else if (transientProblem) { // requests work again
-            transientProblem = '';
-            if (synced) showSteady(); else show(waitText);
+          } else {
+            refusedSig = ''; // requests work again
+            if (transientProblem) {
+              transientProblem = '';
+              if (synced) showSteady(); else show(waitText);
+            }
           }
           return;
         }

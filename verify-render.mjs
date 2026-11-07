@@ -1055,6 +1055,7 @@ async function main() {
       };
       const guestPainted = () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111')
         && document.querySelector('.np-plate')?.hidden === false;
+      const guestPaintedSrc = () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111');
       const guestUrl = (x, extra = '') => `${x.api.base}/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}${extra}`;
 
       // R10a: a script that lands after the page has connected (GRN-106, GRN-104). The delay is done by
@@ -1203,13 +1204,41 @@ async function main() {
       // The server closes any unauthenticated client: the message stays, nothing throws.
       const authClose = await startExtra({ SB_HELLO: 'auth', SB_AUTH: 'close' });
       const cC = await newPage(browser, { width: 920, height: 900 });
+      const dC = await newPage(browser, { width: 480, height: 120 });
+      const oC = await newPage(browser, { width: 640, height: 360 });
       const wCC = watchPage(cC);
-      await cC.goto(`${authClose.api.base}/control/control.html?sbport=${authClose.ws}`);
-      await sleep(3500);
+      const wOC = watchPage(oC);
+      await Promise.all([cC.goto(`${authClose.api.base}/control/control.html?sbport=${authClose.ws}`), dC.goto(`${authClose.api.base}/control/director-min.html?sbport=${authClose.ws}`), oC.goto(guestUrl(authClose))]);
+      await sleep(6500); // past the 5 s "name the causes" timer
       check('R10d: when the server closes unauthenticated clients, the auth message stays on screen and nothing throws',
         /SB auth enforced/.test(await cC.evaluate(() => document.getElementById('sbStatus')?.textContent || '')) && wCC.errors.length === 0,
         await cC.evaluate(() => document.getElementById('sbStatus')?.textContent));
-      await cC.close();
+      check('R10d: …and control.html does not also blame VDO Sync or a fresh install (the sync line stays quiet)',
+        await cC.evaluate(() => { const e = document.getElementById('syncStatus'); return !!e && e.hidden && !e.textContent; }), await cC.evaluate(() => document.getElementById('syncStatus')?.textContent));
+      check('R10d: …director-min names authentication after the hang-up', /SB auth enforced/.test(await dC.evaluate(() => document.getElementById('status')?.textContent || '')));
+      check('R10d: …and the overlay warns about it on the console and is offline',
+        await oC.evaluate(() => document.body.classList.contains('offline')) && wOC.console.some((c) => /^warn/.test(c) && /SB auth enforced/.test(c)), JSON.stringify(wOC.console.slice(-3)));
+      await cC.close(); await dC.close(); await oC.close();
+      // Authentication on, Enforce off, but a DoAction refused for another reason (an action that was never
+      // imported): the cause is the missing action, not authentication, and the page says so.
+      const authAct = await startExtra({ SB_HELLO: 'auth', SB_AUTH: 'serve', SB_DOACTION: 'error' });
+      const cA2 = await newPage(browser, { width: 920, height: 900 });
+      const dA2 = await newPage(browser, { width: 480, height: 120 });
+      const oA2 = await newPage(browser, { width: 640, height: 360 });
+      const wOA2 = watchPage(oA2);
+      await Promise.all([cA2.goto(`${authAct.api.base}/control/control.html?sbport=${authAct.ws}`), dA2.goto(`${authAct.api.base}/control/director-min.html?sbport=${authAct.ws}`), oA2.goto(guestUrl(authAct))]);
+      await sleep(1500);
+      const pillA2 = await cA2.evaluate(() => document.getElementById('sbStatus')?.textContent || '');
+      const minA2 = await dA2.evaluate(() => document.getElementById('status')?.textContent || '');
+      check('R10d: with Authentication on and Enforce off, a refused DoAction is blamed on the action, not on authentication (control pill, director-min, overlay console)',
+        /DoAction .*refused/.test(pillA2) && !/auth/i.test(pillA2) && /DoAction .*refused/.test(minA2) && !/auth/i.test(minA2) && !wOA2.console.some((c) => /SB auth enforced/.test(c)),
+        pillA2 + ' | ' + minA2 + ' | ' + JSON.stringify(wOA2.console.slice(-2)));
+      await fetch(`${authAct.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
+      check('R10d: …and the notice clears once requests work again (it was not pinned as an authentication notice)',
+        await wait(cA2, () => !/refused|auth/.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000)
+          && await wait(dA2, () => !/refused|auth/.test(document.getElementById('status')?.textContent || ''), null, 8000),
+        await cA2.evaluate(() => document.getElementById('sbStatus')?.textContent) + ' | ' + await dA2.evaluate(() => document.getElementById('status')?.textContent));
+      await cA2.close(); await dA2.close(); await oA2.close();
 
       // Review findings on the above. A Hello whose authentication block means nothing (Authentication on,
       // Enforce off: SB still serves every request) must not raise an alarm or grey the overlay.
@@ -1267,45 +1296,74 @@ async function main() {
       const lateSyncs = (await late.api.actions()).filter((a) => a.name === 'VDO Sync');
       check('R10d: after a late Subscribe refusal no page sends another VDO Sync (only the three 400 ms fallbacks happened)',
         lateSyncs.length <= 3 && !lateSyncs.some((a) => /retry|resync/.test((a.args && a.args.reason) || '')), JSON.stringify(lateSyncs.map((a) => a.args && a.args.reason)));
-      const lateTxt = await cL.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
-      check('R10d: …and control.html does not blame VDO Sync or a fresh install for a refused Subscribe', !/fresh install|not compiled/i.test(lateTxt), lateTxt);
+      const lateTxt = await cL.evaluate(() => { const e = document.getElementById('syncStatus'); return e ? (e.hidden ? '' : e.textContent) : 'MISSING'; });
+      check('R10d: …and control.html says nothing about VDO Sync or a fresh install for a refused Subscribe (the sync line is quiet)', lateTxt === '', lateTxt);
       await cL.close(); await dL.close(); await oL.close();
-      // A refused DoAction is a current fault, not a permanent one: it clears when requests work again.
-      const flip = await startExtra({ SB_DOACTION: 'error' });
-      const cF = await newPage(browser, { width: 920, height: 900 });
-      cF.on('dialog', (d) => d.accept());
-      const dF = await newPage(browser, { width: 480, height: 120 });
-      const oF = await newPage(browser, { width: 640, height: 360 });
-      await Promise.all([cF.goto(`${flip.api.base}/control/control.html?sbport=${flip.ws}`), dF.goto(`${flip.api.base}/control/director-min.html?sbport=${flip.ws}`), oF.goto(guestUrl(flip))]);
+      // A refused DoAction is a current fault, not a permanent one. It clears by either of two routes, each
+      // tested alone: (a) a later request succeeds, (b) the saved config arrives another way.
+      // (a) Unseeded, nothing ever syncs the pages: only an ok reply to their own VDO Sync retry can clear it.
+      const flipA = await startExtra({ SB_DOACTION: 'error' });
+      const cFa = await newPage(browser, { width: 920, height: 900 });
+      const dFa = await newPage(browser, { width: 480, height: 120 });
+      await Promise.all([cFa.goto(`${flipA.api.base}/control/control.html?sbport=${flipA.ws}`), dFa.goto(`${flipA.api.base}/control/director-min.html?sbport=${flipA.ws}`)]);
       await sleep(1500);
-      const shownBefore = /DoAction .*refused/.test(await cF.evaluate(() => document.getElementById('sbStatus')?.textContent || ''))
-        && /DoAction .*refused/.test(await dF.evaluate(() => document.getElementById('status')?.textContent || ''))
-        && await oF.evaluate(() => document.body.classList.contains('offline'));
-      await fetch(`${flip.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
-      await cF.click('#btnVdoSave'); // a DoAction that now succeeds (control.html: the ok reply clears the pill)
-      check('R10d: control.html clears the refused-DoAction pill once a DoAction succeeds again',
-        shownBefore && await wait(cF, () => !/refused/.test(document.getElementById('sbStatus')?.textContent || ''), null, 5000), await cF.evaluate(() => document.getElementById('sbStatus')?.textContent));
-      // director-min's own retry of VDO Sync is the request that succeeds
-      check('R10d: …director-min clears it on its next successful request', await wait(dF, () => !/refused/.test(document.getElementById('status')?.textContent || ''), null, 12000),
-        await dF.evaluate(() => document.getElementById('status')?.textContent));
-      await flip.api.broadcast({ type: 'vdoninja:update', vdoninja: SEED_CONN }); // live state keeps flowing to the overlay
-      check('R10d: …and the overlay, greyed by the refused sync, comes back as soon as live frames arrive (and paints)',
-        await wait(oF, () => !document.body.classList.contains('offline') && (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 5000));
-      await cF.close(); await dF.close(); await oF.close();
-      // A push that SB refused must be tried again; it was never saved.
-      const rej = await startExtra({});
-      const REJ_SEED = { ...SEED_CONN, slots: [slot(1, { label: 'ALPHA', streamID: '' }), slot(2, { label: 'BRAVO', streamID: '' }), slot(3), slot(4)] };
-      rej.prod.doAction('VDO Push', { payload: JSON.stringify(REJ_SEED) });
-      await sleep(300);
-      const dJ = await newPage(browser, { width: 480, height: 120 }, `${MOCK_DIRECTOR}?fixed=1`);
-      await dJ.goto(`${rej.api.base}/control/director-min.html?sbport=${rej.ws}`, { waitUntil: 'load' });
-      await wait(dJ, () => /room connroom/.test(document.getElementById('status')?.textContent || ''), null, 6000);
-      await fetch(`${rej.api.base}/mock/mode?doaction=error`).then((r) => r.arrayBuffer()); // before its first poll
-      await sleep(3000); // the first poll's push is refused
-      await fetch(`${rej.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
-      const resent = await (async () => { for (let i = 0; i < 28; i++) { const s = await rej.api.state(); if (s.vdo && s.vdo.slots && s.vdo.slots[0].streamID === 'aaa111') return true; await sleep(250); } return false; })();
-      check('R10d: director-min pushes again after SB refused a push (the refused payload is not remembered as sent)', resent);
-      await dJ.close();
+      const shownA = /DoAction .*refused/.test(await cFa.evaluate(() => document.getElementById('sbStatus')?.textContent || ''))
+        && /DoAction .*refused/.test(await dFa.evaluate(() => document.getElementById('status')?.textContent || ''));
+      await fetch(`${flipA.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer()); // before their 2 s VDO Sync retries
+      check('R10d: a refused DoAction clears on control.html when its next request (the VDO Sync retry) succeeds, with the page still unsynced',
+        shownA && await wait(cFa, () => !/refused/.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000)
+          && await cFa.evaluate(() => !document.getElementById('syncStatus').hidden),
+        await cFa.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      check('R10d: …and on director-min', await wait(dFa, () => !/refused/.test(document.getElementById('status')?.textContent || ''), null, 8000),
+        await dFa.evaluate(() => document.getElementById('status')?.textContent));
+      await cFa.close(); await dFa.close();
+      // (b) The config arrives as a frame (another page pushed it): the refused sync no longer matters. Live frames
+      // also bring a greyed overlay back, and a repeat of the refused sync must not grey it again.
+      const flipB = await startExtra({ SB_DOACTION: 'error' });
+      const cFb = await newPage(browser, { width: 920, height: 900 });
+      const dFb = await newPage(browser, { width: 480, height: 120 });
+      const oFb = await newPage(browser, { width: 640, height: 360 });
+      await Promise.all([cFb.goto(`${flipB.api.base}/control/control.html?sbport=${flipB.ws}`), dFb.goto(`${flipB.api.base}/control/director-min.html?sbport=${flipB.ws}`), oFb.goto(guestUrl(flipB))]);
+      await sleep(1500);
+      const shownB = await oFb.evaluate(() => document.body.classList.contains('offline'));
+      // A live frame that is not vdo state and that the control pages ignore (a voice update would make them
+      // auto-add the voice users and push the directory, which this mock refuses: an honest, different notice).
+      await flipB.api.broadcast({ type: 'greenroom:ping' });
+      const backOnline = await wait(oFb, () => !document.body.classList.contains('offline'), null, 4000);
+      await sleep(3500); // past the overlay's 2.5 s repeat of VDO Sync
+      check('R10d: the overlay greyed by a refused sync comes back on a live frame, and the repeat of the refused sync does not grey it again',
+        shownB && backOnline && await oFb.evaluate(() => !document.body.classList.contains('offline')));
+      await flipB.api.broadcast({ type: 'vdoninja:update', vdoninja: SEED_CONN });
+      check('R10d: …when the saved config arrives as a frame, the refused-DoAction notice clears on control.html and director-min, and the overlay paints',
+        await wait(cFb, () => !/refused/.test(document.getElementById('sbStatus')?.textContent || ''), null, 5000)
+          && await wait(dFb, () => !/refused/.test(document.getElementById('status')?.textContent || ''), null, 5000)
+          && await wait(oFb, guestPaintedSrc, null, 5000));
+      await cFb.close(); await dFb.close(); await oFb.close();
+      // A push that SB refused is offered again, but at a bounded rate (not on every 2.5 s poll), and the page
+      // says it was not accepted until a retry is saved. Both control pages, against a fixed roster.
+      for (const kind of ['director-min', 'control']) {
+        const rej = await startExtra({});
+        const REJ_SEED = { ...SEED_CONN, slots: [slot(1, { label: 'ALPHA', streamID: '' }), slot(2, { label: 'BRAVO', streamID: '' }), slot(3), slot(4)] };
+        rej.prod.doAction('VDO Push', { payload: JSON.stringify(REJ_SEED) });
+        await sleep(300);
+        const pj = await newPage(browser, kind === 'control' ? { width: 920, height: 900 } : { width: 480, height: 120 }, `${MOCK_DIRECTOR}?fixed=1`);
+        await pj.goto(`${rej.api.base}/control/${kind}.html?sbport=${rej.ws}`, { waitUntil: 'load' });
+        const adopted2 = await wait(pj, () => /room connroom/.test(document.getElementById('status')?.textContent || '') || document.getElementById('vdoRoom')?.value === 'connroom', null, 6000);
+        await fetch(`${rej.api.base}/mock/mode?doaction=error`).then((r) => r.arrayBuffer()); // before its first poll
+        await sleep(8000); // polls at about 1.5, 4, 6.5 s: only the first push may be sent
+        const attempts = (await rej.api.actions()).filter((a) => a.name === 'VDO Push' && /"streamID":"aaa111"/.test((a.args && a.args.payload) || ''));
+        const notAccepted = kind === 'control' ? /Not accepted/.test(await pj.evaluate(() => document.getElementById('cfgStatus')?.textContent || '')) : true;
+        check(`R10d: ${kind}: while SB refuses every push it is offered at a bounded rate (1 attempt in 8 s, not one per poll)${kind === 'control' ? ' and the page says "Not accepted"' : ''}`,
+          adopted2 && attempts.length === 1 && notAccepted, `${attempts.length} attempt(s), adopted=${adopted2}`);
+        await fetch(`${rej.api.base}/mock/mode?doaction=ok`).then((r) => r.arrayBuffer());
+        const resent = await (async () => { for (let i = 0; i < 64; i++) { const s = await rej.api.state(); if (s.vdo && s.vdo.slots && s.vdo.slots[0].streamID === 'aaa111') return true; await sleep(250); } return false; })();
+        check(`R10d: ${kind}: once SB accepts requests again the refused push is sent again and saved`, resent);
+        if (kind === 'control') {
+          check('R10d: …and control.html drops the "Not accepted" line once it is saved', await wait(pj, () => !/Not accepted/.test(document.getElementById('cfgStatus')?.textContent || ''), null, 4000),
+            await pj.evaluate(() => document.getElementById('cfgStatus')?.textContent));
+        }
+        await pj.close();
+      }
 
       // R10e: ?sbport is a port number or nothing (GRN-27, GRN-100). A bad value never reaches a WebSocket.
       const BAD_PORTS = ['1%40example.invalid', '0', '65536', 'abc', '8080.5', ''];
@@ -1379,8 +1437,10 @@ async function main() {
         await fetch(`${x.api.base}/mock/conns?clear=1`).then((r) => r.arrayBuffer()); // only the page's own connects count
         const fp = await newPage(browser, { width: 640, height: 360 });
         await fp.goto(url, { waitUntil: 'load' });
-        await sleep(13800);
-        const t = (await (await fetch(`${x.api.base}/mock/conns`)).json()).conns.map((c) => c.t);
+        // Poll until the sixth connect (nominally 12.6 s in; each gap may drift 450 ms), never a fixed sleep.
+        let t = [];
+        for (let i = 0; i < 80 && t.length < 6; i++) { await sleep(250); t = (await (await fetch(`${x.api.base}/mock/conns`)).json()).conns.map((c) => c.t); }
+        await sleep(300);
         const gaps = t.slice(1).map((v, i) => v - t[i]);
         check(`R10f: ${name}: the reconnect delay grows (1 s, x1.5) across a server that accepts then drops, and stops near 4 s`,
           t.length >= 6 && EXPECT.every((e, i) => Math.abs(gaps[i] - e) <= 450) && Math.max(...gaps) <= 5500, JSON.stringify(gaps));

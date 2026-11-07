@@ -144,6 +144,7 @@
     let subRefused = false;    // this socket's Subscribe was refused: nothing more is asked of it
     let authHello = false;     // this socket's Hello carried an authentication block
     let syncRefusedGrey = false; // greyed because the sync request was refused, until live frames arrive
+    let syncRefused = false;     // the sync request was refused: asking again would only be refused again
     const syncIds = new Set();
 
     function send(obj) {
@@ -167,7 +168,7 @@
       // Second safeguard: one repeat if no vdoninja state has come back (a lost replay).
       resyncTimer = setTimeout(() => {
         resyncTimer = null;
-        if (sawVdo || subRefused || ws !== sock) return;
+        if (sawVdo || subRefused || syncRefused || ws !== sock) return;
         log('no vdoninja state yet — requesting it once more');
         requestSync('overlay-resync');
       }, RESYNC_MS);
@@ -217,11 +218,16 @@
         }
         if (syncIds.has(m.id)) {
           syncIds.delete(m.id);
-          if (isRefusal(m)) {
-            warn(authHello ? MSG_AUTH : 'DoAction "' + SYNC_ACTION + '" refused: ' + refusal(m));
+          // (a refusal of a sync request that arrives after the state has: moot, ignored)
+          if (isRefusal(m) && !sawVdo) {
+            // Authentication is the likely cause only while this socket has not been served: an accepted
+            // Subscribe already shows Enforce is off, so a refusal after it is something else (a missing action).
+            warn(authHello && !healthy ? MSG_AUTH : 'DoAction "' + SYNC_ACTION + '" refused: ' + refusal(m));
             // Greyed only until live frames show the subscription works (a missing action must not
-            // leave a working overlay greyed out for the whole session).
+            // leave a working overlay greyed out for the whole session), and not asked again.
             syncRefusedGrey = true;
+            syncRefused = true;
+            if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
             setOffline(true);
           }
           return;

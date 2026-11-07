@@ -17,9 +17,11 @@ Streamer.bot is the entire bus — there is no other server.
 // (no "result" wrapper). Clients treat a `status` other than "ok" as a refusal: no
 // VDO Sync, a visible status (control pill, director-min status, the overlay's offline
 // class and a console warning). A reply with no `status` field is not read as a refusal.
-// On connect Streamer.bot also sends { "request": "Hello", … }; one that carries an
-// "authentication" object means "Enforce authentication" is on, which Greenroom does not
-// support: the clients show "SB auth enforced — turn Enforce off".
+// On connect Streamer.bot also sends { "request": "Hello", … }. An "authentication" object in it
+// only means Authentication is switched on; with Enforce off Streamer.bot still serves every
+// request. If this connection's requests are then refused, or Streamer.bot hangs up before
+// accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off"
+// (Greenroom does not authenticate). It clears on the next healthy connection.
 
 // DoAction — ack {id, status:'ok'} means the action STARTED, not that it
 // succeeded. A C# compile error still acks ok and broadcasts nothing; that is
