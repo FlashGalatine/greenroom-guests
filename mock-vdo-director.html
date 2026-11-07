@@ -21,6 +21,8 @@
       t ≥ 3s   BRAVO joins   (streamID bbb222)
       t ≥ 6s   ALPHA leaves
       t ≥ 9s   ALPHA REJOINS with a NEW streamID (aaa333)   ← the auto-follow window
+  ?fixed=1 answers every poll with the same roster (ALPHA aaa111, BRAVO bbb222), so a
+  page that has adopted a matching config must make zero pushes however many polls pass.
   ?malformed=1 answers the first four polls with malformed shapes (null guestList,
   string guestList, entry missing streamID, numeric label/streamID) before going
   normal — the defensive-parser cases, live.
@@ -43,6 +45,7 @@
   const P = new URLSearchParams(location.search);
   const SPEED = P.get('fast') === '1' ? 2.5 : 1;
   const MALFORMED = P.get('malformed') === '1';
+  const FIXED = P.get('fixed') === '1';
   const t0 = Date.now();
   let polls = 0;
   let malformedServed = 0;
@@ -51,6 +54,11 @@
   function rosterAt(elapsedMs) {
     const t = elapsedMs * SPEED;
     const gl = { 0: { streamID: 'dIrEcToR00', label: '' } }; // the director itself
+    if (FIXED) {
+      gl[1] = { streamID: 'aaa111', label: 'ALPHA' };
+      gl[2] = { streamID: 'bbb222', label: 'BRAVO' };
+      return gl;
+    }
     let n = 1;
     if (t >= 1000 && t < 6000) gl[n++] = { streamID: 'aaa111', label: 'ALPHA' };
     if (t >= 3000) gl[n++] = { streamID: 'bbb222', label: 'BRAVO' };

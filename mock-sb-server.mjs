@@ -12,10 +12,23 @@
 //       /mock/vdo-director.html -> the fake vdo.ninja director (offline auto-follow tests)
 //       /mock/actions[?clear=1] -> ring buffer of every DoAction {t, name, args} received
 //       /mock/state             -> the two caches, parsed
-//       /mock/restart           -> clears the DISCORD cache only — simulates an SB
+//       /mock/restart[?vdo=1]   -> clears the DISCORD cache only — simulates an SB
 //                                  restart wiping the non-persisted `discord.state`
-//                                  global while the persisted `vdo.state` survives
+//                                  global while the persisted `vdo.state` survives;
+//                                  ?vdo=1 clears vdo.state too (a wiped or fresh SB)
+//       POST /mock/broadcast    -> broadcast the JSON body, as-is, as a General.Custom
+//                                  `data` object (malformed-frame tests)
 //       /                       -> a landing page for quick manual testing
+//
+//     Test options (environment variables, all off by default):
+//       SYNC_DELAY_MS=<n>       VDO Sync broadcasts its replay n ms after the request
+//                               (a slow first sync). The caches are read at request time.
+//       SB_WIRE=json            broadcast the state as ESCAPED STRING fields,
+//                               {type:'vdoninja:update', vdoninjaJson:'<json>'} and
+//                               {type:'discord:voice:update', discordVoiceJson:'<json>'},
+//                               the shape actions switch to in a later release
+//       SB_EMPTY_MARKER=1       VDO Sync with an empty vdo.state broadcasts
+//                               {type:'vdo:sync:empty'} (a later action release sends it)
 //
 //   • WebSocket Server on :8080 — speaks SB's envelope and implements the FIVE
 //     Greenroom action semantics (mirroring the C# in actions/):
@@ -45,6 +58,9 @@ const OVERLAY_DIR = resolve(__dirname, 'overlay');
 
 const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7474; // SB HTTP Server default
 const WS_PORT = Number(process.env.SB_WS_PORT) || 8080; // SB WebSocket Server default
+const SYNC_DELAY_MS = Number(process.env.SYNC_DELAY_MS) || 0;
+const WIRE_JSON = process.env.SB_WIRE === 'json';
+const EMPTY_MARKER = process.env.SB_EMPTY_MARKER === '1';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -89,8 +105,16 @@ function parsePayload(name, raw) {
   }
 }
 
-function wrapVdo(parsed) { return customEvent({ type: 'vdoninja:update', vdoninja: parsed }); }
-function wrapDiscord(parsed) { return customEvent({ type: 'discord:voice:update', discordVoice: parsed }); }
+function wrapVdo(parsed) {
+  return customEvent(WIRE_JSON
+    ? { type: 'vdoninja:update', vdoninjaJson: JSON.stringify(parsed) }
+    : { type: 'vdoninja:update', vdoninja: parsed });
+}
+function wrapDiscord(parsed) {
+  return customEvent(WIRE_JSON
+    ? { type: 'discord:voice:update', discordVoiceJson: JSON.stringify(parsed) }
+    : { type: 'discord:voice:update', discordVoice: parsed });
+}
 
 // ── HTTP server (SB HTTP Server mimic) ───────────────────────────────────────
 
@@ -166,9 +190,24 @@ const http = createServer(async (req, res) => {
     // non-persisted discord.state global is gone. (Connections are NOT dropped —
     // this models the global-store semantics, which is what VDO Sync replays.)
     caches.discord = null;
-    console.log('[mock] RESTART simulated — discord cache cleared, vdo cache kept');
+    const wipeVdo = query.get('vdo') === '1';
+    if (wipeVdo) caches.vdo = null;
+    console.log(`[mock] RESTART simulated — discord cache cleared, vdo cache ${wipeVdo ? 'cleared too' : 'kept'}`);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, kept: caches.vdo != null ? 'vdo' : null, cleared: 'discord' }));
+    res.end(JSON.stringify({ ok: true, kept: caches.vdo != null ? 'vdo' : null, cleared: wipeVdo ? 'vdo+discord' : 'discord' }));
+    return;
+  }
+  if (path === '/mock/broadcast' && req.method === 'POST') {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let data;
+      try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('body is not JSON'); return; }
+      broadcastRaw(customEvent(data));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
     return;
   }
   if (path === '/mock/vdo-director.html') {
@@ -249,10 +288,17 @@ wss.on('connection', (ws) => {
         return;
       }
       if (name === 'VDO Sync') {
-        let sent = 0;
-        if (caches.vdo) { const p = parsePayload(name, caches.vdo); if (p) { broadcastRaw(wrapVdo(p)); sent++; } }
-        if (caches.discord) { const p = parsePayload(name, caches.discord); if (p) { broadcastRaw(wrapDiscord(p)); sent++; } }
-        console.log(`[mock] VDO Sync → replayed ${sent} cached blob(s)`);
+        // Read at request time, broadcast SYNC_DELAY_MS later (the real action reads,
+        // then broadcasts; a delay models a slow first sync).
+        const snap = { vdo: caches.vdo, discord: caches.discord };
+        const replay = () => {
+          let sent = 0;
+          if (snap.vdo) { const p = parsePayload(name, snap.vdo); if (p) { broadcastRaw(wrapVdo(p)); sent++; } }
+          else if (EMPTY_MARKER) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
+          if (snap.discord) { const p = parsePayload(name, snap.discord); if (p) { broadcastRaw(wrapDiscord(p)); sent++; } }
+          console.log(`[mock] VDO Sync → replayed ${sent} cached blob(s)`);
+        };
+        if (SYNC_DELAY_MS > 0) setTimeout(replay, SYNC_DELAY_MS); else replay();
         return;
       }
       if (name === 'Discord Voice Command') {
