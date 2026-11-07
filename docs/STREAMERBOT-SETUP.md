@@ -51,6 +51,34 @@ nothing; the symptom is a blank/stale overlay.*
 | `Discord Voice Command` | `actions/discord-voice-command.cs` | zero references |
 | `Discord Bridge Start` *(optional)* | `actions/discord-bridge-start.cs` | **References step below** |
 
+**Put the three state actions on their own blocking queue.** `VDO Push`,
+`Discord Voice Push` and `VDO Sync` each read or write a saved state and then
+broadcast it. On Streamer.bot's Default queue, which is non-blocking, actions
+run concurrently, so a `VDO Sync` replay can land after a newer push and put
+stale state back on the pages. Serialise the three:
+
+1. Create a **new** Action Queue (for example `Greenroom State`) and tick
+   **Blocking**. Never make the Default queue blocking: every other action you
+   own runs on it.
+2. Set the **Queue** of exactly `VDO Push`, `Discord Voice Push` and `VDO Sync` to
+   the new queue. Leave `Discord Voice Command` and `Discord Bridge Start` on
+   Default.
+3. Restart Streamer.bot once and check that the queue is still **Blocking** and
+   the three actions are still assigned to it.
+
+The queue orders the actions; Greenroom's pages do not yet reject a stale
+broadcast, so this queue is the only protection against that race today.
+
+**Protect your saved config.** The room, slots and guest directory live only in
+Streamer.bot's persisted `vdo.state`.
+- Tick **Precompile on Application Start** on the Greenroom actions (the
+  Execute C# Code sub-action). It narrows the window after Streamer.bot starts
+  in which `VDO Sync` is not yet compiled and a page can come up showing
+  defaults; it does not close that window.
+- Take an **Export config** (control page) or `npm run backup` **before every
+  Streamer.bot upgrade**, and keep the file private: it contains the room
+  password.
+
 **Discord Bridge Start extras** (skip for webcam-only setups):
 1. Edit the `BUNDLE` const to your `…\Greenroom\sidecar` path.
 2. Compiling as-is fails with `CS0246 'ProcessStartInfo'` / `CS0103 'Process'` —
