@@ -538,6 +538,8 @@ async function main() {
     await pgA.click('#btnVdoSave');
     await sleep(1500); // t ≈ 2 s: past the hydrate timer, still no Sync reply
     slow.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() }); // a voice feed before the Sync
+    const dlgAfterSave = dlgA.length;
+    await pgA.check('.vdo-slot-row[data-slot="2"] input.vdo-mirror-cb'); // a slot edit before the saved config arrives
     await sleep(1100); // t ≈ 3.1 s
     const actA = await slow.api.actions();
     const stA = await slow.api.state();
@@ -545,7 +547,9 @@ async function main() {
       pushesOf(actA).length === 0, `${pushesOf(actA).length} push(es)`);
     check('R7a: vdo.state still holds the saved config', !!stA.vdo && stA.vdo.room === 'seededroom', JSON.stringify(stA.vdo && stA.vdo.room));
     check('R7a: Save inside the 1.2 s window asks once, and declined pushes nothing',
-      dlgA.length === 1 && MSG_REPLACE.test(dlgA[0] || ''), JSON.stringify(dlgA));
+      dlgAfterSave === 1 && MSG_REPLACE.test(dlgA[0] || '') && pushesOf(actA).length === 0, JSON.stringify(dlgA));
+    check('R7a: a slot edit before the Sync reply asks too, and declined leaves vdo.state unchanged',
+      dlgA.length === 2 && MSG_REPLACE.test(dlgA[1] || '') && pushesOf(actA).length === 0 && !!stA.vdo && stA.vdo.room === 'seededroom', JSON.stringify(dlgA));
     check('R7a: VDO Sync is re-fired with backoff while unanswered (2+ requests by 3 s)',
       actA.filter((a) => a.name === 'VDO Sync').length >= 2, `${actA.filter((a) => a.name === 'VDO Sync').length} Sync request(s)`);
     const syncTxt1 = await pgA.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
