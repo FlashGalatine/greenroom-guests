@@ -236,7 +236,11 @@ async function main() {
     console.log('[1] transport: overlay/panel-client-sb.js against the mock WS');
     const probe = await rawClient();
     const subAck = await probe.acks.next(3000, (m) => String(m.id).startsWith('sub'), 'Subscribe ack');
-    check('Subscribe ack {id, status:ok, result}', subAck.status === 'ok' && !!subAck.result, JSON.stringify(subAck));
+    // The documented flat reply {status, id, events}; an old mock wrapped it in `result`.
+    check('Subscribe ack is the flat {status:ok, id, events} shape, with no result wrapper',
+      subAck.status === 'ok' && String(subAck.id).startsWith('sub') && !!subAck.events
+      && Array.isArray(subAck.events.general) && subAck.events.general.includes('Custom') && !('result' in subAck),
+      JSON.stringify(subAck));
     probe.doAction('VDO Sync', { reason: 'probe' });
     const daAck = await probe.acks.next(3000, (m) => String(m.id).startsWith('req'), 'DoAction ack');
     check('DoAction ack {id, status:ok}', daAck.status === 'ok');
@@ -502,17 +506,61 @@ async function main() {
       JSON.stringify(dateAuto.directory));
 
     // The overlays can't load directory-core.js (other SB Path->Folder prefix), so
-    // nameplate-shared.js keeps a copy of the sanitizers. Same line, same key order.
+    // nameplate-shared.js keeps a copy of the sanitizers: the same superset form (GRN-75),
+    // the same key order. Both copies carry the same lines, and behave the same.
     const npSrc = await readFile(resolve(__dirname, 'overlay', 'nameplate-shared.js'), 'utf8');
-    // GRN-75: directory-core.js (the control pages) now passes unknown fields through, so a
-    // newer page's extra fields survive an older page's push. The overlays only READ the
-    // directory, so nameplate-shared.js keeps the strict form for now; the release that
-    // ships the overlay brings it to the identical superset form and restores the
-    // identical-copies check.
-    const PUSH_LINE_STRICT = 'out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });';
-    const PUSH_LINE_SUPERSET = 'out.push(Object.assign({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto }, extraFields(e, DIR_KEYS)));';
-    check('TRIPWIRE: sanitizer copies — directory-core.js is the superset form, nameplate-shared.js still the strict one',
-      dirCoreSrc.includes(PUSH_LINE_SUPERSET) && npSrc.includes(PUSH_LINE_STRICT));
+    const PUSH_LINE = 'out.push(Object.assign({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto }, extraFields(e, DIR_KEYS)));';
+    const SOCIAL_LINE = 'out.push(Object.assign({ platform, handle }, extraFields(s, SOCIAL_KEYS)));';
+    const EXTRA_LINES = ["const DIR_KEYS = new Set(['vdoLabel', 'discordUserId', 'displayName', 'socials', 'auto']);",
+      "const SOCIAL_KEYS = new Set(['platform', 'handle']);",
+      "for (const k of Object.keys(src || {})) if (!known.has(k) && k !== '__proto__') out[k] = src[k];"];
+    check('TRIPWIRE: the two sanitizer copies agree (directory-core.js ↔ nameplate-shared.js): same superset lines',
+      [PUSH_LINE, SOCIAL_LINE, ...EXTRA_LINES].every((l) => dirCoreSrc.includes(l) && npSrc.includes(l)));
+    {
+      const npWin = {};
+      new Function('window', npSrc)(npWin);
+      const NP = npWin.GRNameplate;
+      const parityInputs = [
+        JSON.parse('[{"vdoLabel":" A ","discordUserId":"<@1104>","displayName":"Alpha","pronouns":"they/them","socials":[{"platform":"Twitch","handle":"AlphaTV","url":"u"}],"auto":1,"__proto__":{"p":1}}]'),
+        [{ vdoLabel: '', discordUserId: '', displayName: 'No keys' }, null, 7, { vdoLabel: 'B', displayName: '' }],
+        'not an array', null, [],
+      ];
+      check('the overlay copy sanitises exactly as directory-core.js does (known keys first, unknown passed through, __proto__ dropped)',
+        parityInputs.every((x) => JSON.stringify(NP.sanitizeDirectory(x)) === JSON.stringify(D.sanitizeDirectory(x)))
+        && NP.sanitizeDirectory(parityInputs[0])[0].pronouns === 'they/them' && Object.getPrototypeOf(NP.sanitizeDirectory(parityInputs[0])[0]) === Object.prototype,
+        JSON.stringify(NP.sanitizeDirectory(parityInputs[0])));
+    }
+
+    // GRN-27 / GRN-162 / GRN-215: the connection helpers are one block, copied identically into the
+    // overlay shim and both control pages (different Streamer.bot folder maps cannot share a file).
+    const blockOf = (src) => { const m = /\/\/ <sb-conn>[\s\S]*?\/\/ <\/sb-conn>/.exec(src.replace(/\r\n/g, '\n')); return m ? m[0] : null; };
+    const shimSrc = await readFile(resolve(__dirname, 'overlay', 'panel-client-sb.js'), 'utf8');
+    const ctrlSrc = await readFile(resolve(__dirname, 'control', 'control.html'), 'utf8');
+    const minSrc = await readFile(resolve(__dirname, 'control', 'director-min.html'), 'utf8');
+    const blocks = [shimSrc, ctrlSrc, minSrc].map(blockOf);
+    check('TRIPWIRE: the sb-conn helper block is present and identical in panel-client-sb.js, control.html and director-min.html',
+      blocks.every(Boolean) && blocks[0] === blocks[1] && blocks[1] === blocks[2], blocks.map((b) => b && b.length).join(' / '));
+    {
+      // (the block's own closing marker is a comment, so the return goes on a new line)
+      const H = new Function(`${blocks[0]}\nreturn { sbWsUrl, sbPortParam, sbBackoff };`)();
+      const urls = ['', '?sbport=9000', '?sbport=08081', '?sbport=65535', '?sbport=1'].map((q) => H.sbWsUrl(q));
+      check('sbWsUrl: no ?sbport → ws://127.0.0.1:8080/, a valid port replaces only the port',
+        urls.join(' ') === 'ws://127.0.0.1:8080/ ws://127.0.0.1:9000/ ws://127.0.0.1:8081/ ws://127.0.0.1:65535/ ws://127.0.0.1:1/', urls.join(' '));
+      const bad = ['?sbport=1%40example.invalid', '?sbport=0', '?sbport=65536', '?sbport=abc', '?sbport=8080.5', '?sbport=', '?sbport=-1', '?sbport=1e3', '?sbport=%208080', '?sbport=999999',
+        '?sbport=8080%2F%2Fexample.invalid', '?sbport=8080&sbport=x'];
+      check('sbWsUrl: any other ?sbport is refused (null), never a different host, never 8080',
+        bad.every((q) => H.sbWsUrl(q) === null || H.sbWsUrl(q) === H.sbWsUrl('?sbport=8080')) && bad.slice(0, 11).every((q) => H.sbWsUrl(q) === null),
+        bad.map((q) => H.sbWsUrl(q)).join(' '));
+      check('sbWsUrl: the host is 127.0.0.1 with no credentials for every accepted value',
+        ['?sbport=1', '?sbport=8080', '?sbport=65535'].every((q) => { const u = new URL(H.sbWsUrl(q)); return u.hostname === '127.0.0.1' && !u.username && !u.password && u.protocol === 'ws:'; }));
+      check('sbPortParam: the validated port, or empty when absent or invalid (so a bad value is never copied into an OBS URL)',
+        H.sbPortParam('?sbport=9000') === '9000' && H.sbPortParam('') === '' && H.sbPortParam('?sbport=1%40example.invalid') === '' && H.sbPortParam('?sbport=70000') === '');
+      const bo = H.sbBackoff();
+      const seq = [bo.next(), bo.next(), bo.next(), bo.next(), bo.next(), bo.next()];
+      check('sbBackoff: 1 s, then ×1.5, capped at 4 s (not 15 s)', JSON.stringify(seq) === JSON.stringify([1000, 1500, 2250, 3375, 4000, 4000]), JSON.stringify(seq));
+      bo.reset();
+      check('sbBackoff: reset() returns to 1 s', bo.next() === 1000);
+    }
 
     // ── 6. HTTP + tripwires: served files carry their load-bearing strings ──────
     console.log('\n[6] HTTP + tripwires: SB-style serving, wired strings, no token in control');

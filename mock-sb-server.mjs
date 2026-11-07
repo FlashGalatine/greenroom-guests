@@ -29,6 +29,16 @@
 //                               the shape actions switch to in a later release
 //       SB_EMPTY_MARKER=1       VDO Sync with an empty vdo.state broadcasts
 //                               {type:'vdo:sync:empty'} (a later action release sends it)
+//       SB_FILE_DELAY=<file>:<ms>[,<file>:<ms>]
+//                               serve a file (by name, e.g. nameplate-shared.js) that many
+//                               ms late, so a script lands after the page has connected
+//       SB_SUBSCRIBE=none|error Subscribe is never answered, or answered {status:'error'}
+//       SB_DOACTION=error       every DoAction is answered {status:'error'} and not run
+//       SB_HELLO=auth           send a Hello frame carrying an authentication block on connect
+//       SB_AUTH=close           with SB_HELLO=auth: close a client that sends any request
+//       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
+//       SB_DROP=1               accept each connection and close it ~100 ms later, unanswered
+//       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
 //
 //   • WebSocket Server on :8080 — speaks SB's envelope and implements the FIVE
 //     Greenroom action semantics (mirroring the C# in actions/):
@@ -61,6 +71,15 @@ const WS_PORT = Number(process.env.SB_WS_PORT) || 8080; // SB WebSocket Server d
 const SYNC_DELAY_MS = Number(process.env.SYNC_DELAY_MS) || 0;
 const WIRE_JSON = process.env.SB_WIRE === 'json';
 const EMPTY_MARKER = process.env.SB_EMPTY_MARKER === '1';
+const SUBSCRIBE_MODE = process.env.SB_SUBSCRIBE || 'ok';
+const DOACTION_ERROR = process.env.SB_DOACTION === 'error';
+const HELLO_AUTH = process.env.SB_HELLO === 'auth';
+const AUTH_CLOSE = process.env.SB_AUTH === 'close';
+const DATA_STRING = process.env.SB_DATA === 'string';
+const DROP = process.env.SB_DROP === '1';
+const FILE_DELAY = Object.fromEntries((process.env.SB_FILE_DELAY || '').split(',').filter(Boolean)
+  .map((p) => { const i = p.lastIndexOf(':'); return [p.slice(0, i), Number(p.slice(i + 1)) || 0]; }));
+const connLog = []; // WebSocket connect times
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -90,7 +109,7 @@ function customEvent(data) {
   return JSON.stringify({
     timeStamp: '1970-01-01T00:00:00.0000000',
     event: { source: 'General', type: 'Custom' },
-    data,
+    data: DATA_STRING ? JSON.stringify(data) : data,
   });
 }
 
@@ -126,6 +145,8 @@ function safeResolve(base, rel) {
 async function serveFile(res, file) {
   try {
     const body = await readFile(file);
+    const delay = FILE_DELAY[file.split(/[\\/]/).pop()] || 0;
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     res.writeHead(200, { 'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream' });
     res.end(body);
   } catch {
@@ -175,6 +196,13 @@ const http = createServer(async (req, res) => {
   if (path === '/mock/actions') {
     const body = JSON.stringify({ actions: actionsLog }, null, 1);
     if (query.get('clear') === '1') actionsLog.length = 0;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(body);
+    return;
+  }
+  if (path === '/mock/conns') {
+    const body = JSON.stringify({ conns: connLog });
+    if (query.get('clear') === '1') connLog.length = 0;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(body);
     return;
@@ -250,10 +278,24 @@ function broadcastRaw(msg) {
 wss.on('error', (err) => { console.error('[mock] WS error:', err.message); process.exit(1); });
 wss.on('connection', (ws) => {
   clients.add(ws);
+  connLog.push({ t: Date.now() });
   ws.subscribedCustom = false; // only a correctly-subscribed client receives broadcasts
+  if (DROP) { setTimeout(() => { try { ws.close(); } catch {} }, 100); }
+  if (HELLO_AUTH) {
+    // The authentication block a Streamer.bot with "Authentication" enforced sends in Hello.
+    ws.send(JSON.stringify({ request: 'Hello', info: { name: 'Streamer.bot', version: 'mock' },
+      authentication: { challenge: 'mock-challenge', salt: 'mock-salt' } }));
+  }
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (DROP) return;
+    if (HELLO_AUTH && m.request !== 'Authenticate') {
+      // Unauthenticated: a server that enforces authentication refuses (or, with SB_AUTH=close, hangs up on) the request.
+      if (AUTH_CLOSE) { try { ws.close(); } catch {} }
+      else ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: authentication required' }));
+      return;
+    }
 
     if (m.request === 'Subscribe') {
       // Real Streamer.bot uses a LOWERCASE source key ('general') in Subscribe, while
@@ -262,7 +304,10 @@ wss.on('connection', (ws) => {
       const gen = m.events && m.events.general;
       ws.subscribedCustom = Array.isArray(gen) && gen.includes('Custom');
       console.log('[mock] Subscribe', ws.subscribedCustom ? 'OK (general.Custom)' : 'IGNORED (expected lowercase events.general:["Custom"])');
-      ws.send(JSON.stringify({ id: m.id, status: 'ok', result: { events: m.events } }));
+      if (SUBSCRIBE_MODE === 'none') return; // never answered
+      if (SUBSCRIBE_MODE === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: subscribe refused' })); return; }
+      // The documented flat reply: {status, id, events} (no 'result' wrapper).
+      ws.send(JSON.stringify({ status: 'ok', id: m.id, events: m.events }));
       return;
     }
 
@@ -270,10 +315,11 @@ wss.on('connection', (ws) => {
       // Always ack ok — like real SB, ok means the action STARTED, not that it
       // succeeded. (A C# compile failure in real SB also acks ok and broadcasts
       // nothing; that is why the actions carry error broadcasts.)
-      ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
       const name = (m.action && m.action.name) || '';
       const args = m.args || {};
       logAction(name, args);
+      if (DOACTION_ERROR) { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: action not found' })); return; }
+      ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
 
       if (name === 'VDO Push') {
         const parsed = parsePayload(name, args.payload);

@@ -69,6 +69,7 @@
     '#dpfp.speaking img{opacity:1;filter:brightness(112%) saturate(112%);' +
       'box-shadow:0 0 0 3px rgba(57,255,20,.95),0 0 22px 6px rgba(57,255,20,.8);' +
       'animation:dpfp-blink .9s ease-in-out infinite}' +
+    'body.offline #dpfp.speaking img{animation:none;box-shadow:0 0 0 2px rgba(255,255,255,.10)}' +
     '@keyframes dpfp-blink{' +
       '0%,100%{box-shadow:0 0 0 3px rgba(57,255,20,.9),0 0 12px 3px rgba(57,255,20,.6)}' +
       '50%{box-shadow:0 0 0 3px rgba(57,255,20,1),0 0 26px 8px rgba(57,255,20,1)}}' +
@@ -136,7 +137,7 @@
 
   function slotFor(v) {
     const slots = v && Array.isArray(v.slots) ? v.slots : [];
-    return slots.find((s) => Number(s.slot) === SLOT) || null;
+    return slots.find((s) => s && Number(s.slot) === SLOT) || null;
   }
 
   function render() {
@@ -193,14 +194,27 @@
     dpfp.classList.toggle('speaking', !!(u && u.speaking));
   }
 
+  // The socket closed (Streamer.bot quit or restarted): nobody is "speaking" any more. Keep the
+  // avatars and the last feed; only the live speaking flags go.
+  window.addEventListener('svc:disconnect', () => {
+    if (lastDiscord && lastDiscord.users) {
+      for (const id of Object.keys(lastDiscord.users)) {
+        const u = lastDiscord.users[id];
+        if (u && typeof u === 'object') u.speaking = false;
+      }
+    }
+    render();
+  });
+
   window.addEventListener('svc:message', (e) => {
     const msg = e.detail;
     if (!msg) return;
     if (msg.type === 'sync') {
       // Legacy StreamService shape; under Streamer.bot the VDO Sync action replays
       // the two typed messages below instead. Kept for transport symmetry.
-      lastVdo = msg.vdoninja || null;
-      lastDiscord = msg.discordVoice || null;
+      // Assign only the fields the message carries: a bare {type:'sync'} must not blank the slot.
+      if (msg.vdoninja !== undefined) lastVdo = msg.vdoninja || null;
+      if (msg.discordVoice !== undefined) lastDiscord = msg.discordVoice || null;
       render();
     } else if (msg.type === 'vdoninja:update') {
       lastVdo = msg.vdoninja || null;

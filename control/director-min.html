@@ -47,8 +47,40 @@
   'use strict';
 
   const P = new URLSearchParams(location.search);
-  const WS_URL = window.__SB_WS_URL
-    || (P.get('sbport') ? `ws://127.0.0.1:${P.get('sbport')}/` : 'ws://127.0.0.1:8080/');
+  // <sb-conn> — the connection helpers. The SAME text is in overlay/panel-client-sb.js,
+  // control/control.html and control/director-min.html (they sit behind different Streamer.bot
+  // folder maps and cannot share a file); verify.mjs fails if the three copies differ.
+  const SB_DEFAULT_PORT = 8080;
+  // ?sbport -> the WebSocket URL. Only a port can come from the page URL: the host is always
+  // 127.0.0.1. Returns null when ?sbport is present but is not a whole number from 1 to 65535.
+  function sbWsUrl(search) {
+    const raw = new URLSearchParams(search).get('sbport');
+    const u = new URL('ws://127.0.0.1:' + SB_DEFAULT_PORT + '/');
+    if (raw === null) return u.href;
+    if (!/^\d{1,5}$/.test(raw)) return null;
+    const port = Number(raw);
+    if (port < 1 || port > 65535) return null;
+    u.port = String(port);
+    return u.href;
+  }
+  // The ?sbport to copy into an OBS source URL: the validated port, or '' when absent or invalid.
+  function sbPortParam(search) {
+    const raw = new URLSearchParams(search).get('sbport');
+    return raw !== null && sbWsUrl(search) !== null ? String(Number(raw)) : '';
+  }
+  // Reconnect delay: 1 s, then x1.5 up to 4 s. Call reset() only after a healthy session (a valid
+  // Subscribe ack or a General.Custom message), not on open, so a server that accepts and then
+  // drops still reaches the cap.
+  function sbBackoff() {
+    const BASE_MS = 1000, MAX_MS = 4000, FACTOR = 1.5;
+    let delay = BASE_MS;
+    return {
+      next() { const d = delay; delay = Math.min(delay * FACTOR, MAX_MS); return d; },
+      reset() { delay = BASE_MS; },
+    };
+  }
+  // </sb-conn>
+  const WS_URL = window.__SB_WS_URL || sbWsUrl(location.search); // null: an invalid ?sbport
   const PUSH_ACTION = 'VDO Push';
   const SYNC_ACTION = 'VDO Sync';
   const SLOT_COUNT = 4;
@@ -69,7 +101,10 @@
 
   const statusEl = document.getElementById('status');
   const director = document.getElementById('vdoDirector');
-  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (schemaTooNew ? MSG_RELOAD : t); };
+  // connProblem is a connection fault that stays on screen until a healthy session replaces it
+  // (a refused Subscribe or DoAction, an authentication-enforcing Streamer.bot, an invalid ?sbport).
+  let connProblem = '';
+  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (connProblem || (schemaTooNew ? MSG_RELOAD : t)); };
 
   function defaultSlots() {
     const out = [];
@@ -227,47 +262,106 @@
     if (fromRoster && !hasRoster) return;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig) return;
+    // Record it as pushed only if it was sent: with the socket down the next poll must retry.
+    if (!doAction(PUSH_ACTION, { payload })) return;
     lastPushedSig = payload;
-    doAction(PUSH_ACTION, { payload });
     show(`room ${cfg.room} · ${roster.length} guest(s) · pushed`);
   }
 
   // ── SB WS client ──────────────────────────────────────────────────────────
+  const MSG_AUTH = 'SB auth enforced — turn Enforce off';
+  const SYNC_FALLBACK_MS = 400; // sync anyway if the Subscribe is never answered
   let ws = null;
   let msgId = 0;
   let subId = null;
-  let reconnectDelay = 2000;
+  let reconnectTimer = null;
+  let authEnforced = false; // the last Hello carried an authentication block
+  const backoff = sbBackoff();
+  const pendingActions = new Map(); // DoAction id -> action name, until its reply arrives
 
+  // Returns whether the request was actually sent (false while the socket is down).
   function doAction(name, args) {
-    if (!ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ request: 'DoAction', id: String(++msgId), action: { name }, args }));
+    if (!ws || ws.readyState !== 1) return false;
+    const id = String(++msgId);
+    ws.send(JSON.stringify({ request: 'DoAction', id, action: { name }, args }));
+    pendingActions.set(id, name);
+    if (pendingActions.size > 200) pendingActions.delete(pendingActions.keys().next().value);
+    return true;
+  }
+  const isRefusal = (m) => typeof m.status === 'string' && m.status !== 'ok';
+  const refusalText = (m) => String(m.error || m.message || m.status);
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(connect, backoff.next());
   }
 
   function connect() {
-    ws = new WebSocket(WS_URL);
+    reconnectTimer = null;
+    let sock;
+    try { sock = new WebSocket(WS_URL); }
+    catch (err) { connProblem = 'cannot open the WebSocket — retrying'; show(''); scheduleReconnect(); return; }
+    ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
+    let syncTimer = null;
+    let healthy = false;
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
+      clearTimeout(syncTimer);
       doAction(SYNC_ACTION, { reason: 'director-min-connect' });
       scheduleResync(0);
     };
-    ws.onopen = () => {
-      reconnectDelay = 2000;
-      if (!synced) show('connected to SB — waiting for state');
-      else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
+    // A healthy session (a valid Subscribe ack, or an event) clears a connection problem and
+    // resets the backoff; merely opening does not.
+    const markHealthy = () => {
+      if (healthy) return;
+      healthy = true;
+      authEnforced = false;
+      backoff.reset();
+      if (connProblem) { connProblem = ''; if (synced) showSteady(); else show('connected to SB — waiting for state'); }
+    };
+    sock.onopen = () => {
+      if (!connProblem) {
+        if (!synced) show('connected to SB — waiting for state');
+        else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
+      }
       subId = String(++msgId);
-      ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      setTimeout(fireSync, 400);
+      sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
+      syncTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
       // Say why nothing is happening while the saved config has not come back.
       setTimeout(() => { if (!synced) show(MSG_SYNC_SHORT); }, SYNC_SAY_MS);
       setTimeout(() => { if (!synced) show(MSG_SYNC_LONG); }, SYNC_NAME_CAUSES_MS);
     };
-    ws.onmessage = (evt) => {
+    sock.onmessage = (evt) => {
+      if (ws !== sock) return;
       let m;
       try { m = JSON.parse(evt.data); } catch { return; }
-      if (m && m.id && m.id === subId && !m.event) { fireSync(); return; }
-      if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      if (!m || typeof m !== 'object') return;
+      // Streamer.bot's Hello: an authentication block means "Enforce authentication" is on.
+      if (m.request === 'Hello') {
+        authEnforced = !!(m.authentication && typeof m.authentication === 'object');
+        if (authEnforced) { connProblem = MSG_AUTH; show(''); }
+        return;
+      }
+      if (m.id && !m.event) {
+        if (m.id === subId) {
+          if (isRefusal(m)) { // no sync without an accepted Subscribe
+            clearTimeout(syncTimer);
+            syncFired = true;
+            if (!authEnforced) { connProblem = 'SB: Subscribe refused (' + refusalText(m) + ')'; show(''); }
+          } else { markHealthy(); fireSync(); }
+          return;
+        }
+        if (pendingActions.has(m.id)) {
+          const name = pendingActions.get(m.id);
+          pendingActions.delete(m.id);
+          if (isRefusal(m) && !authEnforced) { connProblem = 'SB: DoAction "' + name + '" refused (' + refusalText(m) + ')'; show(''); }
+          return;
+        }
+      }
+      if (!(m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      markHealthy();
       let d = m.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
       if (!d || typeof d !== 'object') return;
@@ -299,11 +393,15 @@
         if (runAutoAdd()) assembleAndPush(false);
       }
     };
-    ws.onclose = () => {
+    sock.onclose = () => {
+      clearTimeout(syncTimer);
+      syncFired = true;
+      if (ws !== sock) return;
+      pendingActions.clear();
       show('SB offline — retrying');
-      setTimeout(() => { reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); connect(); }, reconnectDelay);
+      scheduleReconnect();
     };
-    ws.onerror = () => {};
+    sock.onerror = () => {};
   }
 
   // ── Director iframe + loop (same as control.html, minus the editor) ────────
@@ -359,8 +457,14 @@
     assembleAndPush(true); // auto-follow: re-resolve every poll
   });
 
-  show('connecting to SB…');
-  connect();
+  if (!WS_URL) { // an invalid ?sbport: say so, and never connect (nor fall back to 8080)
+    connProblem = 'invalid ?sbport (use a port number, 1-65535)';
+    show('');
+    console.error('[director-min] invalid ?sbport ' + JSON.stringify(P.get('sbport')) + ': use a port number from 1 to 65535. Not connecting.');
+  } else {
+    show('connecting to SB…');
+    connect();
+  }
 })();
 </script>
 </body>

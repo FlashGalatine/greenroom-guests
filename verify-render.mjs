@@ -160,6 +160,36 @@ async function main() {
     browser = await launch();
     prod = await producer();
 
+    // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
+    const ONLY = process.env.RENDER_ONLY || '';
+    // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
+    const freePort = () => new Promise((res, rej) => {
+      const s = createNetServer();
+      s.on('error', rej);
+      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
+    });
+    // A port can be taken between freePort() closing it and the mock binding it, so retry
+    // with fresh ports; the two ports must also differ.
+    const startExtra = async (env) => {
+      let lastErr;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const httpPort = await freePort();
+        let wsPort = await freePort();
+        while (wsPort === httpPort) wsPort = await freePort();
+        let m;
+        try { m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env }); }
+        catch (e) { lastErr = e; continue; }
+        extra.push(m);
+        const prod = await producer(wsPort);
+        extraProds.push(prod);
+        return { api: mockApi(httpPort), prod, proc: m, http: httpPort, ws: wsPort };
+      }
+      throw lastErr;
+    };
+    const pushesOf = (acts) => acts.filter((a) => a.name === 'VDO Push');
+    const MSG_REPLACE = /has not returned your saved config/;
+
+    if (!ONLY) {
     // ── R1: guest slot auto-follow through the REAL production loop ────────────
     console.log('[R1] guest slot: webcam URL assembly + leave + REJOIN swap (auto-follow)');
     const guestPage = await newPage(browser, { width: 640, height: 360 });
@@ -511,32 +541,6 @@ async function main() {
     const SEED_SAVED = { enabled: false, room: 'seededroom', password: 'pw-seed', viewFlags: VIEWFLAGS,
       slots: [slot(1, { label: 'ALPHA' }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' },
       directory: [{ vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] };
-    // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
-    const freePort = () => new Promise((res, rej) => {
-      const s = createNetServer();
-      s.on('error', rej);
-      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
-    });
-    // A port can be taken between freePort() closing it and the mock binding it, so retry
-    // with fresh ports; the two ports must also differ.
-    const startExtra = async (env) => {
-      let lastErr;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        const httpPort = await freePort();
-        let wsPort = await freePort();
-        while (wsPort === httpPort) wsPort = await freePort();
-        let m;
-        try { m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env }); }
-        catch (e) { lastErr = e; continue; }
-        extra.push(m);
-        const prod = await producer(wsPort);
-        extraProds.push(prod);
-        return { api: mockApi(httpPort), prod, proc: m, http: httpPort, ws: wsPort };
-      }
-      throw lastErr;
-    };
-    const pushesOf = (acts) => acts.filter((a) => a.name === 'VDO Push');
-    const MSG_REPLACE = /has not returned your saved config/;
 
     // R7a: control.html, the first Sync reply is 6 s late.
     const slow = await startExtra({ SYNC_DELAY_MS: '9000' });
@@ -1023,6 +1027,252 @@ async function main() {
     check('R9e: Save while Streamer.bot is unreachable says it was not sent, never "Sent to Streamer.bot"',
       !/Sent to Streamer\.bot/i.test(offTxt) && /not sent/i.test(offTxt), offTxt);
     await pgO.close();
+
+    } // end of the R1-R9 block (skipped by RENDER_ONLY)
+
+    // ── R10: the connection layer — DOM-ready connect, checked acks, ?sbport, backoff, string frames ──
+    if (!ONLY || ONLY === 'conn') {
+      console.log('\n[R10] connection: DOM-ready connect, checked acks, ?sbport, backoff, string-field frames');
+      const SEED_CONN = { enabled: true, room: 'connroom', password: 'pw1', viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'hash' },
+        directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime', socials: [{ platform: 'twitch', handle: 'AlphaTV' }] },
+          { vdoLabel: '', discordUserId: STREAMER, displayName: 'Ashe of Outland', socials: [] }] };
+      const seedBoth = (x, vdo = SEED_CONN) => {
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(vdo) });
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        return sleep(300);
+      };
+      // What a page does, seen from outside: the sockets it opens, its console, its uncaught errors.
+      const watchPage = (page) => {
+        const w = { ws: [], console: [], errors: [] };
+        page.on('websocket', (s) => w.ws.push(s.url()));
+        page.on('console', (m) => w.console.push(`${m.type()}: ${m.text()}`));
+        page.on('pageerror', (e) => w.errors.push(String((e && e.message) || e)));
+        return w;
+      };
+      const guestPainted = () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111')
+        && document.querySelector('.np-plate')?.hidden === false;
+      const guestUrl = (x, extra = '') => `${x.api.base}/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}${extra}`;
+
+      // R10a: a script that lands after the page has connected (GRN-106, GRN-104). The delay is done by
+      // the mock server, not by a Playwright route, which would bias the race.
+      const lag100 = await startExtra({ SB_FILE_DELAY: 'nameplate-shared.js:100' });
+      await seedBoth(lag100);
+      const gA = await newPage(browser, { width: 640, height: 360 });
+      await gA.goto(guestUrl(lag100), { waitUntil: 'load' });
+      check('R10a: with nameplate-shared.js 100 ms late, the guest frame and nameplate still paint (the first replay is not lost)',
+        await wait(gA, guestPainted, null, 6000), await gA.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+      for (let i = 0; i < 3; i++) await gA.reload({ waitUntil: 'domcontentloaded' }); // reloads during a replay
+      check('R10a: three quick reloads during replays still end painted', await wait(gA, guestPainted, null, 8000));
+      await gA.close();
+      const lag30 = await startExtra({ SB_FILE_DELAY: 'nameplate-shared.js:30' });
+      await seedBoth(lag30);
+      const rA = await newPage(browser, { width: 900, height: 200 });
+      await rA.goto(`${lag30.api.base}/overlay/discord-roster.html?layout=row&sbport=${lag30.ws}`, { waitUntil: 'load' });
+      check('R10a: with the script 30 ms late the roster is not left greyed out (body.offline is false) and is painted',
+        await wait(rA, () => !document.body.classList.contains('offline') && document.querySelectorAll('#roster .member').length === 3, null, 6000),
+        await rA.evaluate(() => `offline=${document.body.classList.contains('offline')} members=${document.querySelectorAll('#roster .member').length}`));
+      await rA.close();
+      const nA = await newPage(browser, { width: 420, height: 120 });
+      await nA.goto(`${lag30.api.base}/overlay/nameplate.html?slot=1&sbport=${lag30.ws}`, { waitUntil: 'load' });
+      check('R10a: …and the standalone nameplate is online and painted',
+        await wait(nA, () => !document.body.classList.contains('offline') && document.querySelector('.np-plate')?.hidden === false
+          && document.querySelector('.np-plate .np-name')?.textContent === 'Alpha Prime', null, 6000));
+      await nA.close();
+
+      // R10b: state frames as escaped string fields, unusable frames, and a null slot entry
+      // (GRN-186, GRN-185). SB_WIRE=json delivers vdoninjaJson / discordVoiceJson.
+      const wireS = await startExtra({ SB_WIRE: 'json' });
+      await seedBoth(wireS);
+      const gB = await newPage(browser, { width: 640, height: 360 });
+      await gB.goto(guestUrl(wireS), { waitUntil: 'load' });
+      check('R10b: the guest overlay renders a vdoninjaJson string-field frame (frame + nameplate)', await wait(gB, guestPainted, null, 6000),
+        await gB.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+      const rB = await newPage(browser, { width: 900, height: 200 });
+      await rB.goto(`${wireS.api.base}/overlay/discord-roster.html?layout=row&sbport=${wireS.ws}`, { waitUntil: 'load' });
+      check('R10b: the roster renders discordVoiceJson and uses the directory name from vdoninjaJson',
+        await wait(rB, () => document.querySelectorAll('#roster .member').length === 3
+          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
+      const nB = await newPage(browser, { width: 420, height: 120 });
+      await nB.goto(`${wireS.api.base}/overlay/nameplate.html?slot=1&sbport=${wireS.ws}`, { waitUntil: 'load' });
+      check('R10b: the standalone nameplate renders a string-field frame',
+        await wait(nB, () => document.querySelector('.np-plate')?.hidden === false && document.querySelector('.np-plate .np-name')?.textContent === 'Alpha Prime', null, 6000));
+      const srcBefore = await gB.evaluate(() => document.getElementById('frame')?.getAttribute('src'));
+      for (const f of [{ type: 'vdoninja:update', vdoninjaJson: '{not json' }, { type: 'vdoninja:update', vdoninjaJson: '[1,2]' },
+        { type: 'vdoninja:update', vdoninjaJson: 42 }, { type: 'discord:voice:update', discordVoiceJson: '{bad' }, { type: 'sync' }]) {
+        await wireS.api.broadcast(f);
+      }
+      await sleep(800);
+      check('R10b: unparseable string fields and a field-less {type:"sync"} leave the guest frame and plate unchanged',
+        (await gB.evaluate(() => document.getElementById('frame')?.getAttribute('src'))) === srcBefore && await gB.evaluate(guestPainted),
+        await gB.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+      check('R10b: …and the roster keeps its members and name',
+        await rB.evaluate(() => document.querySelectorAll('#roster .member').length === 3
+          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland'));
+      await gB.close(); await rB.close(); await nB.close();
+      const plain = await startExtra({});
+      await seedBoth(plain, { ...SEED_CONN, slots: [null, slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)] });
+      const gN = await newPage(browser, { width: 640, height: 360 });
+      const wN = watchPage(gN);
+      await gN.goto(`${plain.api.base}/overlay/vdoninja-guest.html?slot=2&sbport=${plain.ws}`, { waitUntil: 'load' });
+      check('R10b: a null entry before the target slot does not break the guest overlay (slot 2 still renders)',
+        await wait(gN, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=bbb222'), null, 6000) && wN.errors.length === 0, JSON.stringify(wN.errors));
+      await gN.close();
+
+      // R10c: the speaking glow clears when the socket closes (GRN-139).
+      const glow = await startExtra({});
+      glow.prod.doAction('VDO Push', { payload: JSON.stringify({ ...SEED_CONN, slots: [slot(1, { mode: 'discord', discordUserId: STREAMER }), slot(2), slot(3), slot(4)] }) });
+      glow.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ users: { [STREAMER]: { speaking: true, username: 'Ashe', avatarUrl: embed(1), mute: false, deaf: false } } }) });
+      await sleep(300);
+      const gG = await newPage(browser, { width: 640, height: 360 });
+      await gG.goto(guestUrl(glow), { waitUntil: 'load' });
+      const glowOn = await wait(gG, () => document.getElementById('dpfp')?.classList.contains('speaking') === true, null, 6000);
+      glow.proc.kill(); // Streamer.bot goes away while the guest is lit
+      const glowOff = await wait(gG, () => { const d = document.getElementById('dpfp'); return !!d && !d.classList.contains('speaking') && !d.hidden; }, null, 6000);
+      check('R10c: the speaking glow shows, then clears when the socket closes (the avatar stays)', glowOn && glowOff, `on=${glowOn} off=${glowOff}`);
+      await gG.close();
+
+      // R10d: acks and Hello (GRN-125, GRN-57). Delay between a page's WebSocket open and its VDO Sync.
+      const syncDelay = async (x, path) => {
+        await x.api.clear(); await fetch(`${x.api.base}/mock/conns?clear=1`).then((r) => r.arrayBuffer());
+        const p = await newPage(browser, { width: 640, height: 360 });
+        await p.goto(`${x.api.base}${path}`, { waitUntil: 'load' });
+        await sleep(1600);
+        const conns = (await (await fetch(`${x.api.base}/mock/conns`)).json()).conns;
+        const sync = (await x.api.actions()).find((a) => a.name === 'VDO Sync');
+        await p.close();
+        return conns.length && sync ? sync.t - conns[0].t : null;
+      };
+      const pages = (x) => [['control', `/control/control.html?sbport=${x.ws}`], ['director-min', `/control/director-min.html?sbport=${x.ws}`], ['overlay', `/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}`]];
+      const acked = await startExtra({});
+      const noAck = await startExtra({ SB_SUBSCRIBE: 'none' });
+      for (const [name, path] of pages(acked)) {
+        const d = await syncDelay(acked, path);
+        check(`R10d: ${name} fires VDO Sync as soon as the Subscribe is acknowledged (not on the 400 ms fallback)`, d !== null && d < 250, `${d} ms`);
+      }
+      for (const [name, path] of pages(noAck)) {
+        const d = await syncDelay(noAck, path);
+        check(`R10d: ${name} with no Subscribe ack falls back to VDO Sync after about 400 ms`, d !== null && d >= 330 && d < 1500, `${d} ms`);
+      }
+      // Refused Subscribe: reported on every client, and no sync is attempted.
+      const refuse = await startExtra({ SB_SUBSCRIBE: 'error' });
+      const cR = await newPage(browser, { width: 920, height: 900 });
+      const dR = await newPage(browser, { width: 480, height: 120 });
+      const oR = await newPage(browser, { width: 640, height: 360 });
+      const wOR = watchPage(oR);
+      await Promise.all([cR.goto(`${refuse.api.base}/control/control.html?sbport=${refuse.ws}`), dR.goto(`${refuse.api.base}/control/director-min.html?sbport=${refuse.ws}`),
+        oR.goto(guestUrl(refuse))]);
+      await sleep(1500);
+      check('R10d: control.html reports a refused Subscribe in its pill', /Subscribe refused/i.test(await cR.evaluate(() => document.getElementById('sbStatus')?.textContent || '')),
+        await cR.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      check('R10d: director-min reports it in its status', /Subscribe refused/i.test(await dR.evaluate(() => document.getElementById('status')?.textContent || '')));
+      check('R10d: the overlay goes offline and warns on the console',
+        await oR.evaluate(() => document.body.classList.contains('offline')) && wOR.console.some((c) => /^warn|^warning/.test(c) && /Subscribe refused/i.test(c)), JSON.stringify(wOR.console.slice(-3)));
+      check('R10d: no VDO Sync is attempted after a refused Subscribe (all three clients, past the 400 ms fallback)',
+        (await refuse.api.actions()).filter((a) => a.name === 'VDO Sync').length === 0);
+      await cR.close(); await dR.close(); await oR.close();
+      // A DoAction the server refuses (an action that does not exist) is reported too.
+      const noAct = await startExtra({ SB_DOACTION: 'error' });
+      const cD = await newPage(browser, { width: 920, height: 900 });
+      const oD = await newPage(browser, { width: 640, height: 360 });
+      const wOD = watchPage(oD);
+      await Promise.all([cD.goto(`${noAct.api.base}/control/control.html?sbport=${noAct.ws}`), oD.goto(guestUrl(noAct))]);
+      await sleep(1500);
+      check('R10d: control.html reports a refused DoAction in its pill', /DoAction .*refused/i.test(await cD.evaluate(() => document.getElementById('sbStatus')?.textContent || '')),
+        await cD.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      check('R10d: the overlay reports a refused VDO Sync (offline class and a console warning)',
+        await oD.evaluate(() => document.body.classList.contains('offline')) && wOD.console.some((c) => /DoAction .*refused/i.test(c)), JSON.stringify(wOD.console.slice(-3)));
+      await cD.close(); await oD.close();
+      // Hello with an authentication block (SB's "Enforce authentication" is on).
+      const authSb = await startExtra({ SB_HELLO: 'auth' });
+      const cH = await newPage(browser, { width: 920, height: 900 });
+      const dH = await newPage(browser, { width: 480, height: 120 });
+      const oH = await newPage(browser, { width: 640, height: 360 });
+      const wOH = watchPage(oH);
+      await Promise.all([cH.goto(`${authSb.api.base}/control/control.html?sbport=${authSb.ws}`), dH.goto(`${authSb.api.base}/control/director-min.html?sbport=${authSb.ws}`), oH.goto(guestUrl(authSb))]);
+      await sleep(1500);
+      check("R10d: a Hello carrying authentication shows 'SB auth enforced — turn Enforce off' on control.html",
+        /SB auth enforced — turn Enforce off/.test(await cH.evaluate(() => document.getElementById('sbStatus')?.textContent || '')));
+      check('R10d: …on director-min', /SB auth enforced — turn Enforce off/.test(await dH.evaluate(() => document.getElementById('status')?.textContent || '')));
+      check('R10d: …and on the overlay (offline class and a console warning)',
+        await oH.evaluate(() => document.body.classList.contains('offline')) && wOH.console.some((c) => /SB auth enforced/.test(c)), JSON.stringify(wOH.console.slice(-3)));
+      await cH.close(); await dH.close(); await oH.close();
+      // The server closes any unauthenticated client: the message stays, nothing throws.
+      const authClose = await startExtra({ SB_HELLO: 'auth', SB_AUTH: 'close' });
+      const cC = await newPage(browser, { width: 920, height: 900 });
+      const wCC = watchPage(cC);
+      await cC.goto(`${authClose.api.base}/control/control.html?sbport=${authClose.ws}`);
+      await sleep(3500);
+      check('R10d: when the server closes unauthenticated clients, the auth message stays on screen and nothing throws',
+        /SB auth enforced/.test(await cC.evaluate(() => document.getElementById('sbStatus')?.textContent || '')) && wCC.errors.length === 0,
+        await cC.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      await cC.close();
+
+      // R10e: ?sbport is a port number or nothing (GRN-27, GRN-100). A bad value never reaches a WebSocket.
+      const BAD_PORTS = ['1%40example.invalid', '0', '65536', 'abc', '8080.5', ''];
+      let sbOk = true; const sbDetail = [];
+      for (const bad of BAD_PORTS) {
+        const kinds = [['control', '/control/control.html', 'control'], ['director-min', '/control/director-min.html', 'min'], ['guest', '/overlay/vdoninja-guest.html?slot=1', 'overlay'],
+          ['roster', '/overlay/discord-roster.html', 'overlay'], ['nameplate', '/overlay/nameplate.html?slot=1', 'overlay']];
+        await Promise.all(kinds.map(async ([name, path, kind]) => {
+          const p = await newPage(browser, { width: 700, height: 500 });
+          const w = watchPage(p);
+          await p.goto(`${BASE}${path}${path.includes('?') ? '&' : '?'}sbport=${bad}`, { waitUntil: 'load' });
+          await sleep(1300);
+          const status = await p.evaluate(() => ({ pill: document.getElementById('sbStatus')?.textContent || '', min: document.getElementById('status')?.textContent || '', off: document.body.classList.contains('offline') }));
+          const shown = kind === 'control' ? /invalid \?sbport/i.test(status.pill) : kind === 'min' ? /invalid \?sbport/i.test(status.min)
+            : status.off && w.console.some((c) => /^error/.test(c) && /invalid \?sbport/i.test(c));
+          if (w.ws.length !== 0 || !shown) { sbOk = false; sbDetail.push(`${name} ?sbport=${bad}: ws=${JSON.stringify(w.ws)} shown=${shown}`); }
+          await p.close();
+        }));
+      }
+      check('R10e: with an invalid ?sbport (a host-injection string, 0, 65536, text, a fraction, empty) none of the five pages opens any WebSocket, and each says so',
+        sbOk, sbDetail.slice(0, 3).join(' | '));
+      const goodWs = []; const pGood = await newPage(browser, { width: 920, height: 900 });
+      pGood.on('websocket', (s) => goodWs.push(s.url()));
+      await pGood.goto(`${BASE}/control/control.html?sbport=${WS_PORT}`, { waitUntil: 'load' });
+      await sleep(1000);
+      check('R10e: a valid ?sbport still connects, to 127.0.0.1 on that port', goodWs.length >= 1 && goodWs.every((u) => u === `ws://127.0.0.1:${WS_PORT}/`), JSON.stringify(goodWs));
+      const copied = await pGood.evaluate(() => document.querySelector('.vdo-slot-row[data-slot="1"] .vdo-src-copy')?.dataset.url || '');
+      check('R10e: a valid ?sbport is copied into the OBS source URLs', copied.includes(`&sbport=${WS_PORT}`), copied);
+      await pGood.close();
+      const pBad = await newPage(browser, { width: 920, height: 900 });
+      await pBad.goto(`${BASE}/control/control.html?sbport=1%40example.invalid`, { waitUntil: 'load' });
+      await sleep(600);
+      const copiedBad = await pBad.evaluate(() => [...document.querySelectorAll('.vdo-src-copy, .np-src-copy')].map((b) => b.dataset.url || ''));
+      check('R10e: an invalid ?sbport is never copied into an OBS source URL', copiedBad.length > 0 && copiedBad.every((u) => !/sbport/i.test(u) && !u.includes('example.invalid')), JSON.stringify(copiedBad.slice(0, 2)));
+      await pBad.close();
+
+      // R10f: backoff. A server that accepts then drops must still reach the cap, and the cap is short
+      // (GRN-162, GRN-215). Intervals between connects, with a server that closes each one after 100 ms.
+      const flapO = await startExtra({ SB_DROP: '1' });
+      const flapC = await startExtra({ SB_DROP: '1' });
+      const fO = await newPage(browser, { width: 640, height: 360 });
+      const fC = await newPage(browser, { width: 920, height: 900 });
+      await fO.goto(guestUrl(flapO), { waitUntil: 'load' });
+      await fC.goto(`${flapC.api.base}/control/control.html?sbport=${flapC.ws}`, { waitUntil: 'load' });
+      await sleep(16000);
+      for (const [name, x] of [['overlay shim', flapO], ['control.html', flapC]]) {
+        const t = (await (await fetch(`${x.api.base}/mock/conns`)).json()).conns.map((c) => c.t);
+        const gaps = t.slice(1).map((v, i) => v - t[i]);
+        const last = gaps[gaps.length - 1];
+        check(`R10f: ${name}: reconnect delay grows across a server that accepts then drops, and stops near 4 s`,
+          t.length >= 5 && last >= 3500 && last <= 5500 && Math.max(...gaps) <= 5500, JSON.stringify(gaps));
+      }
+      await fO.close(); await fC.close();
+
+      // R10g: General.Custom data delivered as a JSON string (SB's schema allows it).
+      const strData = await startExtra({ SB_DATA: 'string' });
+      await seedBoth(strData);
+      const gS = await newPage(browser, { width: 640, height: 360 });
+      await gS.goto(guestUrl(strData), { waitUntil: 'load' });
+      const cS = await newPage(browser, { width: 920, height: 900 });
+      await cS.goto(`${strData.api.base}/control/control.html?sbport=${strData.ws}`, { waitUntil: 'load' });
+      check('R10g: with data as a JSON string the guest overlay renders', await wait(gS, guestPainted, null, 6000));
+      check('R10g: …and control.html hydrates', await wait(cS, () => document.getElementById('vdoRoom')?.value === 'connroom', null, 6000));
+      await gS.close(); await cS.close();
+    }
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {
