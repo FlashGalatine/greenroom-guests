@@ -44,11 +44,13 @@ const MOCK_DIRECTOR = `${BASE}/mock/vdo-director.html`;
 let passed = 0, failed = 0;
 const check = (n, ok, d) => { ok ? passed++ : failed++; console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${n}${!ok && d ? ' — ' + d : ''}`); };
 
-function startChild(script, readyText) {
+// opts: { httpPort, wsPort, env } — extra mock instances (the R7 sync-guard
+// scenarios) run on their own off-default ports with their own test options.
+function startChild(script, readyText, opts = {}) {
   return new Promise((res, rej) => {
     const child = spawn(process.execPath, [script], {
       cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT) },
+      env: { ...process.env, SB_HTTP_PORT: String(opts.httpPort || HTTP_PORT), SB_WS_PORT: String(opts.wsPort || WS_PORT), ...(opts.env || {}) },
     });
     let out = '';
     const timer = setTimeout(() => rej(new Error(`${script} did not start in 8s\n` + out)), 8000);
@@ -68,9 +70,9 @@ async function launch() {
 
 // Pure producer: opens SB's WS and fires DoActions (what the control page and the
 // sidecar are to SB). No subscribe — it never needs to hear anything back.
-function producer() {
+function producer(port = WS_PORT) {
   return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
     let id = 0;
     ws.on('error', rej);
     ws.on('open', () => res({
@@ -122,8 +124,23 @@ const ROSTER_STATE = (patch) => JSON.stringify(Object.assign({
 async function newPage(browser, viewport, withDirectorHook) {
   const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
   await page.route(/vdo\.ninja|discordapp\.com/, (r) => r.abort()); // offline-deterministic
-  if (withDirectorHook) await page.addInitScript(`window.__VDO_DIRECTOR_URL = ${JSON.stringify(MOCK_DIRECTOR)};`);
+  // withDirectorHook: true → the mock director on the main mock; a string → that URL
+  if (withDirectorHook) await page.addInitScript(`window.__VDO_DIRECTOR_URL = ${JSON.stringify(typeof withDirectorHook === 'string' ? withDirectorHook : MOCK_DIRECTOR)};`);
   return page;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// One mock instance's HTTP surface (capture log, caches, restart, raw broadcast).
+function mockApi(httpPort) {
+  const u = (p) => `http://127.0.0.1:${httpPort}${p}`;
+  return {
+    base: u(''),
+    actions: async () => (await (await fetch(u('/mock/actions'))).json()).actions,
+    state: async () => (await fetch(u('/mock/state'))).json(),
+    clear: () => fetch(u('/mock/actions?clear=1')).then((r) => r.arrayBuffer()),
+    restart: (wipeVdo) => fetch(u('/mock/restart' + (wipeVdo ? '?vdo=1' : ''))).then((r) => r.arrayBuffer()),
+    broadcast: (data) => fetch(u('/mock/broadcast'), { method: 'POST', body: JSON.stringify(data) }).then((r) => r.arrayBuffer()),
+  };
 }
 
 const wait = (page, fn, arg, ms) => page.waitForFunction(fn, arg, { timeout: ms }).then(() => true).catch(() => false);
@@ -131,6 +148,7 @@ const wait = (page, fn, arg, ms) => page.waitForFunction(fn, arg, { timeout: ms 
 async function main() {
   console.log('Greenroom — real-pixel render verification\n');
   let mock, bridge, browser, prod;
+  const extra = []; // the R7 mock instances
   try {
     mock = await startChild('mock-sb-server.mjs', '[mock] WS');
     console.log(`mock SB up (:${HTTP_PORT} HTTP, :${WS_PORT} WS)\n`);
@@ -480,6 +498,152 @@ async function main() {
     check('?nameplate=0 → guest overlay renders video with NO plate ever created', gp0Rendering && gp0NoPlate);
     await gp0.close();
 
+    // ── R7: sync guard — nothing is pushed before Streamer.bot returns the saved config ──
+    // GRN-24 + GRN-154. Each scenario runs against its own mock instance with a test
+    // option (slow Sync, empty cache, the empty marker), so the main mock's seeded
+    // state is untouched. Seeds are written by a producer, like a real earlier session.
+    console.log('\n[R7] sync guard: no automatic push before Streamer.bot returns the saved config');
+    const SEED_SAVED = { enabled: false, room: 'seededroom', password: 'pw-seed', viewFlags: VIEWFLAGS,
+      slots: [slot(1, { label: 'ALPHA' }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' },
+      directory: [{ vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] };
+    const startExtra = async (httpPort, wsPort, env) => {
+      const m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env });
+      extra.push(m);
+      return { api: mockApi(httpPort), prod: await producer(wsPort), http: httpPort, ws: wsPort };
+    };
+    const pushesOf = (acts) => acts.filter((a) => a.name === 'VDO Push');
+    const MSG_REPLACE = /has not returned your saved config/;
+
+    // R7a: control.html, the first Sync reply is 6 s late.
+    const slow = await startExtra(7477, 8083, { SYNC_DELAY_MS: '6000' });
+    slow.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300); await slow.api.clear();
+    const dlgA = [];
+    const pgA = await newPage(browser, { width: 920, height: 1300 });
+    pgA.on('dialog', (d) => { dlgA.push(d.message()); d.dismiss(); }); // the operator answers "no"
+    await pgA.goto(`${slow.api.base}/control/control.html?sbport=${slow.ws}`, { waitUntil: 'load' });
+    await sleep(500); // inside the 1.2 s hydrate window
+    await pgA.fill('#vdoRoom', 'typed-too-early');
+    await pgA.click('#btnVdoSave');
+    await sleep(1500); // t ≈ 2 s: past the hydrate timer, still no Sync reply
+    slow.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() }); // a voice feed before the Sync
+    await sleep(1100); // t ≈ 3.1 s
+    const actA = await slow.api.actions();
+    const stA = await slow.api.state();
+    check('R7a: no VDO Push before the first Sync reply, even with a Discord feed after the 1.2 s timer',
+      pushesOf(actA).length === 0, `${pushesOf(actA).length} push(es)`);
+    check('R7a: vdo.state still holds the saved config', !!stA.vdo && stA.vdo.room === 'seededroom', JSON.stringify(stA.vdo && stA.vdo.room));
+    check('R7a: Save inside the 1.2 s window asks once, and declined pushes nothing',
+      dlgA.length === 1 && MSG_REPLACE.test(dlgA[0] || ''), JSON.stringify(dlgA));
+    check('R7a: VDO Sync is re-fired with backoff while unanswered (2+ requests by 3 s)',
+      actA.filter((a) => a.name === 'VDO Sync').length >= 2, `${actA.filter((a) => a.name === 'VDO Sync').length} Sync request(s)`);
+    const syncTxt1 = await pgA.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
+    check("R7a: the page says 'VDO Sync has not answered' once the 1.2 s timer fires", /VDO Sync has not answered/i.test(syncTxt1), syncTxt1);
+    await sleep(2300); // t ≈ 5.4 s
+    const syncTxt2 = await pgA.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
+    check('R7a: after about 5 s the status names both causes (fresh install, or VDO Sync missing/not compiled)',
+      /fresh install/i.test(syncTxt2) && /not compiled/i.test(syncTxt2), syncTxt2);
+    const adopted = await wait(pgA, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 12000);
+    check('R7a: the late Sync reply is adopted (the saved room replaces the defaults)', adopted,
+      await pgA.evaluate(() => document.getElementById('vdoRoom')?.value));
+    const syncHidden = await wait(pgA, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 4000);
+    check('R7a: the not-synced status clears once the saved config arrives', syncHidden);
+    await pgA.close();
+    slow.prod.close();
+
+    // R7b: director-min.html against a slow first Sync (the same cases as R7a). Its own
+    // mock instance: R7a's delayed Sync replays must not land on this page.
+    const slowMin = await startExtra(7480, 8086, { SYNC_DELAY_MS: '6000' });
+    slowMin.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300); await slowMin.api.clear();
+    const pgB = await newPage(browser, { width: 480, height: 120 });
+    await pgB.goto(`${slowMin.api.base}/control/director-min.html?sbport=${slowMin.ws}`, { waitUntil: 'load' });
+    await sleep(2000);
+    slowMin.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+    await sleep(1100); // t ≈ 3.1 s
+    const actB = await slowMin.api.actions();
+    check('R7b: director-min pushes nothing before the first Sync reply', pushesOf(actB).length === 0, `${pushesOf(actB).length} push(es)`);
+    check('R7b: director-min re-fires VDO Sync with backoff while unanswered (2+ requests by 3 s)',
+      actB.filter((a) => a.name === 'VDO Sync').length >= 2, `${actB.filter((a) => a.name === 'VDO Sync').length} Sync request(s)`);
+    await sleep(2300); // t ≈ 5.4 s
+    const minTxt = await pgB.evaluate(() => document.getElementById('status')?.textContent || '');
+    check('R7b: director-min status names both causes after about 5 s', /fresh install/i.test(minTxt) && /not compiled/i.test(minTxt), minTxt);
+    await pgB.close();
+    slowMin.prod.close();
+
+    // R7c: a fresh install (empty cache, nothing ever replies). Save asks once, then pushes.
+    const fresh = await startExtra(7478, 8084, {});
+    const dlgC = [];
+    const pgC = await newPage(browser, { width: 920, height: 1300 }, true);
+    pgC.on('dialog', (d) => { dlgC.push(d.message()); d.accept(); });
+    await pgC.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await sleep(1800);
+    await pgC.fill('#vdoRoom', 'fresh-room');
+    await pgC.fill('#vdoPassword', 'pw-fresh');
+    await pgC.check('#vdoEnabled'); // an operator change: it asks (and pushes on yes) by itself
+    await pgC.click('#btnVdoSave');
+    let freshPush = null;
+    for (let i = 0; i < 20 && !freshPush; i++) {
+      freshPush = pushesOf(await fresh.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } })
+        .filter(Boolean).find((p) => p.room === 'fresh-room' && p.password === 'pw-fresh');
+      if (!freshPush) await sleep(250);
+    }
+    check('R7c: a fresh install can still save: the first Save asks, and on yes pushes the typed config',
+      dlgC.length >= 1 && MSG_REPLACE.test(dlgC[0] || '') && !!freshPush, JSON.stringify(dlgC));
+    const freshSynced = await wait(pgC, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 5000);
+    check("R7c: the page's own echo of that push marks it synced (status clears)", freshSynced);
+    await pgC.close();
+    fresh.prod.close();
+
+    // R7d: the empty-cache marker (a later action release broadcasts it) is read as "synced".
+    const marker = await startExtra(7479, 8085, { SB_EMPTY_MARKER: '1' });
+    const dlgD = [];
+    const pgD = await newPage(browser, { width: 920, height: 1300 });
+    pgD.on('dialog', (d) => { dlgD.push(d.message()); d.accept(); });
+    await pgD.goto(`${marker.api.base}/control/control.html?sbport=${marker.ws}`, { waitUntil: 'load' });
+    const markerSynced = await wait(pgD, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 5000);
+    check("R7d: {type:'vdo:sync:empty'} marks the page synced with no config adopted", markerSynced);
+    await pgD.fill('#vdoRoom', 'marker-room');
+    await pgD.click('#btnVdoSave');
+    let markerPush = null;
+    for (let i = 0; i < 20 && !markerPush; i++) {
+      markerPush = pushesOf(await marker.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } })
+        .filter(Boolean).find((p) => p.room === 'marker-room');
+      if (!markerPush) await sleep(250);
+    }
+    check('R7d: once synced by the marker, Save pushes without asking', !!markerPush && dlgD.length === 0, JSON.stringify(dlgD));
+    await pgD.close();
+    marker.prod.close();
+
+    // R7e: a matching fixed-roster director → zero pushes over 4+ polls, on both pages.
+    await fresh.api.restart(true);
+    const FIXED_DIR = `${MOCK_DIRECTOR}?fixed=1`;
+    const SEED_FIXED = { enabled: true, room: 'fixedroom', password: 'pw1', viewFlags: VIEWFLAGS,
+      slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+      invite: { passwordMode: 'hash' },
+      directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha', socials: [] },
+        { vdoLabel: 'BRAVO', discordUserId: '', displayName: 'Bravo', socials: [] }] };
+    const fixedProd = await producer(fresh.ws);
+    fixedProd.doAction('VDO Push', { payload: JSON.stringify(SEED_FIXED) });
+    await sleep(300);
+    const pgE1 = await newPage(browser, { width: 920, height: 1300 }, FIXED_DIR);
+    await pgE1.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await wait(pgE1, () => document.getElementById('vdoRoom')?.value === 'fixedroom', null, 8000);
+    await fresh.api.clear();
+    await sleep(9500); // first probe at 1.5 s, then every 2.5 s: 4+ polls
+    const quietControl = pushesOf(await fresh.api.actions()).length;
+    check('R7e: control.html makes 0 VDO Push over 4+ polls against a matching fixed roster', quietControl === 0, `${quietControl} push(es)`);
+    await pgE1.close();
+    const pgE2 = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
+    await pgE2.goto(`${fresh.api.base}/control/director-min.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await sleep(2500);
+    await fresh.api.clear();
+    await sleep(9500);
+    const quietMin = pushesOf(await fresh.api.actions()).length;
+    check('R7e: director-min makes 0 VDO Push over 4+ polls against a matching fixed roster', quietMin === 0, `${quietMin} push(es)`);
+    await pgE2.close();
+    fixedProd.close();
+
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {
     failed++;
@@ -489,6 +653,7 @@ async function main() {
     if (browser) { try { await browser.close(); } catch {} }
     if (bridge) bridge.kill();
     if (mock) mock.kill();
+    for (const m of extra) { try { m.kill(); } catch {} }
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);

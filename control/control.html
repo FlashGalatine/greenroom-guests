@@ -176,6 +176,8 @@
     <div class="hint">Slots bind guests by their vdo.ninja <b>label</b>; the hidden director iframe
       re-resolves label → current streamID every 2.5&nbsp;s, so a guest who rejoins is re-followed
       automatically. Keep exactly one director page open (this page or director-min.html).</div>
+    <div id="syncStatus" class="warn" role="status" hidden></div>
+    <div id="cfgStatus" class="hint" role="status" aria-live="polite"></div>
     <div id="cryptoWarn" class="warn" hidden>crypto.subtle unavailable (non-secure origin) —
       the &amp;hash= invite mode can't be computed here. Open this page via 127.0.0.1, or use
       plaintext/none password mode.</div>
@@ -333,6 +335,7 @@
     sbStatus: $('sbStatus'), vdoStatus: $('vdoStatus'), dvoStatus: $('dvoStatus'),
     room: $('vdoRoom'), password: $('vdoPassword'), viewFlags: $('vdoViewFlags'), enabled: $('vdoEnabled'),
     slots: $('vdoSlots'), directory: $('vdoDirectory'), director: $('vdoDirector'), cryptoWarn: $('cryptoWarn'),
+    syncStatus: $('syncStatus'), cfgStatus: $('cfgStatus'),
     dirSearch: $('dirSearch'), dirLiveOnly: $('dirLiveOnly'), dirAutoAdd: $('dirAutoAdd'),
     dirCount: $('dirCount'), dirClearAuto: $('btnDirClearAuto'), dirResetIgnored: $('btnDirResetIgnored'),
     inviteLink: $('vdoInviteLink'), manageLink: $('vdoManageLink'),
@@ -371,7 +374,15 @@
   let roster = [];          // live [{label, streamID}] from the director iframe
   let hasRoster = false;    // at least one director reply this session
   let discord = null;       // last discordVoice payload
-  let hydrated = false;     // set by the first vdoninja:update (or the timeout)
+  let hydrated = false;     // the form is usable: a replay arrived, or the 1.2 s timer fired
+  // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
+  // or our own echo) or said there is none (vdo:sync:empty). Until then NOTHING is
+  // pushed on its own, because the form may be showing built-in defaults that would
+  // overwrite the saved vdo.state. An operator action may push first, after one confirm.
+  let synced = false;
+  let unsyncedOverride = false; // true only while a confirmed operator action runs
+  let syncPhase = 0;            // 0 quiet · 1 'has not answered' · 2 names both causes
+  let syncTimer = null;
   let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
   let slotsSig = '';
   let dirSig = '';
@@ -386,10 +397,28 @@
   // hydration baseline below depends on).
   const sanitizeDirectory = (raw) => GRDir.sanitizeDirectory(raw);
 
+  const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+  // The state in a vdoninja:update / discord:voice:update frame: the old object field,
+  // or an escaped string field beside it (vdoninjaJson / discordVoiceJson). A present
+  // string field is authoritative: one that does not parse to a plain object makes the
+  // frame unusable (null), so a malformed frame can never mark the page synced.
+  function frameState(d, objKey, jsonKey) {
+    if (jsonKey in d) {
+      if (typeof d[jsonKey] !== 'string') return null;
+      let v;
+      try { v = JSON.parse(d[jsonKey]); } catch { return null; }
+      return isPlainObject(v) ? v : null;
+    }
+    return isPlainObject(d[objKey]) ? d[objKey] : null;
+  }
+
   // Tolerant adoption of a broadcast payload (superset-safe, same spirit as the
-  // old vdoninja-config.js sanitizers).
+  // old vdoninja-config.js sanitizers). Returns true only when it adopted something
+  // config-shaped: a plain object with slots, directory or room (the Import check).
   function adoptCfg(v) {
-    if (!v || typeof v !== 'object') return;
+    if (!isPlainObject(v)) return false;
+    if (!Array.isArray(v.slots) && !Array.isArray(v.directory) && !('room' in v)) return false;
     const slots = defaultSlots();
     if (Array.isArray(v.slots)) {
       for (const s of v.slots) {
@@ -415,6 +444,60 @@
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
     };
+    return true;
+  }
+
+  // ── Sync state (GRN-24) ────────────────────────────────────────────────────
+  const MSG_REPLACE = 'Streamer.bot has not returned your saved config; saving now replaces it.';
+  const MSG_SYNC_SHORT = 'VDO Sync has not answered: showing defaults, not your saved config. Nothing is pushed on its own until it does.';
+  const MSG_SYNC_LONG = 'No saved config has come back from Streamer.bot: this is a fresh install, or VDO Sync is missing or not compiled. Nothing is pushed on its own; saving asks first.';
+  const SYNC_RETRY_MS = [2000, 4000, 8000]; // then every SYNC_REPEAT_MS
+  const SYNC_REPEAT_MS = 15000;
+  const SYNC_NAME_CAUSES_MS = 5000;
+
+  function renderSyncStatus() {
+    const el = els.syncStatus;
+    if (synced || syncPhase === 0) { el.hidden = true; el.textContent = ''; return; }
+    el.hidden = false;
+    el.textContent = syncPhase >= 2 ? MSG_SYNC_LONG : MSG_SYNC_SHORT;
+  }
+  function markSynced() {
+    hydrated = true;
+    if (synced) return;
+    synced = true;
+    clearTimeout(syncTimer);
+    renderSyncStatus();
+  }
+  // Re-ask for the saved config until it arrives: after 2, 4, 8 s, then every 15 s.
+  function scheduleResync(n) {
+    clearTimeout(syncTimer);
+    if (synced || !SYNC_ACTION) return;
+    syncTimer = setTimeout(() => {
+      if (synced) return;
+      doAction(SYNC_ACTION, { reason: 'control-retry' });
+      scheduleResync(n + 1);
+    }, n < SYNC_RETRY_MS.length ? SYNC_RETRY_MS[n] : SYNC_REPEAT_MS);
+  }
+  // An operator action that pushes. Before Streamer.bot has answered it asks once; on
+  // yes the pushes inside fn go out with force, and the echo then marks the page synced.
+  // On no nothing is pushed.
+  // ask: an action that has its own confirm (Import) passes its text, so the operator
+  // is asked exactly once, with the not-synced warning put in front when it applies.
+  function operatorAction(fn, ask) {
+    if (synced) {
+      if (ask && !confirm(ask)) return false;
+      fn();
+      return true;
+    }
+    if (!confirm(ask ? MSG_REPLACE + '\n\n' + ask : MSG_REPLACE)) return false;
+    unsyncedOverride = true;
+    try { fn(); } finally { unsyncedOverride = false; }
+    return true;
+  }
+  function setCfgStatus(text) { els.cfgStatus.textContent = text; }
+  function sentStatus() {
+    const t = new Date();
+    return `Sent to Streamer.bot at ${twoDigit(t.getHours())}:${twoDigit(t.getMinutes())}:${twoDigit(t.getSeconds())}.`;
   }
 
   // ── SB WebSocket client ───────────────────────────────────────────────────
@@ -435,6 +518,7 @@
       if (syncFired) return;
       syncFired = true;
       if (SYNC_ACTION) doAction(SYNC_ACTION, { reason: 'control-connect' });
+      scheduleResync(0);
     };
     ws.onopen = () => {
       reconnectDelay = 2000;
@@ -443,7 +527,9 @@
       // Lowercase `general` — the SB Subscribe case gotcha.
       ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
       setTimeout(fireSync, 400);
-      setTimeout(() => { if (!hydrated) { hydrated = true; renderAll(); } }, HYDRATE_TIMEOUT_MS);
+      // The timer only makes the form usable and says so; it never marks the page synced.
+      setTimeout(() => { if (!synced) { hydrated = true; syncPhase = Math.max(syncPhase, 1); renderAll(); } }, HYDRATE_TIMEOUT_MS);
+      setTimeout(() => { if (!synced) { syncPhase = 2; renderSyncStatus(); } }, SYNC_NAME_CAUSES_MS);
     };
     ws.onmessage = (evt) => {
       let m;
@@ -464,18 +550,26 @@
 
   function handle(d) {
     if (d.type === 'vdoninja:update') {
-      const sig = JSON.stringify(d.vdoninja);
-      if (sig === lastPushedSig) return; // our own echo
-      adoptCfg(d.vdoninja);
-      hydrated = true;
+      const v = frameState(d, 'vdoninja', 'vdoninjaJson');
+      if (!v) return; // no usable state in the frame: drop it, never mark the page synced
+      const sig = JSON.stringify(v);
+      if (sig === lastPushedSig) { markSynced(); return; } // our own echo
+      if (!adoptCfg(v)) return; // not config-shaped: drop it
+      markSynced();
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
       // equal what we just adopted.
       lastPushedSig = JSON.stringify(assemblePayload());
       renderAll();
       // A replayed room may already hold guests we've never seen named.
       if (runAutoAdd()) { renderDirectory(); assembleAndPush(false); }
+    } else if (d.type === 'vdo:sync:empty') {
+      // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
+      markSynced();
+      renderAll();
     } else if (d.type === 'discord:voice:update') {
-      discord = d.discordVoice || null;
+      const dv = frameState(d, 'discordVoice', 'discordVoiceJson');
+      if (!dv) return;
+      discord = dv;
       renderDiscordSection();
       renderSlots(); // pick-from-channel options (membership-sig guarded)
       // New face in the voice channel → placeholder directory entry (auto-add).
@@ -520,13 +614,16 @@
   // fromRoster: pushes triggered by director polls also require a roster this
   // session — a page that has never heard from its director must not blank the
   // slots another director resolved (the anti-ping-pong gate).
-  function assembleAndPush(fromRoster) {
-    if (!hydrated) return;
-    if (fromRoster && !hasRoster) return;
+  // Nothing goes out before the page is synced (GRN-24), except from inside a
+  // confirmed operatorAction. force skips only the identical-payload dedupe (GRN-192).
+  function assembleAndPush(fromRoster, force) {
+    if (!synced && !unsyncedOverride) return false;
+    if (fromRoster && !hasRoster) return false;
     const payload = JSON.stringify(assemblePayload());
-    if (payload === lastPushedSig) return;
+    if (payload === lastPushedSig && !force && !unsyncedOverride) return false;
     lastPushedSig = payload;
     doAction(PUSH_ACTION, { payload });
+    return true;
   }
 
   // ── Director iframe + enumeration loop ────────────────────────────────────
@@ -608,6 +705,7 @@
     rebuildLinks();
     renderDiscordSection();
     syncDirectorFrame();
+    renderSyncStatus();
   }
 
   function rosterLabels() { return [...new Set(roster.map((g) => g.label).filter(Boolean))]; }
@@ -958,7 +1056,7 @@
   // first so an in-progress edit survives the append, and returns true when the
   // directory actually grew (the caller pushes).
   function runAutoAdd() {
-    if (!hydrated || cfg.directoryAutoAdd === false) return false;
+    if (!synced || cfg.directoryAutoAdd === false) return false;
     const base = els.directory.querySelector('.vdo-dir-row') ? directoryFromDom() : cfg.directory;
     const res = GRDir.autoPopulate({
       directory: base,
@@ -997,7 +1095,7 @@
     }
     cfg.directory = next;
     dirSig = '';
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
   });
 
   els.directory.addEventListener('click', (e) => {
@@ -1032,7 +1130,7 @@
     dirSig = '';
     btn.blur(); // the focus guard would otherwise skip the forced re-render
     renderDirectory(true);
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
   });
 
   els.dirSearch.addEventListener('input', () => { dirSig = ''; renderDirectory(true); });
@@ -1043,7 +1141,7 @@
     runAutoAdd(); // ticking it back on adopts everyone live right now
     dirSig = '';
     renderDirectory(true);
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
   });
 
   $('btnDirAdd').addEventListener('click', () => {
@@ -1072,7 +1170,7 @@
     dirOpen.clear();
     dirSig = '';
     renderDirectory(true);
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
   });
 
   els.dirResetIgnored.addEventListener('click', () => {
@@ -1084,7 +1182,7 @@
     runAutoAdd();
     dirSig = '';
     renderDirectory(true);
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
   });
 
   // Read every slot straight from the DOM so two quick changes both land.
@@ -1121,7 +1219,7 @@
     }
     cfg.slots = slotsFromDom();
     slotsSig = ''; // slot ids/labels may need a rebuild on the next render
-    assembleAndPush(false); // update overlays now, don't wait for the next poll
+    operatorAction(() => assembleAndPush(false)); // update overlays now, don't wait for the next poll
   });
 
   els.slots.addEventListener('click', (e) => {
@@ -1134,9 +1232,14 @@
     cfg.password = els.password.value;
     cfg.viewFlags = els.viewFlags.value.trim();
     cfg.enabled = els.enabled.checked;
-    assembleAndPush(false);
-    rebuildLinks();
-    syncDirectorFrame();
+    // Save always pushes, even when nothing changed (GRN-192); syncDirectorFrame can
+    // push a blanking update when the director is switched off, so it runs inside the
+    // same (possibly confirmed) action.
+    operatorAction(() => {
+      if (assembleAndPush(false, true)) setCfgStatus(sentStatus());
+      rebuildLinks();
+      syncDirectorFrame();
+    });
   }
   $('btnVdoSave').addEventListener('click', saveRoom);
   els.enabled.addEventListener('change', saveRoom);
@@ -1259,7 +1362,7 @@
   invOpts.addEventListener('input', rebuildLinks);
   invOpts.addEventListener('change', () => {
     cfg.invite = inviteFromDom();
-    assembleAndPush(false);
+    operatorAction(() => assembleAndPush(false));
     rebuildLinks();
   });
   async function copyToClipboard(textarea, btn) {
@@ -1460,12 +1563,15 @@
       return;
     }
     const dirN = Array.isArray(payload.directory) ? payload.directory.length : 0;
-    if (!confirm(`Import this config and push it to Streamer.bot?\n\nThis REPLACES the current room, slots, and guest directory (${dirN} guest entr${dirN === 1 ? 'y' : 'ies'} in the file).`)) return;
-    adoptCfg(payload);
-    hydrated = true;
-    dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
-    renderAll();
-    assembleAndPush(false); // persist to SB (VDO Push → vdo.state)
+    operatorAction(() => {
+      adoptCfg(payload);
+      hydrated = true;
+      dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
+      renderAll();
+      // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
+      // is identical to what it last pushed, and must still reach a wiped vdo.state.
+      if (assembleAndPush(false, true)) setCfgStatus(sentStatus());
+    }, `Import this config and push it to Streamer.bot?\n\nThis REPLACES the current room, slots, and guest directory (${dirN} guest entr${dirN === 1 ? 'y' : 'ies'} in the file).`);
   });
 
   // ── Boot ──────────────────────────────────────────────────────────────────

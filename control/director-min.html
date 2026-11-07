@@ -70,7 +70,11 @@
     directory: [], directoryAutoAdd: true, directoryIgnored: [] };
   let roster = [];
   let hasRoster = false;
-  let hydrated = false;
+  // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
+  // or our own echo) or said there is none (vdo:sync:empty). Until then this page pushes
+  // nothing: its defaults would overwrite the saved vdo.state.
+  let synced = false;
+  let syncTimer = null;
   let lastPushedSig = '';
   let frameUrl = '';
   let pollTimer = null;
@@ -80,8 +84,27 @@
   // verbatim with control.html so both pages produce identical payloads.
   const sanitizeDirectory = (raw) => GRDir.sanitizeDirectory(raw);
 
+  const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+  // The state in a vdoninja:update / discord:voice:update frame: the old object field,
+  // or an escaped string field beside it (vdoninjaJson / discordVoiceJson). A present
+  // string field is authoritative: one that does not parse to a plain object makes the
+  // frame unusable (null), so a malformed frame can never mark the page synced.
+  function frameState(d, objKey, jsonKey) {
+    if (jsonKey in d) {
+      if (typeof d[jsonKey] !== 'string') return null;
+      let v;
+      try { v = JSON.parse(d[jsonKey]); } catch { return null; }
+      return isPlainObject(v) ? v : null;
+    }
+    return isPlainObject(d[objKey]) ? d[objKey] : null;
+  }
+
+  // Returns true only when it adopted something config-shaped: a plain object with
+  // slots, directory or room.
   function adoptCfg(v) {
-    if (!v || typeof v !== 'object') return;
+    if (!isPlainObject(v)) return false;
+    if (!Array.isArray(v.slots) && !Array.isArray(v.directory) && !('room' in v)) return false;
     const slots = defaultSlots();
     if (Array.isArray(v.slots)) {
       for (const s of v.slots) {
@@ -107,13 +130,37 @@
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
     };
+    return true;
+  }
+
+  // ── Sync state (GRN-24) ────────────────────────────────────────────────────
+  const MSG_SYNC_SHORT = 'VDO Sync has not answered: nothing is pushed until it does';
+  const MSG_SYNC_LONG = 'no saved config from Streamer.bot: a fresh install, or VDO Sync is missing or not compiled';
+  const SYNC_RETRY_MS = [2000, 4000, 8000]; // then every SYNC_REPEAT_MS
+  const SYNC_REPEAT_MS = 15000;
+  const SYNC_SAY_MS = 1200;
+  const SYNC_NAME_CAUSES_MS = 5000;
+  function markSynced() {
+    if (synced) return;
+    synced = true;
+    clearTimeout(syncTimer);
+  }
+  // Re-ask for the saved config until it arrives: after 2, 4, 8 s, then every 15 s.
+  function scheduleResync(n) {
+    clearTimeout(syncTimer);
+    if (synced) return;
+    syncTimer = setTimeout(() => {
+      if (synced) return;
+      doAction(SYNC_ACTION, { reason: 'director-min-retry' });
+      scheduleResync(n + 1);
+    }, n < SYNC_RETRY_MS.length ? SYNC_RETRY_MS[n] : SYNC_REPEAT_MS);
   }
 
   // Auto-populate from whoever is live right now. Returns true if the directory
   // grew/changed — the caller pushes. Deterministic (directory-core sorts its
   // candidates), so control.html running the same inputs lands on the same array.
   function runAutoAdd() {
-    if (!hydrated || !cfg.directoryAutoAdd) return false;
+    if (!synced || !cfg.directoryAutoAdd) return false;
     const res = GRDir.autoPopulate({
       directory: cfg.directory,
       ignored: cfg.directoryIgnored,
@@ -148,13 +195,13 @@
       directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored) };
   }
 
-  // fromRoster: a resolution-driven push needs BOTH gates — hydrated (never
+  // fromRoster: a resolution-driven push needs BOTH gates — synced (never
   // clobber persisted state with defaults) and hasRoster (never blank slots
   // before our own director has spoken). A directory-driven push (auto-add from
-  // the Discord feed, which needs no director at all) only needs hydrated;
-  // assemblePayload preserves the hydrated streamIDs while hasRoster is false.
+  // the Discord feed, which needs no director at all) only needs synced;
+  // assemblePayload preserves the adopted streamIDs while hasRoster is false.
   function assembleAndPush(fromRoster) {
-    if (!hydrated) return;
+    if (!synced) return;
     if (fromRoster && !hasRoster) return;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig) return;
@@ -181,13 +228,17 @@
       if (syncFired) return;
       syncFired = true;
       doAction(SYNC_ACTION, { reason: 'director-min-connect' });
+      scheduleResync(0);
     };
     ws.onopen = () => {
       reconnectDelay = 2000;
-      show('connected to SB — waiting for state');
+      if (!synced) show('connected to SB — waiting for state');
       subId = String(++msgId);
       ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
       setTimeout(fireSync, 400);
+      // Say why nothing is happening while the saved config has not come back.
+      setTimeout(() => { if (!synced) show(MSG_SYNC_SHORT); }, SYNC_SAY_MS);
+      setTimeout(() => { if (!synced) show(MSG_SYNC_LONG); }, SYNC_NAME_CAUSES_MS);
     };
     ws.onmessage = (evt) => {
       let m;
@@ -198,18 +249,26 @@
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
       if (!d || typeof d !== 'object') return;
       if (d.type === 'vdoninja:update') {
-        const sig = JSON.stringify(d.vdoninja);
-        if (sig === lastPushedSig) return; // our own echo
-        adoptCfg(d.vdoninja);
-        hydrated = true;
+        const v = frameState(d, 'vdoninja', 'vdoninjaJson');
+        if (!v) return; // no usable state in the frame: drop it, never mark the page synced
+        const sig = JSON.stringify(v);
+        if (sig === lastPushedSig) { markSynced(); return; } // our own echo
+        if (!adoptCfg(v)) return; // not config-shaped: drop it
+        markSynced();
         lastPushedSig = JSON.stringify(assemblePayload());
         syncDirectorFrame();
         if (runAutoAdd()) assembleAndPush(false); // late arrivals in a replayed room
+      } else if (d.type === 'vdo:sync:empty') {
+        // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.
+        markSynced();
+        show('no saved config yet');
       } else if (d.type === 'discord:voice:update') {
         // Voice-channel arrivals are an auto-add source of their own — no director
         // and no room needed. This feed is chatty (~10/s while people talk); the
         // push only happens when the directory actually grew.
-        const users = d.discordVoice && d.discordVoice.users;
+        const dv = frameState(d, 'discordVoice', 'discordVoiceJson');
+        if (!dv) return;
+        const users = dv.users;
         discordUsers = (users && typeof users === 'object') ? users : {};
         if (runAutoAdd()) assembleAndPush(false);
       }
