@@ -9,6 +9,28 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.24] — 2026-11-07
+
+The control pages no longer write built-in defaults over your saved config, and the dock's Export and Import are honest about what they do. Nothing to re-paste: this release works with the actions you already have.
+
+### Fixed
+
+- **A cold start or reload that missed the first `VDO Sync` could overwrite your saved config.** If Streamer.bot's reply was late or never came (a restart, an uncompiled `VDO Sync`), a 1.2 s timer let the control page treat its built-in defaults as real, and the next voice-feed auto-add or edit pushed them over the persisted `vdo.state`. Both control pages now wait for a real answer before they push anything on their own. `VDO Sync` is asked again after 2, 4 and 8 s, then every 15 s, and the dock says why it is waiting (after about 5 s it names both causes: a fresh install, or `VDO Sync` missing or not compiled). Anything you do before the answer arrives (Save, Import, a slot, directory, invite or director change) asks once ("Streamer.bot has not returned your saved config; saving now replaces it"); answer no and nothing is pushed. If the saved config arrives while that question is open, it wins and nothing is pushed over it. When it first arrives, the slot and directory panels are redrawn from it, so a leftover default row cannot be pushed by your next edit.
+- **Save and Import now always push.** Save with no edit, and Import of the dock's own export, re-seed a wiped `vdo.state` instead of being skipped as "unchanged". The dock says "Sent to Streamer.bot" only when the push really left; with Streamer.bot unreachable it says "Not sent" and the next poll retries.
+- **A frame with no usable state is dropped.** A `vdoninja:update` with no payload, an unparseable string, or something that is not a config can no longer mark a page synced, enable Export or trigger a push.
+- **A change to one invite option no longer drops invite fields it does not know.**
+
+### Added
+
+- **The pages read the state from escaped string fields** (`vdoninjaJson`, `discordVoiceJson`) as well as the old object fields, ahead of a later action release that sends them.
+- **Newer fields survive.** Both control pages pass fields they do not know through every push (top level, slots, directory entries and their socials, invite), and never copy `rev` or `writer`, which a later release reserves. They send `schemaVersion: 1`; a saved config with a higher version is shown but never pushed over, Export is disabled for it, and the page says "reload this page".
+- **Export waits for your config and says what it saved.** The button stays disabled until a real config has reached the page (a fresh install can export after its first push). After a click the dock shows `Saved greenroom-vdo-<date>.json` and a one-line summary; inside an OBS dock it also shows the JSON in a box with a Copy button (OBS 33 may save the file silently, OBS 32 and older may not save it at all). The tooltip now says the file includes the room password.
+- **Import checks what it is given.** It refuses a Discord ID written as a number (the digits are already rounded), a non-text room, a backup of a different kind and a backup from a newer Greenroom, and its confirm counts the guest entries that will survive and how many are dropped.
+- **Auto-add skips names that look like timestamps**, and the error pill names such an entry. The actions get their own fix in a later release.
+- Test support: the mock Streamer.bot can delay `VDO Sync`, clear `vdo.state`, send raw frames and use the string wire; `verify` and `verify:render` cover the above.
+
+**Deploy:** copy the `control/` folder, reload the Greenroom dock and refresh the `director-min` source. No action to re-paste, nothing to restart. `verify` 110/110, `verify:render` 110/110.
+
 ## [1.0.17] — 2026-11-07
 
 Documentation only: no code changed, so nothing to copy or re-paste.
@@ -138,6 +160,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.24]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.17...v1.0.24
 [1.0.17]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.13...v1.0.17
 [1.0.13]: https://github.com/FlashGalatine/greenroom-guests/compare/v0.1.0...v1.0.13
 [0.1.0]: https://github.com/FlashGalatine/greenroom-guests/releases/tag/v0.1.0
