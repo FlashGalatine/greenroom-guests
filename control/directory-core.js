@@ -16,13 +16,26 @@
 // re-add the guest a second later.
 //
 // The sanitizers are duplicated in overlay/nameplate-shared.js (the overlays load
-// that file instead of this one — different SB Path->Folder prefix). Same
-// semantics, same key order; verify.mjs greps both copies. They must stay
-// IDEMPOTENT: sanitize(sanitize(x)) === sanitize(x), or the control pages'
-// hydration baselines drift and every hydration triggers a spurious push.
+// that file instead of this one — different SB Path->Folder prefix). Same key order;
+// verify.mjs greps both copies. This copy is SUPERSET-SAFE (unknown fields pass
+// through after the known ones); the overlays only read the directory, so their copy
+// stays strict until the release that ships the overlay brings it to the same form.
+// They must stay IDEMPOTENT: sanitize(sanitize(x)) === sanitize(x), or the control
+// pages' hydration baselines drift and every hydration triggers a spurious push.
 
 (function () {
   'use strict';
+
+  // Superset-safe: a field this version does not know passes through untouched, so a
+  // newer page's extra fields survive an older page's push. Known keys always come
+  // first, in wire order, then the unknown ones in the order they arrived.
+  const DIR_KEYS = new Set(['vdoLabel', 'discordUserId', 'displayName', 'socials', 'auto']);
+  const SOCIAL_KEYS = new Set(['platform', 'handle']);
+  function extraFields(src, known) {
+    const out = {};
+    for (const k of Object.keys(src || {})) if (!known.has(k) && k !== '__proto__') out[k] = src[k];
+    return out;
+  }
 
   function sanitizeSocials(raw) {
     const out = [];
@@ -32,7 +45,7 @@
       const platform = String(s.platform ?? '').trim().toLowerCase();
       const handle = String(s.handle ?? '').trim();
       if (!platform || !handle) continue;
-      out.push({ platform, handle });
+      out.push(Object.assign({ platform, handle }, extraFields(s, SOCIAL_KEYS)));
     }
     return out;
   }
@@ -46,9 +59,19 @@
       const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
       const displayName = String(e.displayName ?? '').trim();
       if (!displayName || (!vdoLabel && !discordUserId)) continue;
-      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });
+      out.push(Object.assign({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto }, extraFields(e, DIR_KEYS)));
     }
     return out;
+  }
+
+  // The socials textarea yields bare {platform, handle}; give each one back the unknown
+  // fields (a url, say) of the previous social with the same platform and handle.
+  function carrySocialExtras(prev, parsed) {
+    const old = Array.isArray(prev) ? prev : [];
+    return (parsed || []).map((s) => {
+      const hit = old.find((o) => o && o.platform === s.platform && o.handle === s.handle);
+      return hit ? Object.assign({}, s, extraFields(hit, SOCIAL_KEYS)) : s;
+    });
   }
 
   // Ignore keys are sorted + deduped so the payload signature is stable no matter
@@ -173,5 +196,6 @@
     sanitizeSocials, sanitizeDirectory, sanitizeIgnored,
     labelKey, userKey, findByLabel, findByUserId,
     parseSocialsText, socialsToText, autoPopulate, isDateShaped,
+    extraFields, carrySocialExtras, DIR_KEYS, SOCIAL_KEYS,
   };
 })();

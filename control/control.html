@@ -130,6 +130,7 @@
   .linkrow { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 8px; }
   .linkrow textarea { flex: 1; min-height: 40px; }
   .linkrow .btns { display: flex; flex-direction: column; gap: 4px; }
+  #cfgExportBox[hidden] { display: none; }
   a.btn-open { font-size: 12px; color: var(--cyan); text-decoration: none; border: 1px solid var(--line);
     border-radius: 6px; padding: 5px 10px; text-align: center; }
 
@@ -154,7 +155,7 @@
   <span id="sbStatus" class="pill">SB: connecting…</span>
   <span id="vdoStatus" class="pill">director: idle</span>
   <span style="margin-left:auto; display:flex; gap:6px">
-    <button id="btnCfgExport" type="button" title="Download the current dock config (room, slots, guest directory) as a JSON backup">Export config</button>
+    <button id="btnCfgExport" type="button" disabled title="Waiting for the config from Streamer.bot">Export config</button>
     <button id="btnCfgImport" type="button" title="Load a backup JSON and push it to Streamer.bot (replaces the current config)">Import config</button>
     <input type="file" id="cfgImportFile" accept="application/json,.json" hidden />
   </span>
@@ -178,6 +179,10 @@
       automatically. Keep exactly one director page open (this page or director-min.html).</div>
     <div id="syncStatus" class="warn" role="status" hidden></div>
     <div id="cfgStatus" class="hint" role="status" aria-live="polite"></div>
+    <div id="cfgExportBox" class="linkrow" hidden>
+      <textarea id="cfgExportText" readonly spellcheck="false" aria-label="Exported config (JSON)"></textarea>
+      <div class="btns"><button id="btnCfgExportCopy" type="button">Copy</button></div>
+    </div>
     <div id="cryptoWarn" class="warn" hidden>crypto.subtle unavailable (non-secure origin) —
       the &amp;hash= invite mode can't be computed here. Open this page via 127.0.0.1, or use
       plaintext/none password mode.</div>
@@ -357,6 +362,15 @@
     exitOnSbClose: $('dvoExitOnSbClose'),
   };
 
+  // Wire compatibility. Fields this page does not know pass through every push; `rev`
+  // and `writer` are reserved for a later release (per-push metadata) and are never
+  // copied. A saved config with a higher schemaVersion makes this page stop pushing.
+  const SCHEMA_VERSION = 1;
+  const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
+    'directoryAutoAdd', 'directoryIgnored', 'schemaVersion', 'rev', 'writer']);
+  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId']);
+  let schemaTooNew = false;
+
   // ── State ─────────────────────────────────────────────────────────────────
   function defaultInvite() {
     return { passwordMode: 'hash', label: '', push: '', videoBitrate: '', quality: '', width: '',
@@ -370,7 +384,7 @@
     return out;
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(),
-    invite: defaultInvite(), directory: [], directoryAutoAdd: true, directoryIgnored: [] };
+    invite: defaultInvite(), directory: [], directoryAutoAdd: true, directoryIgnored: [], extra: {} };
   let roster = [];          // live [{label, streamID}] from the director iframe
   let hasRoster = false;    // at least one director reply this session
   let discord = null;       // last discordVoice payload
@@ -380,6 +394,10 @@
   // pushed on its own, because the form may be showing built-in defaults that would
   // overwrite the saved vdo.state. An operator action may push first, after one confirm.
   let synced = false;
+  // gotConfig: this page holds a real config (a usable vdoninja:update arrived, our own
+  // echo included, or an import was applied). Export stays disabled until then, so it
+  // can never write the built-in defaults into a "backup".
+  let gotConfig = false;
   let unsyncedOverride = false; // true only while a confirmed operator action runs
   let syncPhase = 0;            // 0 quiet · 1 'has not answered' · 2 names both causes
   let syncTimer = null;
@@ -424,15 +442,18 @@
       for (const s of v.slots) {
         const i = Number(s && s.slot) - 1;
         if (!Number.isInteger(i) || i < 0 || i >= SLOT_COUNT) continue;
-        slots[i] = {
+        slots[i] = Object.assign({
           label: String(s.label ?? ''),
           streamID: String(s.streamID ?? ''),
           mirror: !!s.mirror,
           mode: s.mode === 'discord' ? 'discord' : 'webcam',
           discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
-        };
+        }, GRDir.extraFields(s, SLOT_KEYS)); // unknown slot fields pass through
       }
     }
+    // A saved config from a newer Greenroom than this page: show it, but never push over it.
+    const sv = Number(v.schemaVersion);
+    schemaTooNew = Number.isFinite(sv) && sv > SCHEMA_VERSION;
     cfg = {
       enabled: !!v.enabled,
       room: String(v.room ?? ''),
@@ -443,6 +464,7 @@
       directory: sanitizeDirectory(v.directory),
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
+      extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
     return true;
   }
@@ -455,11 +477,19 @@
   const SYNC_REPEAT_MS = 15000;
   const SYNC_NAME_CAUSES_MS = 5000;
 
+  const MSG_RELOAD = 'The saved config comes from a newer Greenroom than this page. Reload this page (and refresh the Greenroom sources); it pushes nothing until you do.';
   function renderSyncStatus() {
     const el = els.syncStatus;
+    if (schemaTooNew) { el.hidden = false; el.textContent = MSG_RELOAD; return; }
     if (synced || syncPhase === 0) { el.hidden = true; el.textContent = ''; return; }
     el.hidden = false;
     el.textContent = syncPhase >= 2 ? MSG_SYNC_LONG : MSG_SYNC_SHORT;
+  }
+  const EXPORT_TITLE = 'Download the current dock config (room, slots, guest directory) as a JSON backup. The file includes the room password: keep it private.';
+  function renderExportButton() {
+    const b = $('btnCfgExport');
+    b.disabled = !gotConfig;
+    b.title = gotConfig ? EXPORT_TITLE : 'Waiting for the config from Streamer.bot';
   }
   function markSynced() {
     hydrated = true;
@@ -484,6 +514,7 @@
   // ask: an action that has its own confirm (Import) passes its text, so the operator
   // is asked exactly once, with the not-synced warning put in front when it applies.
   function operatorAction(fn, ask) {
+    if (schemaTooNew) { alert(MSG_RELOAD); return false; }
     if (synced) {
       if (ask && !confirm(ask)) return false;
       fn();
@@ -552,6 +583,8 @@
     if (d.type === 'vdoninja:update') {
       const v = frameState(d, 'vdoninja', 'vdoninjaJson');
       if (!v) return; // no usable state in the frame: drop it, never mark the page synced
+      gotConfig = true; // a real config reached this page (adopted below, or our own echo)
+      renderExportButton();
       const sig = JSON.stringify(v);
       if (sig === lastPushedSig) { markSynced(); return; } // our own echo
       if (!adoptCfg(v)) return; // not config-shaped: drop it
@@ -604,16 +637,16 @@
         ? (s.label ? (byLabel.get(s.label) || '') : '')
         : String(s.streamID || ''); // no roster yet: preserve hydrated resolution
       s.streamID = streamID;
-      return {
+      return Object.assign({
         slot: i + 1,
         label: s.label || '',
         streamID,
         mirror: !!s.mirror,
         mode: s.mode === 'discord' ? 'discord' : 'webcam',
         discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
-      };
+      }, GRDir.extraFields(s, SLOT_KEYS));
     });
-    return {
+    return Object.assign({
       enabled: !!cfg.enabled,
       room: cfg.room || '',
       password: cfg.password || '',
@@ -623,7 +656,8 @@
       directory: sanitizeDirectory(cfg.directory),
       directoryAutoAdd: cfg.directoryAutoAdd !== false,
       directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored),
-    };
+      schemaVersion: SCHEMA_VERSION,
+    }, cfg.extra);
   }
 
   // fromRoster: pushes triggered by director polls also require a roster this
@@ -632,6 +666,7 @@
   // Nothing goes out before the page is synced (GRN-24), except from inside a
   // confirmed operatorAction. force skips only the identical-payload dedupe (GRN-192).
   function assembleAndPush(fromRoster, force) {
+    if (schemaTooNew) return false; // a newer Greenroom saved this config: never push over it
     if (!synced && !unsyncedOverride) return false;
     if (fromRoster && !hasRoster) return false;
     const payload = JSON.stringify(assemblePayload());
@@ -721,6 +756,7 @@
     renderDiscordSection();
     syncDirectorFrame();
     renderSyncStatus();
+    renderExportButton();
   }
 
   function rosterLabels() { return [...new Set(roster.map((g) => g.label).filter(Boolean))]; }
@@ -1042,21 +1078,22 @@
   // data-idx, filtered-away entries pass through untouched. Half-complete rows are
   // kept as-is (only the wire copy is sanitized, exactly like slotsFromDom).
   function directoryFromDom() {
-    const out = cfg.directory.map((e) => ({
+    // Unknown fields of an entry (and of its socials) ride along through the editor.
+    const out = cfg.directory.map((e) => Object.assign({
       vdoLabel: String(e.vdoLabel ?? ''), discordUserId: String(e.discordUserId ?? ''),
       displayName: String(e.displayName ?? ''), socials: (e.socials || []).slice(), auto: !!e.auto,
-    }));
+    }, GRDir.extraFields(e, GRDir.DIR_KEYS)));
     for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
       const i = Number(row.dataset.idx);
       if (!Number.isInteger(i) || i < 0 || i >= out.length) continue;
       const val = (cls) => { const el = row.querySelector(cls); return el ? el.value : ''; };
-      out[i] = {
+      out[i] = Object.assign({
         vdoLabel: val('input.vdo-dir-label').trim(),
         discordUserId: val('input.vdo-dir-discord-id').replace(/\D/g, ''),
         displayName: val('input.vdo-dir-display').trim(),
-        socials: GRDir.parseSocialsText(val('textarea.vdo-dir-socials')),
+        socials: GRDir.carrySocialExtras(out[i].socials, GRDir.parseSocialsText(val('textarea.vdo-dir-socials'))),
         auto: out[i].auto,
-      };
+      }, GRDir.extraFields(out[i], GRDir.DIR_KEYS));
     }
     return out;
   }
@@ -1210,13 +1247,13 @@
       const modeSel = row && row.querySelector('select.vdo-mode-sel');
       const discIn = row && row.querySelector('input.vdo-discord-id');
       const prev = cfg.slots[i - 1] || {};
-      out.push({
+      out.push(Object.assign({
         label: sel ? sel.value : String(prev.label ?? ''),
         streamID: String(prev.streamID ?? ''),
         mirror: mir ? mir.checked : !!prev.mirror,
         mode: modeSel ? modeSel.value : (prev.mode ?? 'webcam'),
         discordUserId: discIn ? discIn.value.replace(/\D/g, '') : String(prev.discordUserId ?? ''),
-      });
+      }, GRDir.extraFields(prev, SLOT_KEYS)));
     }
     return out;
   }
@@ -1551,17 +1588,41 @@
   // file you can keep. Import re-pushes via VDO Push, so it persists like an edit.
   // (Standalone CLI equivalent: `npm run backup` / `npm run backup:restore`.)
   function twoDigit(n) { return String(n).padStart(2, '0'); }
+  // One line for the status: what a config holds (room set or not, bound slots, directory
+  // entries), the way backup.mjs summarize() reports it, without the room name.
+  function summarizeCfg(p) {
+    const slots = Array.isArray(p.slots) ? p.slots.filter((s) => s && (s.label || s.streamID || s.discordUserId)).length : 0;
+    const dir = Array.isArray(p.directory) ? p.directory.length : 0;
+    return `room ${p.room ? 'set' : 'unset'}, ${slots} bound slot${slots === 1 ? '' : 's'}, ${dir} directory entr${dir === 1 ? 'y' : 'ies'}`;
+  }
   $('btnCfgExport').addEventListener('click', () => {
-    const envelope = { kind: 'greenroom-vdo-backup', savedAt: new Date().toISOString(), vdoninja: assemblePayload() };
-    const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+    if (!gotConfig) return; // the button is disabled; belt and braces
+    const payload = assemblePayload();
+    const envelope = { kind: 'greenroom-vdo-backup', savedAt: new Date().toISOString(), vdoninja: payload };
+    const json = JSON.stringify(envelope, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const d = new Date();
+    const name = `greenroom-vdo-${d.getFullYear()}-${twoDigit(d.getMonth() + 1)}-${twoDigit(d.getDate())}.json`;
     const a = document.createElement('a');
     a.href = url;
-    a.download = `greenroom-vdo-${d.getFullYear()}-${twoDigit(d.getMonth() + 1)}-${twoDigit(d.getDate())}.json`;
+    a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // Always say what happened. A click that saves nothing visible is how backups go missing.
+    let msg = `Saved ${name} to your browser's download folder. It includes the room password: keep it private. Holds: ${summarizeCfg(payload)}.`;
+    const box = $('cfgExportBox');
+    if (window.obsstudio) {
+      // An OBS dock: OBS 33 may save the file silently, OBS 32 and older may not save it at all.
+      msg += ' In an OBS dock the file may save silently (OBS 33) or not at all (OBS 32 and older); copy the text below to be safe.';
+      $('cfgExportText').value = json;
+      box.hidden = false;
+    } else {
+      box.hidden = true;
+    }
+    setCfgStatus(msg);
   });
+  $('btnCfgExportCopy').addEventListener('click', () => copyToClipboard($('cfgExportText'), $('btnCfgExportCopy')));
   $('btnCfgImport').addEventListener('click', () => $('cfgImportFile').click());
   $('cfgImportFile').addEventListener('change', async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1570,6 +1631,11 @@
     let parsed;
     try { parsed = JSON.parse(await file.text()); }
     catch { alert('That file is not valid JSON.'); return; }
+    // An envelope names its kind; refuse one that says it is something else.
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'kind' in parsed && parsed.kind !== 'greenroom-vdo-backup') {
+      alert('That is a different kind of backup file, not a Greenroom config backup.');
+      return;
+    }
     // Accept a backup envelope (has .vdoninja) or a raw vdoninja payload.
     const payload = parsed && typeof parsed.vdoninja === 'object' && parsed.vdoninja ? parsed.vdoninja : parsed;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
@@ -1577,16 +1643,33 @@
       alert('That does not look like a Greenroom config backup (no slots / directory / room).');
       return;
     }
-    const dirN = Array.isArray(payload.directory) ? payload.directory.length : 0;
+    if ('room' in payload && typeof payload.room !== 'string') {
+      alert('The room in that file is not text, so it cannot be a Greenroom config. Nothing was imported.');
+      return;
+    }
+    // A Discord ID is 17-19 digits: JSON.parse rounds it when it is written as a number, so
+    // the digits are already wrong. Refuse rather than push a different person's ID.
+    const asNumber = (list) => Array.isArray(list) && list.some((x) => x && typeof x.discordUserId === 'number');
+    if (asNumber(payload.directory) || asNumber(payload.slots)) {
+      alert('That file stores a Discord user ID as a number, which has already lost digits. Edit the file so each ID is in quotes ("discordUserId": "123..."), or export it again, then import. Nothing was imported.');
+      return;
+    }
+    // Count what will actually be kept, so the confirm does not promise entries the
+    // sanitiser then drops (an entry needs a name and a label or Discord ID).
+    const dirKept = GRDir.sanitizeDirectory(payload.directory).length;
+    const dirDropped = (Array.isArray(payload.directory) ? payload.directory.length : 0) - dirKept;
     operatorAction(() => {
       adoptCfg(payload);
       hydrated = true;
+      gotConfig = true; // this page now holds a real config
       dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
       renderAll();
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
       // is identical to what it last pushed, and must still reach a wiped vdo.state.
       if (assembleAndPush(false, true)) setCfgStatus(sentStatus());
-    }, `Import this config and push it to Streamer.bot?\n\nThis REPLACES the current room, slots, and guest directory (${dirN} guest entr${dirN === 1 ? 'y' : 'ies'} in the file).`);
+    }, `Import this config and push it to Streamer.bot?
+
+This REPLACES the current room, slots, and guest directory (${dirKept} guest entr${dirKept === 1 ? 'y' : 'ies'} in the file${dirDropped > 0 ? `; ${dirDropped} dropped: no name, or no label and no Discord ID` : ''}).`);
   });
 
   // ── Boot ──────────────────────────────────────────────────────────────────

@@ -57,9 +57,19 @@
   const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
   const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
 
+  // Wire compatibility (same rules as control.html). Fields this page does not know pass
+  // through every push; `rev` and `writer` are reserved for a later release and are never
+  // copied. A saved config with a higher schemaVersion makes this page stop pushing.
+  const SCHEMA_VERSION = 1;
+  const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
+    'directoryAutoAdd', 'directoryIgnored', 'schemaVersion', 'rev', 'writer']);
+  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId']);
+  const MSG_RELOAD = 'the saved config comes from a newer Greenroom: reload this page; it pushes nothing until you do';
+  let schemaTooNew = false;
+
   const statusEl = document.getElementById('status');
   const director = document.getElementById('vdoDirector');
-  const show = (t) => { statusEl.textContent = 'greenroom director: ' + t; };
+  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (schemaTooNew ? MSG_RELOAD : t); };
 
   function defaultSlots() {
     const out = [];
@@ -67,7 +77,7 @@
     return out;
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {},
-    directory: [], directoryAutoAdd: true, directoryIgnored: [] };
+    directory: [], directoryAutoAdd: true, directoryIgnored: [], extra: {} };
   let roster = [];
   let hasRoster = false;
   // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
@@ -110,15 +120,18 @@
       for (const s of v.slots) {
         const i = Number(s && s.slot) - 1;
         if (!Number.isInteger(i) || i < 0 || i >= SLOT_COUNT) continue;
-        slots[i] = {
+        slots[i] = Object.assign({
           label: String(s.label ?? ''),
           streamID: String(s.streamID ?? ''),
           mirror: !!s.mirror,
           mode: s.mode === 'discord' ? 'discord' : 'webcam',
           discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
-        };
+        }, GRDir.extraFields(s, SLOT_KEYS)); // unknown slot fields pass through
       }
     }
+    // A saved config from a newer Greenroom than this page: follow it, but never push over it.
+    const sv = Number(v.schemaVersion);
+    schemaTooNew = Number.isFinite(sv) && sv > SCHEMA_VERSION;
     cfg = {
       enabled: !!v.enabled,
       room: String(v.room ?? ''),
@@ -129,6 +142,7 @@
       directory: sanitizeDirectory(v.directory),
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
+      extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
     return true;
   }
@@ -179,20 +193,21 @@
         ? (s.label ? (byLabel.get(s.label) || '') : '')
         : String(s.streamID || '');
       s.streamID = streamID;
-      return {
+      return Object.assign({
         slot: i + 1,
         label: s.label || '',
         streamID,
         mirror: !!s.mirror,
         mode: s.mode === 'discord' ? 'discord' : 'webcam',
         discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
-      };
+      }, GRDir.extraFields(s, SLOT_KEYS));
     });
-    return { enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
+    return Object.assign({ enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
       viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {},
       directory: sanitizeDirectory(cfg.directory),
       directoryAutoAdd: cfg.directoryAutoAdd !== false,
-      directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored) };
+      directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored),
+      schemaVersion: SCHEMA_VERSION }, cfg.extra);
   }
 
   // fromRoster: a resolution-driven push needs BOTH gates — synced (never
@@ -201,6 +216,7 @@
   // the Discord feed, which needs no director at all) only needs synced;
   // assemblePayload preserves the adopted streamIDs while hasRoster is false.
   function assembleAndPush(fromRoster) {
+    if (schemaTooNew) return;
     if (!synced) return;
     if (fromRoster && !hasRoster) return;
     const payload = JSON.stringify(assemblePayload());

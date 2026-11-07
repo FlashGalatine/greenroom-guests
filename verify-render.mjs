@@ -31,6 +31,8 @@
 
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
@@ -721,6 +723,206 @@ async function main() {
     check('R8c: the vdo:error pill names the date-shaped directory entry', namedPill,
       await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
     await pgY.close(); dateProd.close();
+
+    // ── R9: Save/Import, Export and Import checks, unknown-field pass-through ──────────
+    console.log('\n[R9] control page: Save/Import re-seed, Export gating + status, Import checks, pass-through');
+    const scratch = mkdtempSync(resolve(tmpdir(), 'greenroom-r9-'));
+    const savedPayloads = (acts) => pushesOf(acts).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+    const waitState = async (api, pred, tries = 24) => {
+      for (let i = 0; i < tries; i++) { const s = await api.state(); if (pred(s)) return s; await sleep(250); }
+      return null;
+    };
+
+    // R9a: GRN-192 — Save with no edit, and Import of the page's own export, re-seed a wiped vdo.state.
+    const seeded = await startExtra({});
+    seeded.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300);
+    const pgS = await newPage(browser, { width: 920, height: 1300 });
+    pgS.on('dialog', (d) => d.accept());
+    await pgS.goto(`${seeded.api.base}/control/control.html?sbport=${seeded.ws}`, { waitUntil: 'load' });
+    await wait(pgS, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
+    await sleep(600);
+    await seeded.api.restart(true); // the persisted vdo.state is gone (a wiped or reinstalled Streamer.bot)
+    await seeded.api.clear();
+    await pgS.click('#btnVdoSave');
+    const reseeded = await waitState(seeded.api, (s) => !!s.vdo && s.vdo.room === 'seededroom');
+    check('R9a: Save with no edit re-seeds a wiped vdo.state (force skips only the identical-payload dedupe)', !!reseeded);
+    const sentTxt = await pgS.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+    check("R9a: Save shows a visible 'Sent to Streamer.bot' status", /Sent to Streamer\.bot/i.test(sentTxt), sentTxt);
+    const [dlSelf] = await Promise.all([pgS.waitForEvent('download', { timeout: 5000 }).catch(() => null), pgS.click('#btnCfgExport')]);
+    const ownExport = resolve(scratch, 'own-export.json');
+    if (dlSelf) await dlSelf.saveAs(ownExport);
+    await seeded.api.restart(true);
+    await seeded.api.clear();
+    if (dlSelf) await pgS.setInputFiles('#cfgImportFile', ownExport);
+    const reimported = await waitState(seeded.api, (s) => !!s.vdo && s.vdo.room === 'seededroom');
+    check("R9a: Import of the page's own export re-seeds a wiped vdo.state", !!dlSelf && !!reimported);
+    check("R9a: Import shows the 'Sent to Streamer.bot' status too",
+      /Sent to Streamer\.bot/i.test(await pgS.evaluate(() => document.getElementById('cfgStatus')?.textContent || '')));
+
+    // R9b: GRN-143 — Import refuses what it cannot restore faithfully, and counts honestly.
+    const dlgI = [];
+    const pgI = await newPage(browser, { width: 920, height: 1300 });
+    pgI.on('dialog', (d) => { dlgI.push({ type: d.type(), msg: d.message() }); d.dismiss(); });
+    await pgI.goto(`${seeded.api.base}/control/control.html?sbport=${seeded.ws}`, { waitUntil: 'load' });
+    await wait(pgI, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
+    await seeded.api.clear();
+    const importObj = async (obj) => {
+      dlgI.length = 0;
+      await pgI.setInputFiles('#cfgImportFile', { name: 'x.json', mimeType: 'application/json', buffer: Buffer.from(typeof obj === 'string' ? obj : JSON.stringify(obj)) });
+      await sleep(700);
+      return dlgI.slice();
+    };
+    // A numeric ID is already rounded by JSON.parse (110457699291906048 → 110457699291906050).
+    let r = await importObj('{"room":"r","directory":[{"vdoLabel":"A","discordUserId":110457699291906048,"displayName":"Alpha"}]}');
+    check('R9b: a numeric discordUserId in a directory entry is rejected with a message (not coerced)',
+      r.length === 1 && r[0].type === 'alert' && /Discord/i.test(r[0].msg) && /number/i.test(r[0].msg), JSON.stringify(r));
+    r = await importObj('{"room":"r","slots":[{"slot":1,"label":"A","discordUserId":110457699291906048}]}');
+    check('R9b: a numeric discordUserId in a slot is rejected too', r.length === 1 && r[0].type === 'alert' && /Discord/i.test(r[0].msg), JSON.stringify(r));
+    r = await importObj({ room: 123, slots: [] });
+    check('R9b: a non-string room is rejected', r.length === 1 && r[0].type === 'alert' && /room/i.test(r[0].msg), JSON.stringify(r));
+    r = await importObj({ kind: 'some-other-backup', vdoninja: { room: 'r', slots: [] } });
+    check('R9b: an envelope of a different kind is rejected', r.length === 1 && r[0].type === 'alert', JSON.stringify(r));
+    r = await importObj({ room: 'r', directory: [
+      { vdoLabel: 'A', displayName: 'Alpha' }, { vdoLabel: 'B', displayName: 'Bravo' }, { vdoLabel: 'C', displayName: '' }] });
+    check('R9b: the confirm counts the entries that will survive sanitising, and says how many are dropped',
+      r.length === 1 && r[0].type === 'confirm' && /2 guest entr/.test(r[0].msg) && /1\D{0,40}dropped|dropped\D{0,40}1/i.test(r[0].msg), JSON.stringify(r));
+    check('R9b: none of those imports pushed anything', pushesOf(await seeded.api.actions()).length === 0);
+    await pgI.close();
+
+    // R9c: GRN-137 + GRN-136 + GRN-14 — Export waits for the config, then says what it saved.
+    const slow2 = await startExtra({ SYNC_DELAY_MS: '4000' });
+    slow2.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300);
+    const pgX1 = await newPage(browser, { width: 920, height: 1300 });
+    await pgX1.goto(`${slow2.api.base}/control/control.html?sbport=${slow2.ws}`, { waitUntil: 'load' });
+    await sleep(1800);
+    const exBefore = await pgX1.evaluate(() => { const b = document.getElementById('btnCfgExport'); return { disabled: b.disabled, title: b.title }; });
+    check("R9c: Export is disabled before the saved config arrives, with a 'Waiting for the config' tooltip",
+      exBefore.disabled === true && /Waiting for the config from Streamer\.bot/.test(exBefore.title), JSON.stringify(exBefore));
+    const exAfter = await wait(pgX1, () => { const b = document.getElementById('btnCfgExport'); return !b.disabled && /password/i.test(b.title); }, null, 8000);
+    check('R9c: …enabled once it arrives, and the tooltip says the file includes the room password (keep it private)', exAfter,
+      await pgX1.evaluate(() => document.getElementById('btnCfgExport').title));
+    const [dlX] = await Promise.all([pgX1.waitForEvent('download', { timeout: 5000 }).catch(() => null), pgX1.click('#btnCfgExport')]);
+    check('R9c: Export downloads greenroom-vdo-YYYY-MM-DD.json', !!dlX && /^greenroom-vdo-\d{4}-\d{2}-\d{2}\.json$/.test(dlX.suggestedFilename()), dlX && dlX.suggestedFilename());
+    const exTxt = await pgX1.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+    check("R9c: …and always shows 'Saved <file> …' plus a one-line summary of what it holds",
+      /Saved greenroom-vdo-\d{4}-\d{2}-\d{2}\.json/.test(exTxt) && /room set, 1 bound slot/.test(exTxt) && /1 directory entry/.test(exTxt), exTxt);
+    const noObs = await pgX1.evaluate(() => { const t = document.getElementById('cfgExportText'); return !t || t.hidden || !t.offsetParent; });
+    check('R9c: outside OBS no paste-box is shown', noObs);
+    await pgX1.close();
+    const pgX2 = await newPage(browser, { width: 920, height: 1300 });
+    await pgX2.addInitScript('window.obsstudio = { pluginVersion: "test" };'); // an OBS browser dock
+    await pgX2.goto(`${slow2.api.base}/control/control.html?sbport=${slow2.ws}`, { waitUntil: 'load' });
+    await wait(pgX2, () => !document.getElementById('btnCfgExport').disabled, null, 9000);
+    await pgX2.click('#btnCfgExport');
+    const obsBox = await wait(pgX2, () => { const t = document.getElementById('cfgExportText');
+      return !!t && !!t.offsetParent && t.readOnly && t.value.includes('"kind": "greenroom-vdo-backup"') && !!document.getElementById('btnCfgExportCopy'); }, null, 3000);
+    check('R9c: inside OBS the JSON is also shown in a read-only box with a Copy button', obsBox);
+    const obsNote = await pgX2.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+    check('R9c: …and the status says the file may save silently (OBS 33) or not at all (OBS 32 and older)', /OBS 33/.test(obsNote) && /OBS 32/.test(obsNote), obsNote);
+    await pgX2.close();
+    // A fresh install (no reply, empty cache) can export after its first push.
+    await fresh.api.restart(true);
+    const pgX3 = await newPage(browser, { width: 920, height: 1300 });
+    pgX3.on('dialog', (d) => d.accept());
+    await pgX3.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await sleep(1800);
+    const freshDisabled = await pgX3.evaluate(() => document.getElementById('btnCfgExport').disabled);
+    await pgX3.fill('#vdoRoom', 'export-room');
+    await pgX3.click('#btnVdoSave');
+    const freshEnabled = await wait(pgX3, () => !document.getElementById('btnCfgExport').disabled, null, 5000);
+    check('R9c: a fresh install can export after its first push (Export is disabled until then)', freshDisabled === true && freshEnabled);
+    await pgX3.close();
+
+    // R9d: GRN-75 + GRN-202 — unknown fields survive both pages' pushes; rev/writer never do;
+    // a higher schemaVersion stops them; director-min keeps the auto-add companions.
+    const SEED_EXTRA = { enabled: true, room: 'extraroom', password: 'pw1', viewFlags: VIEWFLAGS, futureTop: { a: 1 }, rev: 99, writer: 'zzz',
+      slots: [slot(1, { label: 'ALPHA', volume: 0.5 }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)],
+      invite: { passwordMode: 'hash', futureInvite: 'x' },
+      directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha', pronouns: 'they/them',
+        socials: [{ platform: 'twitch', handle: 'AlphaTV', url: 'https://example.invalid/a' }] },
+      { vdoLabel: 'BRAVO', discordUserId: '', displayName: 'Bravo', socials: [] }] };
+    const keeps = (p) => p && p.futureTop && p.futureTop.a === 1 && p.slots && p.slots[0] && p.slots[0].volume === 0.5
+      && p.directory && p.directory[0] && p.directory[0].pronouns === 'they/them'
+      && p.directory[0].socials && p.directory[0].socials[0] && p.directory[0].socials[0].url === 'https://example.invalid/a'
+      && p.invite && p.invite.futureInvite === 'x';
+    const noReserved = (p) => p && !('rev' in p) && !('writer' in p);
+    const ext = await startExtra({});
+    const reseed = async (obj) => { await ext.api.restart(true); ext.prod.doAction('VDO Push', { payload: JSON.stringify(obj) }); await sleep(300); await ext.api.clear(); };
+    await reseed(SEED_EXTRA);
+    const pgP = await newPage(browser, { width: 920, height: 1300 }, FIXED_DIR);
+    await pgP.goto(`${ext.api.base}/control/control.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    let resolvePush = null;
+    for (let i = 0; i < 40 && !resolvePush; i++) { resolvePush = savedPayloads(await ext.api.actions()).find((p) => p.slots && p.slots[0] && p.slots[0].streamID === 'aaa111'); if (!resolvePush) await sleep(250); }
+    check('R9d: control.html keeps unknown top-level, slot, directory, social and invite fields through a resolution push', !!keeps(resolvePush), JSON.stringify(resolvePush));
+    check('R9d: …and never copies rev or writer', noReserved(resolvePush) && !!resolvePush);
+    check('R9d: …and sends schemaVersion 1', !!resolvePush && resolvePush.schemaVersion === 1);
+    await ext.api.clear();
+    await pgP.fill('#vdoViewFlags', '&solo&edit-test');
+    await pgP.click('#btnVdoSave');
+    let editPush = null;
+    for (let i = 0; i < 24 && !editPush; i++) { editPush = savedPayloads(await ext.api.actions()).find((p) => p.viewFlags === '&solo&edit-test'); if (!editPush) await sleep(250); }
+    check('R9d: …and through an edit push (Save)', !!keeps(editPush) && noReserved(editPush), JSON.stringify(editPush));
+    await ext.api.clear();
+    await pgP.click('.vdo-dir-row .dir-toggle');
+    await pgP.fill('.vdo-dir-row.open input.vdo-dir-display', 'Alpha Renamed');
+    await pgP.locator('.vdo-dir-row.open input.vdo-dir-display').blur();
+    let dirPush = null;
+    for (let i = 0; i < 24 && !dirPush; i++) { dirPush = savedPayloads(await ext.api.actions()).find((p) => (p.directory || []).some((e) => e.displayName === 'Alpha Renamed')); if (!dirPush) await sleep(250); }
+    check("R9d: …and through a directory edit (a row's pronouns and a social's url survive the editor)", !!keeps(dirPush), JSON.stringify(dirPush && dirPush.directory));
+    await pgP.close();
+    await reseed(SEED_EXTRA);
+    const pgPm = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
+    await pgPm.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    let minPush = null;
+    for (let i = 0; i < 40 && !minPush; i++) { minPush = savedPayloads(await ext.api.actions()).find((p) => p.slots && p.slots[0] && p.slots[0].streamID === 'aaa111'); if (!minPush) await sleep(250); }
+    check('R9d: director-min keeps the same unknown fields through its resolution push, and not rev/writer',
+      !!keeps(minPush) && noReserved(minPush) && minPush.schemaVersion === 1, JSON.stringify(minPush));
+    await pgPm.close();
+
+    // schemaVersion higher than the page knows: it adopts for display but stops pushing.
+    await reseed({ ...SEED_EXTRA, schemaVersion: 2 });
+    const dlgV = [];
+    const pgV = await newPage(browser, { width: 920, height: 1300 }, FIXED_DIR);
+    pgV.on('dialog', (d) => { dlgV.push(d.message()); d.accept(); });
+    await pgV.goto(`${ext.api.base}/control/control.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    const reloadTxt = await wait(pgV, () => /reload this page/i.test((document.getElementById('sbStatus')?.textContent || '') + (document.getElementById('syncStatus')?.textContent || '')), null, 8000);
+    check("R9d: a higher schemaVersion makes control.html say 'reload this page'", reloadTxt);
+    await pgV.fill('#vdoViewFlags', '&solo&too-new');
+    await pgV.click('#btnVdoSave');
+    await sleep(3500); // a director poll or two as well
+    check('R9d: …and it pushes nothing, not even on Save or from the director poll', pushesOf(await ext.api.actions()).length === 0, `${pushesOf(await ext.api.actions()).length} push(es)`);
+    await pgV.close();
+    await reseed({ ...SEED_EXTRA, schemaVersion: 2 });
+    const pgVm = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
+    await pgVm.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    const reloadMin = await wait(pgVm, () => /reload this page/i.test(document.getElementById('status')?.textContent || ''), null, 8000);
+    await sleep(3500);
+    check("R9d: director-min says 'reload this page' and pushes nothing", reloadMin && pushesOf(await ext.api.actions()).length === 0);
+    await pgVm.close();
+
+    // GRN-202: director-min's pushes keep directoryAutoAdd:false and directoryIgnored (a behaviour test).
+    const SEED_COMP = { ...SEED_EXTRA, futureTop: undefined, rev: undefined, writer: undefined, directoryAutoAdd: false, directoryIgnored: ['vdo:bravo'],
+      slots: [slot(1, { label: 'ALPHA' }), slot(2), slot(3), slot(4)],
+      directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha', socials: [] }] };
+    await reseed(SEED_COMP);
+    const pgC2 = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
+    await pgC2.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    const compPush = await (async () => { for (let i = 0; i < 40; i++) { const p = savedPayloads(await ext.api.actions()).find((q) => q.slots && q.slots[0] && q.slots[0].streamID === 'aaa111'); if (p) return p; await sleep(250); } return null; })();
+    const compState = (await ext.api.state()).vdo;
+    check('R9d/GRN-202: director-min pushes (ALPHA resolved) and vdo.state still holds directoryAutoAdd:false and the ignore key',
+      !!compPush && compState && compState.directoryAutoAdd === false && JSON.stringify(compState.directoryIgnored) === JSON.stringify(['vdo:bravo']), JSON.stringify(compState));
+    check('R9d/GRN-202: BRAVO (live, ignored, auto-add off) is not auto-added',
+      !!compState && !(compState.directory || []).some((e) => e.vdoLabel === 'BRAVO'), JSON.stringify(compState && compState.directory));
+    await pgC2.close();
+    const pgC3 = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
+    await pgC3.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
+    await sleep(6000);
+    const compState2 = (await ext.api.state()).vdo;
+    check('R9d/GRN-202: a reloaded director-min still does not add BRAVO',
+      !!compState2 && !(compState2.directory || []).some((e) => e.vdoLabel === 'BRAVO') && compState2.directoryAutoAdd === false, JSON.stringify(compState2 && compState2.directory));
+    await pgC3.close();
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {

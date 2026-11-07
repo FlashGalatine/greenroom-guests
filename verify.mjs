@@ -406,6 +406,23 @@ async function main() {
     check('sanitizeDirectory key order matches the wire shape',
       Object.keys(sanitized[0]).join(',') === 'vdoLabel,discordUserId,displayName,socials,auto');
 
+    // GRN-75: unknown fields pass through (known keys first, in wire order), and a hostile
+    // '__proto__' key is dropped rather than assigned.
+    const withExtras = D.sanitizeDirectory(JSON.parse('[{"vdoLabel":"A","displayName":"Alpha","pronouns":"they/them","__proto__":{"polluted":1},'
+      + '"socials":[{"platform":"Twitch","handle":"AlphaTV","url":"https://example.invalid/a","__proto__":{"x":1}}],"futureFlag":{"n":1}}]'));
+    check('sanitizeDirectory/sanitizeSocials: unknown fields pass through after the known keys',
+      withExtras.length === 1 && withExtras[0].pronouns === 'they/them' && withExtras[0].futureFlag.n === 1
+      && Object.keys(withExtras[0]).slice(0, 5).join(',') === 'vdoLabel,discordUserId,displayName,socials,auto'
+      && withExtras[0].socials[0].url === 'https://example.invalid/a' && Object.keys(withExtras[0].socials[0]).slice(0, 2).join(',') === 'platform,handle',
+      JSON.stringify(withExtras));
+    check('…a __proto__ key is dropped, never assigned (no prototype change, no pollution)',
+      Object.getPrototypeOf(withExtras[0]) === Object.prototype && !('polluted' in withExtras[0]) && !('x' in withExtras[0].socials[0]) && !({}).polluted);
+    check('…and the superset form is still idempotent',
+      JSON.stringify(D.sanitizeDirectory(withExtras)) === JSON.stringify(withExtras));
+    const carried = D.carrySocialExtras([{ platform: 'twitch', handle: 'AlphaTV', url: 'u1' }], [{ platform: 'twitch', handle: 'AlphaTV' }, { platform: 'bluesky', handle: '@a' }]);
+    check('carrySocialExtras gives an unchanged social its unknown fields back, and a new one none',
+      carried[0].url === 'u1' && !('url' in carried[1]), JSON.stringify(carried));
+
     const ign = D.sanitizeIgnored(['vdo:ALPHA', 'vdo:alpha', 'discord:110457699291906048', 'discord:nope', 'junk', '', null]);
     check('sanitizeIgnored: lowercases labels, dedupes, sorts, drops junk keys',
       JSON.stringify(ign) === JSON.stringify(['discord:110457699291906048', 'vdo:alpha']), JSON.stringify(ign));
@@ -482,9 +499,15 @@ async function main() {
     // The overlays can't load directory-core.js (other SB Path->Folder prefix), so
     // nameplate-shared.js keeps a copy of the sanitizers. Same line, same key order.
     const npSrc = await readFile(resolve(__dirname, 'overlay', 'nameplate-shared.js'), 'utf8');
-    const PUSH_LINE = 'out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });';
-    check('TRIPWIRE: the two sanitizer copies agree (directory-core.js ↔ nameplate-shared.js)',
-      dirCoreSrc.includes(PUSH_LINE) && npSrc.includes(PUSH_LINE));
+    // GRN-75: directory-core.js (the control pages) now passes unknown fields through, so a
+    // newer page's extra fields survive an older page's push. The overlays only READ the
+    // directory, so nameplate-shared.js keeps the strict form for now; the release that
+    // ships the overlay brings it to the identical superset form and restores the
+    // identical-copies check.
+    const PUSH_LINE_STRICT = 'out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });';
+    const PUSH_LINE_SUPERSET = 'out.push(Object.assign({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto }, extraFields(e, DIR_KEYS)));';
+    check('TRIPWIRE: sanitizer copies — directory-core.js is the superset form, nameplate-shared.js still the strict one',
+      dirCoreSrc.includes(PUSH_LINE_SUPERSET) && npSrc.includes(PUSH_LINE_STRICT));
 
     // ── 6. HTTP + tripwires: served files carry their load-bearing strings ──────
     console.log('\n[6] HTTP + tripwires: SB-style serving, wired strings, no token in control');
@@ -531,8 +554,7 @@ async function main() {
     const minRes = await fetch(`${BASE}/control/director-min.html`);
     const minBody = await minRes.text();
     check('/control/director-min.html 200 + wired (VDO Push, vdo-parse.js)', minRes.status === 200 && minBody.includes("'VDO Push'") && minBody.includes('vdo-parse.js'));
-    check('TRIPWIRE: director-min carries the directory through its pushes (strip guard)',
-      minBody.includes('directory:') && minBody.includes('directoryAutoAdd:') && minBody.includes('directoryIgnored:'));
+    // (The director-min strip guard is a behaviour test now: verify-render R9, GRN-202.)
     check('director-min auto-populates too (shared core + the Discord-feed source)',
       minBody.includes('directory-core.js') && minBody.includes('GRDir.autoPopulate')
       && minBody.includes("d.type === 'discord:voice:update'"));
