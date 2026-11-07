@@ -488,8 +488,18 @@
   const EXPORT_TITLE = 'Download the current dock config (room, slots, guest directory) as a JSON backup. The file includes the room password: keep it private.';
   function renderExportButton() {
     const b = $('btnCfgExport');
-    b.disabled = !gotConfig;
-    b.title = gotConfig ? EXPORT_TITLE : 'Waiting for the config from Streamer.bot';
+    // A config from a newer Greenroom would be written back stamped as this page's version.
+    b.disabled = !gotConfig || schemaTooNew;
+    b.title = schemaTooNew ? 'This config comes from a newer Greenroom: reload this page before exporting'
+      : gotConfig ? EXPORT_TITLE : 'Waiting for the config from Streamer.bot';
+  }
+  // The slot and directory editors skip a redraw while one of their controls has focus, so
+  // a director poll never takes away what the operator is typing. The FIRST adoption of the
+  // saved config must redraw them: a panel left showing the defaults it had would hand those
+  // default rows to the next edit, which would push them over the saved slots.
+  function releaseFocusForAdoption() {
+    const a = document.activeElement;
+    if (a && a !== document.body && (els.slots.contains(a) || els.directory.contains(a))) a.blur();
   }
   function markSynced() {
     hydrated = true;
@@ -521,11 +531,23 @@
       return true;
     }
     if (!confirm(ask ? MSG_REPLACE + '\n\n' + ask : MSG_REPLACE)) return false;
-    unsyncedOverride = true;
-    try { fn(); } finally { unsyncedOverride = false; }
+    // A confirm blocks the page, so a Sync reply that arrived while it was open is still
+    // queued. Run the confirmed action a moment later, after that reply has been handled: if
+    // it brought the saved config, the operator's yes was about replacing something that is
+    // no longer missing, and nothing is pushed over it.
+    setTimeout(() => {
+      if (synced) { setCfgStatus(MSG_SYNC_ARRIVED); return; }
+      unsyncedOverride = true;
+      try { fn(); } finally { unsyncedOverride = false; }
+    }, CONFIRM_DEFER_MS);
     return true;
   }
+  const CONFIRM_DEFER_MS = 100;
+  const MSG_SYNC_ARRIVED = 'The saved config arrived from Streamer.bot while you were deciding, so nothing was pushed. Check it and make your change again.';
+  const MSG_NOT_SENT = 'Not sent: Streamer.bot is not connected. Try again once it reconnects.';
   function setCfgStatus(text) { els.cfgStatus.textContent = text; }
+  // After a push meant to reach Streamer.bot: say it was sent, or that it was not.
+  function reportPush(sent) { setCfgStatus(sent ? sentStatus() : (ws && ws.readyState === 1 ? '' : MSG_NOT_SENT)); }
   function sentStatus() {
     const t = new Date();
     return `Sent to Streamer.bot at ${twoDigit(t.getHours())}:${twoDigit(t.getMinutes())}:${twoDigit(t.getSeconds())}.`;
@@ -537,9 +559,11 @@
   let subId = null;
   let reconnectDelay = 2000;
 
+  // Returns whether the request was actually sent (false while the socket is down).
   function doAction(name, args) {
-    if (!ws || ws.readyState !== 1) return;
+    if (!ws || ws.readyState !== 1) return false;
     ws.send(JSON.stringify({ request: 'DoAction', id: String(++msgId), action: { name }, args }));
+    return true;
   }
 
   function connect() {
@@ -583,11 +607,17 @@
     if (d.type === 'vdoninja:update') {
       const v = frameState(d, 'vdoninja', 'vdoninjaJson');
       if (!v) return; // no usable state in the frame: drop it, never mark the page synced
-      gotConfig = true; // a real config reached this page (adopted below, or our own echo)
-      renderExportButton();
       const sig = JSON.stringify(v);
-      if (sig === lastPushedSig) { markSynced(); return; } // our own echo
+      if (sig === lastPushedSig) { // our own echo: a real config is in this page
+        gotConfig = true;
+        renderExportButton();
+        markSynced();
+        return;
+      }
+      const firstSync = !synced;
       if (!adoptCfg(v)) return; // not config-shaped: drop it
+      gotConfig = true; // a real config reached this page
+      if (firstSync) releaseFocusForAdoption();
       markSynced();
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
       // equal what we just adopted.
@@ -671,8 +701,10 @@
     if (fromRoster && !hasRoster) return false;
     const payload = JSON.stringify(assemblePayload());
     if (payload === lastPushedSig && !force && !unsyncedOverride) return false;
+    // Record it as pushed only if it was sent: with the socket down the next poll must retry,
+    // and a status line must not claim a push that never left.
+    if (!doAction(PUSH_ACTION, { payload })) return false;
     lastPushedSig = payload;
-    doAction(PUSH_ACTION, { payload });
     return true;
   }
 
@@ -1288,7 +1320,7 @@
     // push a blanking update when the director is switched off, so it runs inside the
     // same (possibly confirmed) action.
     operatorAction(() => {
-      if (assembleAndPush(false, true)) setCfgStatus(sentStatus());
+      reportPush(assembleAndPush(false, true));
       rebuildLinks();
       syncDirectorFrame();
     });
@@ -1413,7 +1445,9 @@
   [els.room, els.password].forEach((el) => el.addEventListener('input', rebuildLinks));
   invOpts.addEventListener('input', rebuildLinks);
   invOpts.addEventListener('change', () => {
-    cfg.invite = inviteFromDom();
+    // Merge over the current invite: the builder only knows its own fields, and a newer
+    // page's extra invite fields must ride through a change to one of them.
+    cfg.invite = Object.assign({}, cfg.invite, inviteFromDom());
     operatorAction(() => assembleAndPush(false));
     rebuildLinks();
   });
@@ -1643,6 +1677,12 @@
       alert('That does not look like a Greenroom config backup (no slots / directory / room).');
       return;
     }
+    // A backup written by a newer Greenroom may hold fields this page would mislabel on the way back out.
+    const fileSchema = Number(payload.schemaVersion);
+    if (Number.isFinite(fileSchema) && fileSchema > SCHEMA_VERSION) {
+      alert(`That file comes from a newer Greenroom than this page (schemaVersion ${fileSchema}). Reload this page after updating Greenroom, then import it. Nothing was imported.`);
+      return;
+    }
     if ('room' in payload && typeof payload.room !== 'string') {
       alert('The room in that file is not text, so it cannot be a Greenroom config. Nothing was imported.');
       return;
@@ -1666,7 +1706,7 @@
       renderAll();
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
       // is identical to what it last pushed, and must still reach a wiped vdo.state.
-      if (assembleAndPush(false, true)) setCfgStatus(sentStatus());
+      reportPush(assembleAndPush(false, true));
     }, `Import this config and push it to Streamer.bot?
 
 This REPLACES the current room, slots, and guest directory (${dirKept} guest entr${dirKept === 1 ? 'y' : 'ies'} in the file${dirDropped > 0 ? `; ${dirDropped} dropped: no name, or no label and no Discord ID` : ''}).`);

@@ -415,8 +415,13 @@ async function main() {
       && Object.keys(withExtras[0]).slice(0, 5).join(',') === 'vdoLabel,discordUserId,displayName,socials,auto'
       && withExtras[0].socials[0].url === 'https://example.invalid/a' && Object.keys(withExtras[0].socials[0]).slice(0, 2).join(',') === 'platform,handle',
       JSON.stringify(withExtras));
-    check('…a __proto__ key is dropped, never assigned (no prototype change, no pollution)',
-      Object.getPrototypeOf(withExtras[0]) === Object.prototype && !('polluted' in withExtras[0]) && !('x' in withExtras[0].socials[0]) && !({}).polluted);
+    // Assigning out['__proto__'] = v would swap the prototype of `out` (it is the setter, not an
+    // own key), so assert on the copy helper itself: a copy that kept the key would have a
+    // different prototype than Object.prototype and would expose the attacker's property.
+    const protoCopy = D.extraFields(JSON.parse('{"a":1,"__proto__":{"p":1}}'), new Set());
+    check('…a __proto__ key is dropped, never assigned (the copy keeps Object.prototype and exposes no inherited field)',
+      Object.getPrototypeOf(protoCopy) === Object.prototype && protoCopy.a === 1 && !('p' in protoCopy) && !Object.keys(protoCopy).includes('__proto__')
+      && Object.getPrototypeOf(withExtras[0]) === Object.prototype && !('polluted' in withExtras[0]) && !({}).polluted);
     check('…and the superset form is still idempotent',
       JSON.stringify(D.sanitizeDirectory(withExtras)) === JSON.stringify(withExtras));
     const carried = D.carrySocialExtras([{ platform: 'twitch', handle: 'AlphaTV', url: 'u1' }], [{ platform: 'twitch', handle: 'AlphaTV' }, { platform: 'bluesky', handle: '@a' }]);

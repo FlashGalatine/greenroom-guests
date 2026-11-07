@@ -31,7 +31,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -151,7 +151,9 @@ const wait = (page, fn, arg, ms) => page.waitForFunction(fn, arg, { timeout: ms 
 async function main() {
   console.log('Greenroom — real-pixel render verification\n');
   let mock, bridge, browser, prod;
-  const extra = []; // the R7 mock instances
+  const extra = []; // the R7-R9 mock instances
+  const extraProds = []; // their producers
+  let scratch = null; // R9's temp dir (an exported config holds the room password)
   try {
     mock = await startChild('mock-sb-server.mjs', '[mock] WS');
     console.log(`mock SB up (:${HTTP_PORT} HTTP, :${WS_PORT} WS)\n`);
@@ -515,18 +517,29 @@ async function main() {
       s.on('error', rej);
       s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
     });
+    // A port can be taken between freePort() closing it and the mock binding it, so retry
+    // with fresh ports; the two ports must also differ.
     const startExtra = async (env) => {
-      const httpPort = await freePort();
-      const wsPort = await freePort();
-      const m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env });
-      extra.push(m);
-      return { api: mockApi(httpPort), prod: await producer(wsPort), http: httpPort, ws: wsPort };
+      let lastErr;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const httpPort = await freePort();
+        let wsPort = await freePort();
+        while (wsPort === httpPort) wsPort = await freePort();
+        let m;
+        try { m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env }); }
+        catch (e) { lastErr = e; continue; }
+        extra.push(m);
+        const prod = await producer(wsPort);
+        extraProds.push(prod);
+        return { api: mockApi(httpPort), prod, proc: m, http: httpPort, ws: wsPort };
+      }
+      throw lastErr;
     };
     const pushesOf = (acts) => acts.filter((a) => a.name === 'VDO Push');
     const MSG_REPLACE = /has not returned your saved config/;
 
     // R7a: control.html, the first Sync reply is 6 s late.
-    const slow = await startExtra({ SYNC_DELAY_MS: '6000' });
+    const slow = await startExtra({ SYNC_DELAY_MS: '9000' });
     slow.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
     await sleep(300); await slow.api.clear();
     const dlgA = [];
@@ -558,17 +571,50 @@ async function main() {
     const syncTxt2 = await pgA.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
     check('R7a: after about 5 s the status names both causes (fresh install, or VDO Sync missing/not compiled)',
       /fresh install/i.test(syncTxt2) && /not compiled/i.test(syncTxt2), syncTxt2);
-    const adopted = await wait(pgA, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 12000);
+    const adopted = await wait(pgA, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 16000);
     check('R7a: the late Sync reply is adopted (the saved room replaces the defaults)', adopted,
       await pgA.evaluate(() => document.getElementById('vdoRoom')?.value));
     const syncHidden = await wait(pgA, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 4000);
     check('R7a: the not-synced status clears once the saved config arrives', syncHidden);
+    // The slot panel still had focus (the declined edit) when the saved config arrived. It must be
+    // redrawn from that config, or the next slot edit reads the stale default rows from the DOM and
+    // pushes them over the saved slots with no warning.
+    const slotLabels = await pgA.evaluate(() => [...document.querySelectorAll('.vdo-slot-row select.vdo-label-sel')].map((s) => s.value));
+    check('R7a: the slot panel shows the adopted slots (slot 1 = ALPHA), not the defaults it had at focus', slotLabels[0] === 'ALPHA', JSON.stringify(slotLabels));
+    await pgA.uncheck('.vdo-slot-row[data-slot="2"] input.vdo-mirror-cb');
+    await sleep(900);
+    const stA2 = await slow.api.state();
+    check('R7a: after the saved config arrives, a slot edit keeps the saved slots (it does not push the stale default rows)',
+      !!stA2.vdo && Array.isArray(stA2.vdo.slots) && stA2.vdo.slots[0].label === 'ALPHA' && stA2.vdo.slots[1].mirror === false,
+      JSON.stringify(stA2.vdo && stA2.vdo.slots && stA2.vdo.slots.map((s) => s.label)));
     await pgA.close();
     slow.prod.close();
 
+    // R7f: the saved config arrives WHILE the not-synced confirm is open. The confirm blocks the
+    // page, so the reply waits in its queue; answering yes must not then push the defaults over it.
+    const race = await startExtra({ SYNC_DELAY_MS: '3500' });
+    race.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300); await race.api.clear();
+    const pgF = await newPage(browser, { width: 920, height: 1300 });
+    pgF.on('dialog', async (d) => { await sleep(2800); await d.accept(); }); // yes, but only after the reply has come in
+    await pgF.goto(`${race.api.base}/control/control.html?sbport=${race.ws}`, { waitUntil: 'load' });
+    await sleep(1500);
+    await pgF.fill('#vdoRoom', 'typed-during-race');
+    const clickF = pgF.click('#btnVdoSave'); // the dialog opens at about 1.6 s and is answered at about 4.4 s
+    await sleep(5200);
+    await clickF.catch(() => {});
+    const stF = await race.api.state();
+    const pushedF = pushesOf(await race.api.actions());
+    check('R7f: a Sync reply that arrives while the confirm is open wins: nothing is pushed over the saved config',
+      pushedF.length === 0 && !!stF.vdo && stF.vdo.room === 'seededroom', `${pushedF.length} push(es), room ${JSON.stringify(stF.vdo && stF.vdo.room)}`);
+    check('R7f: …and the page shows the saved room and says why nothing was pushed',
+      await pgF.evaluate(() => document.getElementById('vdoRoom')?.value === 'seededroom' && /arrived/i.test(document.getElementById('cfgStatus')?.textContent || '')),
+      await pgF.evaluate(() => document.getElementById('cfgStatus')?.textContent));
+    await pgF.close();
+
     // R7b: director-min.html against a slow first Sync (the same cases as R7a). Its own
     // mock instance: R7a's delayed Sync replays must not land on this page.
-    const slowMin = await startExtra({ SYNC_DELAY_MS: '6000' });
+    const slowMin = await startExtra({ SYNC_DELAY_MS: '9000' });
     slowMin.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
     await sleep(300); await slowMin.api.clear();
     const pgB = await newPage(browser, { width: 480, height: 120 });
@@ -641,21 +687,23 @@ async function main() {
     const fixedProd = await producer(fresh.ws);
     fixedProd.doAction('VDO Push', { payload: JSON.stringify(SEED_FIXED) });
     await sleep(300);
+    // The capture log is cleared BEFORE each page loads, so a push on the very first poll counts, and
+    // each half also asserts that the fixed director really answered (two guests seen).
+    await fresh.api.clear();
     const pgE1 = await newPage(browser, { width: 920, height: 1300 }, FIXED_DIR);
     await pgE1.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
-    await wait(pgE1, () => document.getElementById('vdoRoom')?.value === 'fixedroom', null, 8000);
-    await fresh.api.clear();
+    const sawRoster1 = await wait(pgE1, () => /connected · 2 guests/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 12000);
     await sleep(9500); // first probe at 1.5 s, then every 2.5 s: 4+ polls
     const quietControl = pushesOf(await fresh.api.actions()).length;
-    check('R7e: control.html makes 0 VDO Push over 4+ polls against a matching fixed roster', quietControl === 0, `${quietControl} push(es)`);
+    check('R7e: control.html saw the fixed roster (2 guests) and made 0 VDO Push over 4+ polls', sawRoster1 && quietControl === 0, `${quietControl} push(es), roster seen: ${sawRoster1}`);
     await pgE1.close();
+    await fresh.api.clear();
     const pgE2 = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
     await pgE2.goto(`${fresh.api.base}/control/director-min.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
-    await sleep(2500);
-    await fresh.api.clear();
+    const sawRoster2 = await wait(pgE2, () => /2 guest\(s\)/.test(document.getElementById('status')?.textContent || ''), null, 12000);
     await sleep(9500);
     const quietMin = pushesOf(await fresh.api.actions()).length;
-    check('R7e: director-min makes 0 VDO Push over 4+ polls against a matching fixed roster', quietMin === 0, `${quietMin} push(es)`);
+    check('R7e: director-min saw the fixed roster (2 guests) and made 0 VDO Push over 4+ polls', sawRoster2 && quietMin === 0, `${quietMin} push(es), roster seen: ${sawRoster2}`);
     await pgE2.close();
     fixedProd.close();
 
@@ -678,8 +726,24 @@ async function main() {
     check('R8a: director-min adopts it too (the saved config is disabled, so it says so)', wireMin,
       await pgWm.evaluate(() => document.getElementById('status')?.textContent));
     const wireSeen = await wire.api.state();
-    check('R8a: the mock really sent the string shape (vdo.state is intact, nothing was pushed by the pages)',
+    check('R8a: the pages pushed nothing and vdo.state is intact',
       !!wireSeen.vdo && wireSeen.vdo.room === 'seededroom' && pushesOf(await wire.api.actions()).length === 1);
+    // A raw subscriber sees the frame exactly as a page does: the state is a string field, and
+    // the object field is absent. (Without this the checks above could pass on the old shape.)
+    const rawFrame = await new Promise((res) => {
+      const w = new WebSocket(`ws://127.0.0.1:${wire.ws}/`);
+      const timer = setTimeout(() => { try { w.close(); } catch {} res(null); }, 6000);
+      w.on('open', () => {
+        w.send(JSON.stringify({ request: 'Subscribe', id: 'raw1', events: { general: ['Custom'] } }));
+        setTimeout(() => wire.prod.doAction('VDO Sync', { reason: 'raw-check' }), 300);
+      });
+      w.on('message', (raw) => {
+        let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+        if (m.event && m.event.type === 'Custom' && m.data && m.data.type === 'vdoninja:update') { clearTimeout(timer); try { w.close(); } catch {} res(m.data); }
+      });
+    });
+    check('R8a: the mock really sends the string shape (vdoninjaJson is a string, no vdoninja object)',
+      !!rawFrame && typeof rawFrame.vdoninjaJson === 'string' && !('vdoninja' in rawFrame) && JSON.parse(rawFrame.vdoninjaJson).room === 'seededroom', JSON.stringify(rawFrame));
     await pgW.close(); await pgWm.close(); wire.prod.close();
 
     // R8b: frames with no usable state never mark a page synced and never cause a push.
@@ -697,6 +761,7 @@ async function main() {
       { type: 'vdoninja:update', vdoninjaJson: '[1,2,3]' },
       { type: 'vdoninja:update', vdoninjaJson: 42 },
       { type: 'vdoninja:update', vdoninja: {} },
+      { type: 'vdoninja:update', vdoninja: { hello: 1 } }, // an object, but not config-shaped
       { type: 'vdoninja:update', vdoninja: [1] },
       { type: 'discord:voice:update', discordVoiceJson: '{bad' },
     ];
@@ -708,6 +773,8 @@ async function main() {
       pushesOf(badActs).length === 0, `${pushesOf(badActs).length} push(es)`);
     const stillUnsynced = await pgX.evaluate(() => { const e = document.getElementById('syncStatus'); return !!e && !e.hidden; });
     check('R8b: control.html is still not synced (junk frames never mark it synced)', stillUnsynced);
+    check('R8b: …and Export stays disabled (a page showing defaults must not write them into a "backup")',
+      await pgX.evaluate(() => document.getElementById('btnCfgExport').disabled === true));
     const minStill = await pgXm.evaluate(() => document.getElementById('status')?.textContent || '');
     check('R8b: director-min is still not synced', /VDO Sync has not answered|no saved config/.test(minStill), minStill);
     await pgX.close(); await pgXm.close(); badProd.close();
@@ -730,7 +797,7 @@ async function main() {
 
     // ── R9: Save/Import, Export and Import checks, unknown-field pass-through ──────────
     console.log('\n[R9] control page: Save/Import re-seed, Export gating + status, Import checks, pass-through');
-    const scratch = mkdtempSync(resolve(tmpdir(), 'greenroom-r9-'));
+    scratch = mkdtempSync(resolve(tmpdir(), 'greenroom-r9-'));
     const savedPayloads = (acts) => pushesOf(acts).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
     const waitState = async (api, pred, tries = 24) => {
       for (let i = 0; i < tries; i++) { const s = await api.state(); if (pred(s)) return s; await sleep(250); }
@@ -763,6 +830,7 @@ async function main() {
     check("R9a: Import of the page's own export re-seeds a wiped vdo.state", !!dlSelf && !!reimported);
     check("R9a: Import shows the 'Sent to Streamer.bot' status too",
       /Sent to Streamer\.bot/i.test(await pgS.evaluate(() => document.getElementById('cfgStatus')?.textContent || '')));
+    await pgS.close();
 
     // R9b: GRN-143 — Import refuses what it cannot restore faithfully, and counts honestly.
     const dlgI = [];
@@ -791,6 +859,9 @@ async function main() {
       { vdoLabel: 'A', displayName: 'Alpha' }, { vdoLabel: 'B', displayName: 'Bravo' }, { vdoLabel: 'C', displayName: '' }] });
     check('R9b: the confirm counts the entries that will survive sanitising, and says how many are dropped',
       r.length === 1 && r[0].type === 'confirm' && /2 guest entr/.test(r[0].msg) && /1\D{0,40}dropped|dropped\D{0,40}1/i.test(r[0].msg), JSON.stringify(r));
+    r = await importObj({ schemaVersion: 2, room: 'r', slots: [] });
+    check('R9b: a backup from a newer Greenroom (schemaVersion 2) is refused before the confirm, with a message',
+      r.length === 1 && r[0].type === 'alert' && /newer/i.test(r[0].msg), JSON.stringify(r));
     check('R9b: none of those imports pushed anything', pushesOf(await seeded.api.actions()).length === 0);
     await pgI.close();
 
@@ -875,6 +946,12 @@ async function main() {
     let dirPush = null;
     for (let i = 0; i < 24 && !dirPush; i++) { dirPush = savedPayloads(await ext.api.actions()).find((p) => (p.directory || []).some((e) => e.displayName === 'Alpha Renamed')); if (!dirPush) await sleep(250); }
     check("R9d: …and through a directory edit (a row's pronouns and a social's url survive the editor)", !!keeps(dirPush), JSON.stringify(dirPush && dirPush.directory));
+    await ext.api.clear();
+    await pgP.check('#vdoInvStereo'); // an invite option: the builder rebuilds the invite from its fields
+    let invPush = null;
+    for (let i = 0; i < 24 && !invPush; i++) { invPush = savedPayloads(await ext.api.actions()).find((p) => p.invite && p.invite.stereo === true); if (!invPush) await sleep(250); }
+    check('R9d: …and through an invite-option change (unknown invite fields survive the builder)',
+      !!invPush && invPush.invite.futureInvite === 'x' && !!keeps(invPush), JSON.stringify(invPush && invPush.invite));
     await pgP.close();
     await reseed(SEED_EXTRA);
     const pgPm = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
@@ -893,6 +970,8 @@ async function main() {
     await pgV.goto(`${ext.api.base}/control/control.html?sbport=${ext.ws}`, { waitUntil: 'load' });
     const reloadTxt = await wait(pgV, () => /reload this page/i.test((document.getElementById('sbStatus')?.textContent || '') + (document.getElementById('syncStatus')?.textContent || '')), null, 8000);
     check("R9d: a higher schemaVersion makes control.html say 'reload this page'", reloadTxt);
+    check('R9d: …and Export is disabled (it would write that newer config back stamped as version 1)',
+      await pgV.evaluate(() => document.getElementById('btnCfgExport').disabled === true));
     await pgV.fill('#vdoViewFlags', '&solo&too-new');
     await pgV.click('#btnVdoSave');
     await sleep(3500); // a director poll or two as well
@@ -928,6 +1007,23 @@ async function main() {
       !!compState2 && !(compState2.directory || []).some((e) => e.vdoLabel === 'BRAVO') && compState2.directoryAutoAdd === false, JSON.stringify(compState2 && compState2.directory));
     await pgC3.close();
 
+    // R9e: a Save while Streamer.bot is unreachable must not claim it was sent.
+    const offl = await startExtra({});
+    offl.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300);
+    const pgO = await newPage(browser, { width: 920, height: 1300 });
+    pgO.on('dialog', (d) => d.accept());
+    await pgO.goto(`${offl.api.base}/control/control.html?sbport=${offl.ws}`, { waitUntil: 'load' });
+    await wait(pgO, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
+    offl.proc.kill(); // Streamer.bot goes away
+    await wait(pgO, () => /offline/i.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000);
+    await pgO.click('#btnVdoSave');
+    await sleep(500);
+    const offTxt = await pgO.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+    check('R9e: Save while Streamer.bot is unreachable says it was not sent, never "Sent to Streamer.bot"',
+      !/Sent to Streamer\.bot/i.test(offTxt) && /not sent/i.test(offTxt), offTxt);
+    await pgO.close();
+
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {
     failed++;
@@ -937,7 +1033,9 @@ async function main() {
     if (browser) { try { await browser.close(); } catch {} }
     if (bridge) bridge.kill();
     if (mock) mock.kill();
+    for (const p of extraProds) { try { p.close(); } catch {} }
     for (const m of extra) { try { m.kill(); } catch {} }
+    if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch {} }
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);
