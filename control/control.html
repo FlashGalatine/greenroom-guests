@@ -577,8 +577,23 @@
       renderDirectory(); // same options in the directory rows
       if (grew) assembleAndPush(false);
     } else if (d.type === 'vdo:error' || d.type === 'discord:voice:error') {
-      setPill(els.sbStatus, 'SB action error: ' + (d.message || d.type), 'error');
+      let text = 'SB action error: ' + (d.message || d.type);
+      // A date-shaped label or name makes Streamer.bot's JSON parse throw (GRN-60): name
+      // the entries that look like that, so the operator knows what to remove or rename.
+      const bad = dateShapedEntries();
+      if (bad.length) text += ` · date-like text in ${bad.map((b) => '"' + b + '"').join(', ')}: remove or rename it`;
+      setPill(els.sbStatus, text, 'error');
     }
+  }
+
+  // The directory entries and slot labels whose text looks like a date (GRN-60).
+  function dateShapedEntries() {
+    const out = new Set();
+    for (const e of cfg.directory || []) {
+      for (const t of [e.vdoLabel, e.displayName]) if (t && GRDir.isDateShaped(t)) out.add(String(t).trim());
+    }
+    for (const s of cfg.slots || []) if (s.label && GRDir.isDateShaped(s.label)) out.add(String(s.label).trim());
+    return [...out];
   }
 
   // ── Payload assembly + push ───────────────────────────────────────────────

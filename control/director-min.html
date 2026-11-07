@@ -257,6 +257,9 @@
         markSynced();
         lastPushedSig = JSON.stringify(assemblePayload());
         syncDirectorFrame();
+        // syncDirectorFrame says nothing when the frame URL did not change, so a late
+        // reply for a disabled config would leave 'has not answered' on screen.
+        if (!frameUrl) show(cfg.enabled ? 'no room configured' : 'director disabled');
         if (runAutoAdd()) assembleAndPush(false); // late arrivals in a replayed room
       } else if (d.type === 'vdo:sync:empty') {
         // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.

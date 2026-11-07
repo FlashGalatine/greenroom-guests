@@ -30,6 +30,7 @@
 // roster-check.png, control-check.png, nameplate-check.png.
 
 import { spawn } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
@@ -506,7 +507,15 @@ async function main() {
     const SEED_SAVED = { enabled: false, room: 'seededroom', password: 'pw-seed', viewFlags: VIEWFLAGS,
       slots: [slot(1, { label: 'ALPHA' }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' },
       directory: [{ vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] };
-    const startExtra = async (httpPort, wsPort, env) => {
+    // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
+    const freePort = () => new Promise((res, rej) => {
+      const s = createNetServer();
+      s.on('error', rej);
+      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
+    });
+    const startExtra = async (env) => {
+      const httpPort = await freePort();
+      const wsPort = await freePort();
       const m = await startChild('mock-sb-server.mjs', '[mock] WS', { httpPort, wsPort, env });
       extra.push(m);
       return { api: mockApi(httpPort), prod: await producer(wsPort), http: httpPort, ws: wsPort };
@@ -515,7 +524,7 @@ async function main() {
     const MSG_REPLACE = /has not returned your saved config/;
 
     // R7a: control.html, the first Sync reply is 6 s late.
-    const slow = await startExtra(7477, 8083, { SYNC_DELAY_MS: '6000' });
+    const slow = await startExtra({ SYNC_DELAY_MS: '6000' });
     slow.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
     await sleep(300); await slow.api.clear();
     const dlgA = [];
@@ -553,7 +562,7 @@ async function main() {
 
     // R7b: director-min.html against a slow first Sync (the same cases as R7a). Its own
     // mock instance: R7a's delayed Sync replays must not land on this page.
-    const slowMin = await startExtra(7480, 8086, { SYNC_DELAY_MS: '6000' });
+    const slowMin = await startExtra({ SYNC_DELAY_MS: '6000' });
     slowMin.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
     await sleep(300); await slowMin.api.clear();
     const pgB = await newPage(browser, { width: 480, height: 120 });
@@ -572,7 +581,7 @@ async function main() {
     slowMin.prod.close();
 
     // R7c: a fresh install (empty cache, nothing ever replies). Save asks once, then pushes.
-    const fresh = await startExtra(7478, 8084, {});
+    const fresh = await startExtra({});
     const dlgC = [];
     const pgC = await newPage(browser, { width: 920, height: 1300 }, true);
     pgC.on('dialog', (d) => { dlgC.push(d.message()); d.accept(); });
@@ -596,7 +605,7 @@ async function main() {
     fresh.prod.close();
 
     // R7d: the empty-cache marker (a later action release broadcasts it) is read as "synced".
-    const marker = await startExtra(7479, 8085, { SB_EMPTY_MARKER: '1' });
+    const marker = await startExtra({ SB_EMPTY_MARKER: '1' });
     const dlgD = [];
     const pgD = await newPage(browser, { width: 920, height: 1300 });
     pgD.on('dialog', (d) => { dlgD.push(d.message()); d.accept(); });
@@ -643,6 +652,75 @@ async function main() {
     check('R7e: director-min makes 0 VDO Push over 4+ polls against a matching fixed roster', quietMin === 0, `${quietMin} push(es)`);
     await pgE2.close();
     fixedProd.close();
+
+    // ── R8: the reader half of the wire change (GRN-108) and the date-shaped guard ──
+    console.log('\n[R8] frames: string-field state is read, unusable frames are dropped, errors name the entry');
+    // R8a: state arriving as vdoninjaJson (an escaped string), as the actions will send it.
+    const wire = await startExtra({ SB_WIRE: 'json' });
+    wire.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300);
+    const pgW = await newPage(browser, { width: 920, height: 1300 });
+    await pgW.goto(`${wire.api.base}/control/control.html?sbport=${wire.ws}`, { waitUntil: 'load' });
+    const wireAdopted = await wait(pgW, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
+    check('R8a: control.html adopts a vdoninja:update that carries vdoninjaJson (string field)', wireAdopted,
+      await pgW.evaluate(() => document.getElementById('vdoRoom')?.value));
+    const wireSynced = await wait(pgW, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 3000);
+    check('R8a: …and counts as synced', wireSynced);
+    const pgWm = await newPage(browser, { width: 480, height: 120 });
+    await pgWm.goto(`${wire.api.base}/control/director-min.html?sbport=${wire.ws}`, { waitUntil: 'load' });
+    const wireMin = await wait(pgWm, () => /director disabled/.test(document.getElementById('status')?.textContent || ''), null, 8000);
+    check('R8a: director-min adopts it too (the saved config is disabled, so it says so)', wireMin,
+      await pgWm.evaluate(() => document.getElementById('status')?.textContent));
+    const wireSeen = await wire.api.state();
+    check('R8a: the mock really sent the string shape (vdo.state is intact, nothing was pushed by the pages)',
+      !!wireSeen.vdo && wireSeen.vdo.room === 'seededroom' && pushesOf(await wire.api.actions()).length === 1);
+    await pgW.close(); await pgWm.close(); wire.prod.close();
+
+    // R8b: frames with no usable state never mark a page synced and never cause a push.
+    await fresh.api.restart(true); // an empty vdo.state, no marker: nothing will ever answer the Sync
+    const badProd = await producer(fresh.ws);
+    const pgX = await newPage(browser, { width: 920, height: 1300 });
+    await pgX.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    const pgXm = await newPage(browser, { width: 480, height: 120 });
+    await pgXm.goto(`${fresh.api.base}/control/director-min.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await sleep(1800); // subscribed
+    await fresh.api.clear();
+    const BAD_FRAMES = [
+      { type: 'vdoninja:update' },
+      { type: 'vdoninja:update', vdoninjaJson: '{not json' },
+      { type: 'vdoninja:update', vdoninjaJson: '[1,2,3]' },
+      { type: 'vdoninja:update', vdoninjaJson: 42 },
+      { type: 'vdoninja:update', vdoninja: {} },
+      { type: 'vdoninja:update', vdoninja: [1] },
+      { type: 'discord:voice:update', discordVoiceJson: '{bad' },
+    ];
+    for (const f of BAD_FRAMES) await fresh.api.broadcast(f);
+    badProd.doAction('Discord Voice Push', { payload: ROSTER_STATE() }); // a voice arrival after the junk
+    await sleep(2500);
+    const badActs = await fresh.api.actions();
+    check('R8b: no VDO Push after payload-less / unparseable / non-object vdoninja frames and a Discord arrival (both pages)',
+      pushesOf(badActs).length === 0, `${pushesOf(badActs).length} push(es)`);
+    const stillUnsynced = await pgX.evaluate(() => { const e = document.getElementById('syncStatus'); return !!e && !e.hidden; });
+    check('R8b: control.html is still not synced (junk frames never mark it synced)', stillUnsynced);
+    const minStill = await pgXm.evaluate(() => document.getElementById('status')?.textContent || '');
+    check('R8b: director-min is still not synced', /VDO Sync has not answered|no saved config/.test(minStill), minStill);
+    await pgX.close(); await pgXm.close(); badProd.close();
+
+    // R8c: GRN-60's interim guard on the error pill: a vdo:error names the date-shaped entry.
+    const DATE_LABEL = '2026-11-07T10:30:00';
+    const dateProd = await producer(fresh.ws);
+    dateProd.doAction('VDO Push', { payload: JSON.stringify({ ...SEED_SAVED,
+      directory: [{ vdoLabel: DATE_LABEL, discordUserId: '', displayName: DATE_LABEL, socials: [] },
+        { vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] }) });
+    await sleep(300);
+    const pgY = await newPage(browser, { width: 920, height: 1300 });
+    await pgY.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
+    await wait(pgY, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
+    await fresh.api.broadcast({ type: 'vdo:error', message: 'Streamer.bot could not parse the payload' });
+    const namedPill = await wait(pgY, (n) => (document.getElementById('sbStatus')?.textContent || '').includes(n), DATE_LABEL, 4000);
+    check('R8c: the vdo:error pill names the date-shaped directory entry', namedPill,
+      await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
+    await pgY.close(); dateProd.close();
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');
   } catch (err) {

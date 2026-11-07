@@ -105,6 +105,13 @@
     return !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
   }
 
+  // A guest controls their own label, and a label that looks like a timestamp is not
+  // safe to carry in a payload Streamer.bot re-parses (the actions get their own fix in
+  // a later release). Auto-add never copies one into a payload. Deliberately broad:
+  // anything that starts like an ISO date-time or a /Date( value.
+  const DATE_SHAPED = /^\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\/Date\()/i;
+  function isDateShaped(s) { return DATE_SHAPED.test(String(s ?? '')); }
+
   // Turn "who is live right now" into directory entries.
   //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} } }
   // Returns { directory, changed, added } — `directory` is a NEW array (entries
@@ -128,7 +135,7 @@
 
     for (const label of labels) {
       const key = labelKey(label);
-      if (ignored.has(key) || findByLabel(dir, label)) continue;
+      if (isDateShaped(label) || ignored.has(key) || findByLabel(dir, label)) continue;
       dir.push({ vdoLabel: label, discordUserId: '', displayName: label, socials: [], auto: true });
       added.push(key);
       changed = true;
@@ -141,7 +148,9 @@
       const key = userKey(id);
       if (ignored.has(key) || findByUserId(dir, id)) continue;
       const u = users[rawId] || {};
-      const username = String(u.username ?? '').trim();
+      // A date-shaped Discord name is never copied into the directory (see isDateShaped);
+      // the entry is named by the id, as for a user with no name.
+      const username = isDateShaped(u.username) ? '' : String(u.username ?? '').trim();
       const name = username || id;
       // Same human, already in the book under a VDO label or that exact name →
       // fill in the Discord id instead of creating a twin. Clearing the id field
@@ -163,6 +172,6 @@
   globalThis.GRDir = {
     sanitizeSocials, sanitizeDirectory, sanitizeIgnored,
     labelKey, userKey, findByLabel, findByUserId,
-    parseSocialsText, socialsToText, autoPopulate,
+    parseSocialsText, socialsToText, autoPopulate, isDateShaped,
   };
 })();

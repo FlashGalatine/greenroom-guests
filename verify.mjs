@@ -461,6 +461,24 @@ async function main() {
     check('autoPopulate never throws on junk input',
       D.autoPopulate({}).changed === false && D.autoPopulate({ directory: null, labels: 'nope', users: 7 }).directory.length === 0);
 
+    // GRN-60's interim guard: auto-add never copies a timestamp-shaped name into a payload
+    // (the actions get their own fix in a later release).
+    const DATEY = ['2026-11-07T10:30:00', '2026-11-07T10:30:00Z', '2026-11-07T10:30:00.000Z', '2026-11-07T10:30:00+00:00',
+      '/Date(1799999999999)/', ' 2026-11-07T10:30:00 '];
+    // (the last has surrounding spaces on purpose: labels reach auto-add trimmed or not)
+    check('isDateShaped: flags the strings that break the parse, passes ordinary names',
+      DATEY.every((s) => D.isDateShaped(s)) && !['ALPHA', 'Guest One', '2026', 'Date(1)', 'Dr. 9999', 'a/Date(1)/'].some((s) => D.isDateShaped(s)),
+      JSON.stringify(DATEY.map((s) => D.isDateShaped(s))));
+    const dateAuto = D.autoPopulate({ directory: [], ignored: [],
+      labels: ['ALPHA', '2026-11-07T10:30:00', '/Date(1799999999999)/'],
+      users: { '200000000000000007': { username: '/Date(1799999999999)/' }, '200000000000000008': { username: 'Fine Name' } } });
+    check('autoPopulate skips date-shaped labels and never uses a date-shaped Discord name as a display name',
+      dateAuto.directory.length === 3
+      && dateAuto.directory.some((e) => e.vdoLabel === 'ALPHA')
+      && !dateAuto.directory.some((e) => D.isDateShaped(e.vdoLabel) || D.isDateShaped(e.displayName))
+      && dateAuto.directory.some((e) => e.discordUserId === '200000000000000007' && e.displayName === '200000000000000007'),
+      JSON.stringify(dateAuto.directory));
+
     // The overlays can't load directory-core.js (other SB Path->Folder prefix), so
     // nameplate-shared.js keeps a copy of the sanitizers. Same line, same key order.
     const npSrc = await readFile(resolve(__dirname, 'overlay', 'nameplate-shared.js'), 'utf8');
