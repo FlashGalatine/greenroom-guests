@@ -106,6 +106,11 @@ All **Browser Source → URL** (never "Local file"):
 Every page fires the `VDO Sync` action on connect, so a source added mid-stream
 paints immediately.
 
+`?sbport=<n>` (a development knob: it points a page at a Streamer.bot WebSocket on
+another port) accepts only a port number from 1 to 65535, and the host is always
+`127.0.0.1`. Anything else (text, `0`, `65536`, an `@`) is refused: the page shows
+"invalid ?sbport", does not connect, and does not fall back to 8080.
+
 ## 4. The control page + the director
 
 `http://127.0.0.1:7474/greenroom-control/control.html` — open as a browser tab

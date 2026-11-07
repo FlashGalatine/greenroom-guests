@@ -13,6 +13,13 @@ Streamer.bot is the entire bus — there is no other server.
 // though delivered events carry a capitalized source 'General'. A capitalized
 // Subscribe is acked but receives NOTHING (the classic blank-overlay cause).
 { "request": "Subscribe", "id": "1", "events": { "general": ["Custom"] } }
+// Streamer.bot's documented reply is flat: { "status": "ok", "id": "1", "events": {…} }
+// (no "result" wrapper). Clients treat a `status` other than "ok" as a refusal: no
+// VDO Sync, a visible status (control pill, director-min status, the overlay's offline
+// class and a console warning). A reply with no `status` field is not read as a refusal.
+// On connect Streamer.bot also sends { "request": "Hello", … }; one that carries an
+// "authentication" object means "Enforce authentication" is on, which Greenroom does not
+// support: the clients show "SB auth enforced — turn Enforce off".
 
 // DoAction — ack {id, status:'ok'} means the action STARTED, not that it
 // succeeded. A C# compile error still acks ok and broadcasts nothing; that is

@@ -40,7 +40,7 @@ Per-source overrides; precedence is **URL param → payload settings → default
 | `?hidewhenabsent=` | `1` \| `0` | hide everything when the streamer isn't in voice |
 | `?theme=plain` | — | the second look (below) |
 | `?max=` | n | cap rendered members; the rest collapse into a `+N` chip |
-| `?sbport=` / `?sbdebug=1` | — | transport knobs (overlay/panel-client-sb.js) |
+| `?sbport=` / `?sbdebug=1` | port 1-65535 / — | transport knobs (overlay/panel-client-sb.js); a bad `?sbport` is refused, never a different host |
 
 ## The plain theme
 
