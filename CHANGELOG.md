@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.29] — 2026-11-07
+
+The overlays and control pages share one, more careful way of talking to Streamer.bot: they connect once the page is ready, check what Streamer.bot answers, reconnect quickly, and accept the string-field state frames a later action release will send. Nothing to re-paste: this release works with the actions you already have.
+
+### Fixed
+
+- **An overlay could come up blank, or stay greyed out.** The overlay opened its Streamer.bot socket while the page was still loading, so the first `VDO Sync` replay could arrive before the page was listening and be lost, and the "offline" grey could be applied after the socket had already connected. The socket is now opened once the page is ready, with one repeat of `VDO Sync` if no state has come back after 2.5 s.
+- **The speaking glow no longer sticks.** When the socket closes (Streamer.bot quit or restarted), a Discord-mode guest slot clears its glow and keeps the avatar.
+- **A guest slot survives odd state.** A `null` entry in the slot list no longer stops the guest overlay painting, and a frame carrying no state (a bare `{"type":"sync"}`) no longer blanks the slot.
+- **`?sbport` is checked.** It accepts only a port number from 1 to 65535 and the host is always `127.0.0.1`. Anything else shows "invalid ?sbport" (on the dock pill, the `director-min` status or the overlay's offline state and console), does not connect and does not fall back to 8080; Save on such a page says so instead of asking to replace a saved config it cannot reach. The OBS source URLs the dock copies carry `?sbport` only when it is valid.
+- **Replies are checked, not assumed.** A refused `Subscribe` or `DoAction` is now shown ("SB: Subscribe refused (…)", "SB: DoAction "VDO Sync" refused (…)") instead of looking like a healthy connection, and no `VDO Sync` is sent, nor any retry loop left running, after a refused `Subscribe`. These notices clear as soon as requests work again or the saved config arrives another way. A refused push is no longer remembered as sent: it is offered again (at most every 10 s, so a Streamer.bot that refuses everything is not hammered), and the dock says "Not accepted" until a retry is saved. A reply with no `status` field is still treated as accepted.
+- **Authentication is named, but only when it matters.** Streamer.bot sends an authentication block in its Hello whenever Authentication is on, and serves requests anyway unless Enforce is on. Greenroom no longer reacts to the block alone; if requests are then refused, or Streamer.bot hangs up, the notice reads "SB auth enforced — turn Enforce off", and it goes away on the next healthy connection. A Streamer.bot that is simply not running shows "offline".
+- **Reconnects are quicker and still back off.** One shared helper (1 s, growing to 4 s, instead of 2 s growing to 15 s) in the overlays, the dock and `director-min`. The delay is reset only after a healthy session, so a Streamer.bot that accepts and then drops no longer makes every client retry at the shortest delay.
+- A socket that closes before its sync timer fires no longer leaves a sync behind.
+
+### Added
+
+- **The overlays read the string-field frames** (`vdoninjaJson`, `discordVoiceJson`) as well as the old object fields, ahead of the action release that sends them. A frame whose string does not parse to a plain object is dropped, never shown as "clear".
+- The overlay shim dispatches a `svc:disconnect` event when the socket closes.
+- The overlay's directory sanitiser passes unknown fields through, the same as the dock's, and `verify` now checks that the two copies, and the three copies of the connection helper, agree.
+- Test support: the mock Streamer.bot can serve a file late, answer `Subscribe` with the documented flat shape (`{status, id, events}`) or an error, late or not at all, refuse `DoAction`, send a Hello (plain or with an authentication block, enforced or not), deliver `data` as a JSON string, drop a sync replay, accept-then-drop connections, and switch these behaviours while running; `verify-render` can run just the connection scenarios (`RENDER_ONLY=conn`) and fences the invalid-`?sbport` probes so they can never reach a real Streamer.bot. `verify` 118/118 and `verify:render` 172/172 cover the above.
+
+**Deploy:** copy the `overlay/` and `control/` folders, refresh every Greenroom OBS browser source, and reload the dock and the `director-min` source. No action to re-paste, nothing to restart.
+
 ## [1.0.24] — 2026-11-07
 
 The control pages no longer write built-in defaults over your saved config, and the dock's Export and Import are honest about what they do. Nothing to re-paste: this release works with the actions you already have.
@@ -160,6 +184,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.29]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.24...v1.0.29
 [1.0.24]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.17...v1.0.24
 [1.0.17]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.13...v1.0.17
 [1.0.13]: https://github.com/FlashGalatine/greenroom-guests/compare/v0.1.0...v1.0.13
