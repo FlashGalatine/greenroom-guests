@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.52] — 2026-11-08
+
+Every vdo.ninja address the kit builds (the guest views in OBS, the hidden director, the invite and manage links) now goes through one helper, so the room password and the view flags can no longer be handled differently in different places.
+
+### Fixed
+
+- **A room password with `%`, `&`, `#` or a space now reaches vdo.ninja intact.** vdo.ninja decodes the password twice, so it has to be encoded twice; the guest views, the hidden director on the dock and on `director-min`, and the plaintext invite and manage links each encoded it once, which put those guests and that director in a different room from the one the password protects. A password of `0`, `false` or `off` (which vdo.ninja treats as no password) is no longer sent at all, and the hash invite mode emits no hash for it.
+- **View flags saved without a leading `&` (or with a leading `?`) no longer break the guest view address.** They used to be glued onto the password (`…password=abc` + `solo` became one word). They are now normalised to `&a&b=c` everywhere they are read.
+- **A guest view is always solo unless the flags ask for a scene.** An empty or solo-less flags box used to show the whole room in the source.
+- **The overlay drops flags that could load script, style or media into the viewer, send its events away, or change the stream or room,** whatever the saved state holds (an old page, a backup, an import): `js`, `base64js`, `css`, `invite`, `code`, `whep`, `website`, `postapi`, `api`, `view`, `streamid`, `room`, `password`, `pass`, `hash`, `crc`, `director`, `preset` and their aliases. Settings that must match the guests' side (`salt`, `token`, `wss`) are kept, because a self-hosted vdo.ninja needs them on the viewer too. The dock removes them when you press Save and says which it removed; a saved state that already contains them is kept as it is, with a warning under the box that the overlay ignores them (nothing is pushed by that on its own).
+- **The invite builder's "none" password mode no longer issues a link into the wrong room.** When the room has a password, "none" (and the hash mode on a page where the hash cannot be computed) now produces a link with a bare `&password`, so vdo.ninja asks the guest to type it.
+- **A guest-view source opened on a page that is not a secure origin** (a LAN name) no longer sits black: for a webcam slot with a guest it starts no viewer and shows how to open it via `http://127.0.0.1:<port>/` (a Discord-mode slot, which needs no vdo.ninja, shows nothing extra).
+- **Saving a password that vdo.ninja reads as "no password"** (`off`, `0`, `false`) now trims it and warns under the box that none is sent; the invite builder says the guest is asked for the password in "none" mode. Save also names text it cuts after a `#`, and `director-min` keeps a director problem on screen instead of replacing it with the flags note.
+- `director-min` reads a config with no `viewFlags` (and a partial `invite`) the same way the dock does, and `npm run backup:restore` fills the default view flags into a snapshot that lacks them.
+
+### Added
+
+- The flags box has a placeholder with the default flags and a **reset to default** button (press Save to keep it).
+- Tests: `verify` gains the helper's unit checks (normalising, sanitising, the aliases, double encoding, the director and view URLs) and a tripwire that the two copies are identical; `verify:render` has a new section R16 (the exact overlay URL for a password like `p&w #1`, flags without `&`, dropped script flags, the four builders, the invite modes, Save and reset, the insecure source). `RENDER_ONLY=urls` runs it alone, `R16_ONLY=a,b` picks sections.
+
+**Not in this release (tracked):** the guest-slot reload watchdog (GRN-97: the message a viewer page sends could not be confirmed offline, and a wrong guess would reload healthy views) and the extra guest-overlay pin checks of GRN-177 (mirror, avatar fallback, Copy URLs). The docs half rides the docs sprint.
+
+**Deploy:** copy the `overlay/` and `control/` folders together (each gets a new `vdo-url.js`), then in one sitting reload the dock and the `director-min` source and refresh every guest-slot source. A partial update puts the director and the guests in different rooms (the old pages encode the password once). `verify` 261/261, `verify:render` 279/279.
+
 ## [1.0.49] — 2026-11-08
 
 The guest directory in the dock now commits only what the operator changed. A row that is half-typed, a guest list another page just replaced, and the auto-add that runs on every poll can no longer overwrite each other.
@@ -317,6 +341,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.52]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.49...v1.0.52
 [1.0.49]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.46...v1.0.49
 [1.0.46]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.43...v1.0.46
 [1.0.43]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.40...v1.0.43
