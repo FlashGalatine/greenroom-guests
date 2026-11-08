@@ -9,6 +9,32 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.49] — 2026-11-08
+
+The guest directory in the dock now commits only what the operator changed. A row that is half-typed, a guest list another page just replaced, and the auto-add that runs on every poll can no longer overwrite each other.
+
+### Fixed
+
+- **Auto-add never works from half-edited rows.** It used to read the whole directory back from the screen, assign that to the saved config and push it, so a label you had just cleared (or a draft you were still typing) was pushed half-finished and could get an auto-added twin. Now it looks at the saved directory plus the keys each row on screen is showing, and applies only its own changes: a Discord ID filled into an existing entry, or a new placeholder at the end.
+- **Auto-add no longer runs when another page's state is adopted** (on either page). The next poll or voice update does it. A label or voice user is also added only once per page session, so a label that Streamer.bot rewrites on the way back cannot loop.
+- **An edit changes only the field you edited, on the entry you edited.** Rows are found by a stable id rather than by their position, so another page reordering or replacing the list while you type cannot send your edit to a different guest. If the guest was removed meanwhile, your edit brings it back. A voice user filled in by auto-add while the row had focus is not undone.
+- **Emptying a display name does not remove the guest.** The old name comes back with a "use × to remove" hint; only `×` removes an entry (and so records the guest as not to be re-added). Emptying a VDO label or Discord ID field still records that key as ignored.
+- **Editing any field of an auto-added entry makes it yours** (not only its name), and the "auto" badge and the "Clear auto-added (N)" count follow at once.
+- **A draft ("+ Add guest") survives.** Another page's push no longer drops a half-filled row, and a draft with a name but no VDO label or Discord user yet is kept across a page reload (in this browser only; it never reaches Streamer.bot). Such a row says "not saved: add a VDO label or Discord user" and is counted as "N unsaved".
+- **A row never edits a guest it cannot tell from its own.** If another page changed the guest while its row was open (re-labelled it, replaced the list), the edit goes to the same guest when it can be recognised (by label, Discord user or on-stream name); otherwise the row is reloaded with a note instead of writing onto someone else. A draft that reuses another guest's label stays a separate draft.
+- **Import starts the auto-add count afresh,** so live guests missing from the imported file are added again by the next poll. The saved config arriving while you are typing a new guest no longer pops up the "has not returned your saved config" question.
+- **The directory panel is no longer redrawn under your cursor.** A change that arrives while you are in a field is applied when you leave the editor; voice-membership changes update the live dots in place. Rows draw their label and Discord pick lists only when expanded.
+
+### Docs
+
+- The Troubleshooting line about blanking a guest's name now describes the restore.
+
+### Added
+
+- Tests: `verify` gains the `skip` option checks of `autoPopulate`; `verify:render` has a new directory section (R15: half-edited rows, drafts across a push and a reload, the restore, the auto flag, adoption without auto-add on both pages, in-place live dots). `RENDER_ONLY=directory` runs it alone, `R15_ONLY=a,b` picks sections.
+
+**Deploy:** copy the `control/` folder, reload the dock and refresh the `director-min` source. Nothing to re-paste, nothing to restart. `verify` 247/247, `verify:render` 261/261.
+
 ## [1.0.46] — 2026-11-08
 
 The dock and the `director-min` source now change only what the operator touched. Switching the director off, clearing or changing the room, editing one slot, typing a Room or Password, and copying a link each do exactly one thing, and none of them can write a stale screen over what another page just saved.
@@ -291,6 +317,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.49]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.46...v1.0.49
 [1.0.46]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.43...v1.0.46
 [1.0.43]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.40...v1.0.43
 [1.0.40]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.37...v1.0.40
