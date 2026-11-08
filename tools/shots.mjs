@@ -23,12 +23,13 @@ function startMock() {
   return new Promise((res, rej) => {
     const child = spawn(process.execPath, ['mock-sb-server.mjs'], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT) },
+      // an allowlisted environment, not the shell's: nothing exported there can point this at a live Streamer.bot
+      env: Object.fromEntries([...['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'LANG', 'TZ'].filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]), ['SB_HTTP_PORT', String(HTTP_PORT)], ['SB_WS_PORT', String(WS_PORT)]]),
     });
     let out = '';
     const t = setTimeout(() => rej(new Error('mock no start\n' + out)), 8000);
     child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { out += d; if (out.includes('[mock] WS')) { clearTimeout(t); res(child); } });
+    child.stdout.on('data', (d) => { out += d; if (out.includes('[mock] READY')) { clearTimeout(t); res(child); } });
     child.stderr.on('data', () => {});
   });
 }

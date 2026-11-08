@@ -2,7 +2,7 @@
 // install, for local development and the verify suites. It faithfully mimics the
 // two SB surfaces Greenroom depends on:
 //
-//   • HTTP Server on :7474 — SB Path->Folder file serving. Both the short and the
+//   • HTTP Server on :7478 (not SB's 7474) — SB Path->Folder file serving. Both the short and the
 //     namespaced prefixes work (docs/STREAMERBOT-SETUP.md recommends the
 //     `greenroom-*` ones for real SB, where sibling components may already claim
 //     `overlay`/`shared`/`themes`):
@@ -56,7 +56,7 @@
 //       SB_DROP=1               accept each connection and close it ~100 ms later, unanswered
 //       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
 //
-//   • WebSocket Server on :8080 — speaks SB's envelope and implements the FIVE
+//   • WebSocket Server on :8084 (not SB's 8080) — speaks SB's envelope and implements the FIVE
 //     Greenroom action semantics (mirroring the C# in actions/):
 //       VDO Push              broadcast {type:'vdoninja:update', vdoninjaJson:'<payload>'}, THEN
 //                             cache args.payload as vdo.state (persisted analog)
@@ -73,8 +73,12 @@
 //     (inject one with POST /mock/setcache) is reported by VDO Sync as "cached state is not valid
 //     JSON - Import a backup or re-save" (for the Discord state: "the bridge replaces it with its
 //     next push"), skipped, and KEPT; the other replay still runs.
-//     On `Subscribe` it enforces the real-SB lowercase `general` source key — a
-//     wrong-case subscribe is acked but receives nothing, exactly like real SB.
+//     On `Subscribe` it needs the general source and the Custom event (matched without regard to
+//     case); anything else is acked but receives nothing.
+//     Every connection is greeted with {request:'Hello', info:{name:'greenroom-mock', source:'mock'}}
+//     (SB_HELLO=none|plain|auth change that), so a client can tell this is not Streamer.bot.
+//     It refuses to start when either port is already taken, and prints one `[mock] READY http=<p> ws=<p>`
+//     line once both listeners are up.
 //     DoAction is ALWAYS acked {status:'ok'} — ok means the action STARTED, not that it
 //     succeeded. An invalid argument or an exception inside a running action is reported by the
 //     error frame above; an action that failed to COMPILE broadcasts nothing at all.
@@ -84,6 +88,7 @@
 
 import { WebSocketServer } from 'ws';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,8 +98,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONTROL_DIR = resolve(__dirname, 'control');
 const OVERLAY_DIR = resolve(__dirname, 'overlay');
 
-const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7474; // SB HTTP Server default
-const WS_PORT = Number(process.env.SB_WS_PORT) || 8080; // SB WebSocket Server default
+// Deliberately NOT Streamer.bot's own 7474 / 8080, so `npm run mock` can never land on (or be mistaken for) a live install,
+// and not the harnesses' ports either (verify 7475/8081, verify-render 7476/8082, shots 7477/8083).
+const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7478;
+const WS_PORT = Number(process.env.SB_WS_PORT) || 8084;
 const SYNC_DELAY_MS = Number(process.env.SYNC_DELAY_MS) || 0;
 const WIRE_OBJECT = process.env.SB_WIRE === 'object'; // the old action behaviour (see the header)
 const EMPTY_MARKER = process.env.SB_EMPTY_MARKER ? process.env.SB_EMPTY_MARKER === '1' : !WIRE_OBJECT;
@@ -102,7 +109,7 @@ const EMPTY_MARKER = process.env.SB_EMPTY_MARKER ? process.env.SB_EMPTY_MARKER =
 const modes = {
   subscribe: process.env.SB_SUBSCRIBE || 'ok',
   doaction: process.env.SB_DOACTION === 'error' ? 'error' : 'ok',
-  hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : 'none'),
+  hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : (process.env.SB_HELLO === 'none' ? 'none' : 'mock')),
   auth: process.env.SB_AUTH === 'close' ? 'close' : (process.env.SB_AUTH === 'serve' ? 'serve' : 'refuse'),
 };
 const SUBSCRIBE_DELAY_MS = Number(process.env.SB_SUBSCRIBE_DELAY_MS) || 0;
@@ -112,6 +119,23 @@ const DROP = process.env.SB_DROP === '1';
 const FILE_DELAY = Object.fromEntries((process.env.SB_FILE_DELAY || '').split(',').filter(Boolean)
   .map((p) => { const i = p.lastIndexOf(':'); return [p.slice(0, i), Number(p.slice(i + 1)) || 0]; }));
 const connLog = []; // WebSocket connect times
+
+// Refuse to start on a port something already holds, on loopback OR on all interfaces (a listener on 0.0.0.0 can sit under
+// a loopback bind on Windows without raising an error, which would leave two servers answering one port).
+async function portFree(port) {
+  for (const host of ['127.0.0.1', '0.0.0.0']) {
+    const ok = await new Promise((res) => { const t = createTcpServer(); t.once('error', () => res(false)); t.listen(port, host, () => t.close(() => res(true))); });
+    if (!ok) return false;
+  }
+  return true;
+}
+for (const [what, port] of [['HTTP', HTTP_PORT], ['WebSocket', WS_PORT]]) {
+  if (!(await portFree(port))) {
+    console.error(`[mock] ${what} port ${port} is already in use (a Streamer.bot, or another mock?). Not starting. Set SB_HTTP_PORT / SB_WS_PORT to free ports.`);
+    process.exit(1);
+  }
+}
+console.log('[mock] greenroom-mock: a MOCK of Streamer.bot for development and tests. It is not Streamer.bot and never talks to one.');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -332,9 +356,16 @@ ${link(`/mock/restart`, 'Simulate SB restart (clears discord cache only)')}
 <p class="dim">Drive Discord state with <code>npm run mock:bridge</code> (token-less fake sidecar over the real bus).</p>`;
 }
 
-const http = createServer(async (req, res) => {
+const http = createServer((req, res) => {
+  handleHttp(req, res).catch((e) => {
+    console.error('[mock] HTTP handler error:', e && e.message);
+    try { if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' }); res.end('server error'); } catch {}
+  });
+});
+async function handleHttp(req, res) {
   const url = req.url || '/';
-  const path = decodeURIComponent(url.split('?')[0]);
+  let path;
+  try { path = decodeURIComponent(url.split('?')[0]); } catch { res.writeHead(400, { 'content-type': 'text/plain' }); res.end('bad request'); return; }
   const query = new URLSearchParams(url.split('?')[1] || '');
 
   if (path === '/mock/actions') {
@@ -428,12 +459,24 @@ const http = createServer(async (req, res) => {
     res.end('Map /greenroom-control/ (control/) or /greenroom-overlay/ (overlay/).');
     return;
   }
+  // A page served from here must talk to THIS mock, never fall back to the default Streamer.bot port: with no ?sbport,
+  // send the same URL back with it.
+  if (file.endsWith('.html') && !query.has('sbport')) {
+    const rawQuery = url.includes('?') ? url.slice(url.indexOf('?') + 1) : '';
+    res.writeHead(302, { location: url.split('?')[0] + '?' + (rawQuery ? rawQuery + '&' : '') + 'sbport=' + WS_PORT });
+    res.end();
+    return;
+  }
   return serveFile(res, file);
-});
+}
 
 http.on('error', (err) => { console.error('[mock] HTTP error:', err.message); process.exit(1); });
+let httpUp = false, wsUp = false;
+// One marker, printed once, only after BOTH listeners are bound and never inside an error line: the harnesses wait for it.
+const announceReady = () => { if (httpUp && wsUp) console.log(`[mock] READY http=${HTTP_PORT} ws=${WS_PORT}`); };
 http.listen(HTTP_PORT, '127.0.0.1', () => {
   console.log(`[mock] HTTP  http://127.0.0.1:${HTTP_PORT}/  (landing page + /control/ + /overlay/)`);
+  httpUp = true; announceReady();
 });
 
 // ── WebSocket server (SB WebSocket Server mimic) ─────────────────────────────
@@ -452,14 +495,20 @@ wss.on('connection', (ws) => {
   ws.subscribedCustom = false; // only a correctly-subscribed client receives broadcasts
   if (DROP) { setTimeout(() => { try { ws.close(); } catch {} }, 100); }
   if (modes.hello !== 'none') {
-    // Streamer.bot's Hello; it carries an authentication block when Authentication is on.
-    const hello = { request: 'Hello', info: { name: 'Streamer.bot', version: 'mock' } };
+    // The Hello every connection gets. info.source says this is a mock (the bridge guard and, later, the pages read it); an
+    // authentication block rides along when SB_HELLO=auth, as it does in Streamer.bot when Authentication is on.
+    const hello = { request: 'Hello', info: { name: 'greenroom-mock', source: 'mock', version: 'mock' } };
     if (modes.hello === 'auth') hello.authentication = { challenge: 'mock-challenge', salt: 'mock-salt' };
     ws.send(JSON.stringify(hello));
   }
-  ws.on('message', (raw) => {
+  ws.on('error', () => {}); // an abrupt close must never end the mock
+  ws.on('message', (raw) => { try { onMessage(ws, raw); } catch (e) { console.log(`[mock] a frame was ignored after an error: ${e && e.message}`); } });
+});
+function onMessage(ws, raw) {
+  {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return;
     if (DROP) return;
     if (modes.hello === 'auth' && modes.auth !== 'serve' && m.request !== 'Authenticate') {
       // Unauthenticated: a server that enforces authentication refuses (or, with auth=close, hangs up on) the request.
@@ -469,12 +518,12 @@ wss.on('connection', (ws) => {
     }
 
     if (m.request === 'Subscribe') {
-      // Real Streamer.bot uses a LOWERCASE source key ('general') in Subscribe, while
-      // delivered events carry a capitalized source ('General'). Enforce that here so
-      // a wrong-case subscribe gets nothing — exactly how real SB behaves.
-      const gen = m.events && m.events.general;
-      ws.subscribedCustom = Array.isArray(gen) && gen.includes('Custom');
-      console.log('[mock] Subscribe', ws.subscribedCustom ? 'OK (general.Custom)' : 'IGNORED (expected lowercase events.general:["Custom"])');
+      // The documented request is {events:{general:['Custom']}} (a lowercase source key, while delivered events carry a
+      // capitalized source 'General'). The mock matches the key and the type without regard to case, so a client that
+      // writes either spelling is served; what it must still do is ask for the general source and the Custom event.
+      const entry = Object.entries(m.events && typeof m.events === 'object' ? m.events : {}).find(([k]) => String(k).toLowerCase() === 'general');
+      ws.subscribedCustom = !!entry && Array.isArray(entry[1]) && entry[1].some((t) => String(t).toLowerCase() === 'custom');
+      console.log('[mock] Subscribe', ws.subscribedCustom ? 'OK (general.Custom)' : 'IGNORED (expected events.general:["Custom"])');
       if (modes.subscribe === 'none') return; // never answered
       const reply = modes.subscribe === 'error'
         ? { status: 'error', id: m.id, error: 'mock: subscribe refused' }
@@ -490,7 +539,7 @@ wss.on('connection', (ws) => {
       // An invalid argument or an exception in a running action is reported by an error
       // broadcast; an action that failed to COMPILE broadcasts nothing at all.
       const name = (m.action && m.action.name) || '';
-      const args = m.args || {};
+      const args = m.args && typeof m.args === 'object' && !Array.isArray(m.args) ? m.args : {};
       logAction(name, args);
       if (modes.doaction === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: action not found' })); return; }
       ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
@@ -524,7 +573,7 @@ wss.on('connection', (ws) => {
       console.log(`[mock] DoAction for unknown action "${name}" — acked, no effect`);
       return;
     }
-  });
-  ws.on('close', () => clients.delete(ws));
-});
-wss.on('listening', () => console.log(`[mock] WS    ws://127.0.0.1:${WS_PORT}  (Streamer.bot mock)`));
+  }
+}
+wss.on('connection', (ws) => { ws.on('close', () => clients.delete(ws)); });
+wss.on('listening', () => { console.log(`[mock] WS    ws://127.0.0.1:${WS_PORT}  (Streamer.bot mock)`); wsUp = true; announceReady(); });

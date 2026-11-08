@@ -9,7 +9,7 @@
 // (sidecar/discord-voice-config.json — copy that file to back those up). The live
 // voice roster (`discord.state`) is deliberately non-persisted and not snapshotted.
 //
-// Usage (Streamer.bot — or `npm start`'s mock — must be running):
+// Usage (your REAL Streamer.bot must be running; the development mock keeps nothing worth backing up):
 //   node backup.mjs [save] [file]    snapshot vdo.state → file
 //                                    (default backups/vdo-state-<timestamp>.json)
 //   node backup.mjs restore <file>   push a snapshot back into SB (persists)

@@ -6,7 +6,7 @@
   "license": "MIT",
   "author": "Ashe \"Flash\" Galatine",
   "scripts": {
-    "start": "node mock-sb-server.mjs",
+    "mock": "node mock-sb-server.mjs",
     "mock:bridge": "node mock-discord-bridge.mjs",
     "bridge": "node sidecar/discord-bridge.mjs",
     "backup": "node backup.mjs save",
@@ -19,5 +19,8 @@
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
   }
 }

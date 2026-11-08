@@ -49,20 +49,32 @@ const check = (n, ok, d) => { ok ? passed++ : failed++; console.log(`  ${ok ? 'P
 
 // opts: { httpPort, wsPort, env } — extra mock instances (the R7 sync-guard
 // scenarios) run on their own off-default ports with their own test options.
+// Children get an ALLOWLISTED environment, never `...process.env`: a shell that exports SB_WS_URL, GREENROOM_* or
+// DISCORD_BRIDGE_* must not be able to steer a harness child at a live Streamer.bot or a live sidecar. Everything a child
+// needs beyond this list is passed explicitly.
+const ENV_KEEP = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'LANG', 'LC_ALL', 'TZ'];
+function cleanEnv(extra = {}) {
+  const env = {};
+  for (const k of ENV_KEEP) if (process.env[k] !== undefined) env[k] = process.env[k];
+  return { ...env, ...extra };
+}
+
 function startChild(script, readyText, opts = {}) {
   return new Promise((res, rej) => {
+    const wsPort = opts.wsPort || WS_PORT;
     const child = spawn(process.execPath, [script], {
       cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(opts.httpPort || HTTP_PORT), SB_WS_PORT: String(opts.wsPort || WS_PORT), ...(opts.env || {}) },
+      env: cleanEnv({ SB_HTTP_PORT: String(opts.httpPort || HTTP_PORT), SB_WS_PORT: String(wsPort), SB_WS_URL: `ws://127.0.0.1:${wsPort}/`, ...(opts.env || {}) }),
     });
-    let out = '';
-    const timer = setTimeout(() => { try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
-    const onData = (d) => { out += d; if (out.includes(readyText)) { clearTimeout(timer); res(child); } };
+    let out = '', settled = false;
+    const timer = setTimeout(() => { settled = true; try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
+    // readyText is matched on the child's output; a child that exits first, with any code, is a failure to start.
+    const onData = (d) => { out += d; if (!settled && out.includes(readyText)) { settled = true; clearTimeout(timer); res(child); } };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', onData);
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', onData);
-    child.on('exit', (code) => { if (code) rej(new Error(`${script} exited ${code}\n` + out)); });
+    child.on('exit', (code) => { if (!settled) { settled = true; clearTimeout(timer); rej(new Error(`${script} exited ${code} before it was ready\n` + out)); } });
   });
 }
 
@@ -155,7 +167,7 @@ async function main() {
   const extraProds = []; // their producers
   let scratch = null; // R9's temp dir (an exported config holds the room password)
   try {
-    mock = await startChild('mock-sb-server.mjs', '[mock] WS    ws://');
+    mock = await startChild('mock-sb-server.mjs', '[mock] READY');
     console.log(`mock SB up (:${HTTP_PORT} HTTP, :${WS_PORT} WS)\n`);
     browser = await launch();
     prod = await producer();
@@ -180,7 +192,7 @@ async function main() {
         while (wsPort === httpPort) wsPort = await freePort();
         let m, prod;
         try {
-          m = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { httpPort, wsPort, env });
+          m = await startChild('mock-sb-server.mjs', '[mock] READY', { httpPort, wsPort, env });
           prod = await producer(wsPort);
         } catch (e) { lastErr = e; if (m) { try { m.kill(); } catch {} } continue; }
         extra.push(m);

@@ -15,12 +15,21 @@
 //                       flipped every 100 ms: the doc-06 "20+ participants at the
 //                       100 ms coalesce" scale question, made assertable offline.
 //
-// Run against the mock (`npm start` then `npm run mock:bridge`) or against REAL
-// Streamer.bot (SB_WS_URL=ws://127.0.0.1:8080/) to drive overlays without Discord.
+// Run against the mock: `npm run mock` in one terminal, `npm run mock:bridge` in another (both default to the
+// mock's own ports, never Streamer.bot's 8080).
+//
+// SAFETY: this program does nothing to a server until that server's Hello frame says it is the mock
+// (info.source === 'mock'). Pointed at anything else (a real Streamer.bot says no such thing, and an unresponsive
+// server says nothing) it logs why and exits without sending a byte. To drive a REAL Streamer.bot on purpose, pass
+// --allow-real-sb with SB_WS_URL=ws://127.0.0.1:8080/. Know what that does: the real sidecar also obeys Connect,
+// Leave, USE and settings edits sent over the bus, and the pushes below overwrite the live discord.state, so close
+// the real sidecar first and use it only on a Streamer.bot you are free to disturb.
 
 import { WebSocket } from 'ws';
 
-const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8080}/`;
+const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8084}/`; // the mock's WebSocket port
+const ALLOW_REAL_SB = process.argv.includes('--allow-real-sb');
+const HELLO_WAIT_MS = 3000; // a mock greets at once; a server that stays silent this long is not one
 const RECONNECT_MS = 3000;
 
 const STREAMER_ID = '110457699291906048';
@@ -188,17 +197,39 @@ function dispatch(command, value) {
   pushNow();
 }
 
+function refuse(why) {
+  console.log(`[mock-bridge] REFUSING to act on ${WS_URL}: ${why}. Nothing was sent. (--allow-real-sb overrides this on purpose.)`);
+  process.exit(2);
+}
+
 function connect() {
   ws = new WebSocket(WS_URL);
-  ws.on('open', () => {
+  let engaged = false;
+  let helloTimer = null;
+  // Subscribe and push only once, and only after the guard is satisfied.
+  const engage = () => {
+    if (engaged) return;
+    engaged = true;
+    clearTimeout(helloTimer);
     // Lowercase `general` — the SB Subscribe case gotcha (same as the real sidecar).
     ws.send(JSON.stringify({ request: 'Subscribe', id: String(++msgId), events: { general: ['Custom'] } }));
     pushNow(); // seed the discord.state cache so late joiners see bot status/favorites
     console.log(`[mock-bridge] up — connected to ${WS_URL}`);
+  };
+  ws.on('open', () => {
+    if (ALLOW_REAL_SB) { engage(); return; }
+    helloTimer = setTimeout(() => refuse(`no Hello frame within ${HELLO_WAIT_MS} ms, so it cannot be shown to be the mock`), HELLO_WAIT_MS);
   });
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (!m || typeof m !== 'object') return;
+    if (m.request === 'Hello') {
+      if (m.info && m.info.source === 'mock') engage();
+      else if (!ALLOW_REAL_SB) refuse(`its Hello says it is ${JSON.stringify(m.info && m.info.name || 'something')}, not the mock`);
+      return;
+    }
+    if (!engaged) return; // before the guard is satisfied nothing is acted on
     if (m && m.id && !m.event) return; // acks
     if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
     let d = m.data;
@@ -218,5 +249,7 @@ function connect() {
   });
 }
 
+// First line out: where this is aimed.
+console.log(`[mock-bridge] target ${WS_URL}${ALLOW_REAL_SB ? '  (--allow-real-sb: NOT checking that it is the mock)' : ''}`);
 console.log('[mock-bridge] token-less fake Discord bridge (see mock-sb-server.mjs / verify.mjs)');
 connect();

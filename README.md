@@ -122,7 +122,7 @@ to keep a file copy:
 - **In the control page:** the header's **Export config** / **Import config**
   buttons. Export downloads a JSON snapshot; Import loads one and re-pushes it to
   SB (so it persists like an edit — it *replaces* the current config).
-- **CLI** (SB or `npm start`'s mock must be running):
+- **CLI** (your real Streamer.bot must be running; it needs Node 22.12+ and a one-time `npm install --omit=dev` in this folder, which installs `ws`. The development mock is not a place to keep a backup):
   ```
   npm run backup                       # → backups/vdo-state-<timestamp>.json
   npm run backup:list
@@ -138,7 +138,8 @@ roster is intentionally not snapshotted.
 ## Verification (no Streamer.bot, Discord, or camera needed)
 
 ```
-npm install          # root dev deps (ws)
+npm install          # root deps: ws (also used by the backup CLI) and playwright-core (dev, for verify:render)
+npm --prefix sidecar ci   # the Discord bridge's dependencies; verify needs them for its sidecar sections
 npm run verify       # 105 checks: transport, both push round-trips (incl. the guest
                      # directory), persisted-vs-non-persisted restart semantics, the
                      # command bus, the REAL sidecar token-less over the bus, the
@@ -148,7 +149,6 @@ npm run verify       # 105 checks: transport, both push round-trips (incl. the g
                      # (sanitizers + auto-add: fixpoint, order-independent, ignore
                      # list), HTTP serving + tripwires (incl. "no token string in
                      # control.html" and the director-min directory strip-guard)
-npm install --no-save playwright-core
 npm run verify:render  # 44 real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,
                        # nameplates (lower-third + standalone + rotator + hide rules),
@@ -164,8 +164,11 @@ npm run verify:cs      # compiles the three state actions as shipped (the C# com
                        # GREENROOM_NEWTONSOFT_DLL to Streamer.bot's Newtonsoft.Json.dll
                        # and it also re-parses each frame the way Streamer.bot does,
                        # which is what the date-shaped guest label checks need.
-npm start            # mock Streamer.bot (:7474/:8080) for hands-on dev
-npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
+npm run mock         # mock Streamer.bot (:7478 HTTP, :8084 WebSocket: never Streamer.bot's own ports) for hands-on dev;
+                     # it refuses to start if either port is taken
+npm run mock:bridge  # token-less fake Discord bridge (drives the roster live). It acts only on a server whose Hello says it is
+                     # the mock, and exits otherwise. To drive a REAL Streamer.bot on purpose: close the real bridge first,
+                     # then  SB_WS_URL=ws://127.0.0.1:8080/ npm run mock:bridge -- --allow-real-sb
 ```
 
 The mocks prove the protocol and the pixels; what only a live session can prove

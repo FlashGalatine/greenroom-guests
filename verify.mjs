@@ -24,6 +24,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +34,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7475; // off the SB defaults so it coexists with a running SB
 const WS_PORT = Number(process.env.SB_WS_PORT) || 8081;
 const BASE = `http://127.0.0.1:${HTTP_PORT}`;
+const GUARD_BASE = Number(process.env.VERIFY_GUARD_BASE) || 7591; // the sidecars' single-instance guard ports: base, +1, +2 (outside the 749x block the components claim)
 const WS_URL = `ws://127.0.0.1:${WS_PORT}/`;
 
 let passed = 0, failed = 0;
@@ -54,24 +56,35 @@ function waitExit(child, ms) {
   });
 }
 
+// Children get an ALLOWLISTED environment, never `...process.env`: a shell that exports SB_WS_URL, GREENROOM_* or
+// DISCORD_BRIDGE_* must not be able to steer a harness child at a live Streamer.bot or a live sidecar. Everything a child
+// needs beyond this list is passed explicitly.
+const ENV_KEEP = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'LANG', 'LC_ALL', 'TZ'];
+function cleanEnv(extra = {}) {
+  const env = {};
+  for (const k of ENV_KEEP) if (process.env[k] !== undefined) env[k] = process.env[k];
+  return { ...env, ...extra };
+}
+
 function startChild(script, readyText, extraEnv = {}) {
   return new Promise((res, rej) => {
     const child = spawn(process.execPath, [script], {
       cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), ...extraEnv },
+      env: cleanEnv({ SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), SB_WS_URL: WS_URL, ...extraEnv }),
     });
-    let out = '';
-    const timer = setTimeout(() => { try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
-    const onData = (d) => { out += d; if (out.includes(readyText)) { clearTimeout(timer); res(child); } };
+    let out = '', settled = false;
+    const timer = setTimeout(() => { settled = true; try { child.kill(); } catch {} rej(new Error(`${script} did not start in 8s\n` + out)); }, 8000);
+    // readyText is matched on the child's output; a child that exits first, with any code, is a failure to start.
+    const onData = (d) => { out += d; if (!settled && out.includes(readyText)) { settled = true; clearTimeout(timer); res(child); } };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', onData);
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', onData);
-    child.on('exit', (code) => { if (code) rej(new Error(`${script} exited ${code}\n` + out)); });
+    child.on('exit', (code) => { if (!settled) { settled = true; clearTimeout(timer); rej(new Error(`${script} exited ${code} before it was ready\n` + out)); } });
   });
 }
 
-const startMock = () => startChild('mock-sb-server.mjs', '[mock] WS    ws://');
+const startMock = () => startChild('mock-sb-server.mjs', '[mock] READY');
 
 // An extra mock on OS-assigned free ports (so it never collides with a Streamer.bot or another tool).
 function freePort() {
@@ -79,7 +92,7 @@ function freePort() {
 }
 async function startMockWith(env) {
   const wsPort = await freePort(), httpPort = await freePort();
-  const child = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { SB_HTTP_PORT: String(httpPort), SB_WS_PORT: String(wsPort), ...env });
+  const child = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(httpPort), SB_WS_PORT: String(wsPort), ...env });
   return { child, wsPort, httpPort, url: `ws://127.0.0.1:${wsPort}/`, base: `http://127.0.0.1:${httpPort}` };
 }
 
@@ -88,7 +101,7 @@ function runNode(args, extraEnv = {}) {
   return new Promise((res) => {
     const child = spawn(process.execPath, args, {
       cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), ...extraEnv },
+      env: cleanEnv({ SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT), SB_WS_URL: WS_URL, ...extraEnv }),
     });
     let out = '';
     child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => (out += d));
@@ -267,6 +280,9 @@ async function main() {
   try {
     mock = await startMock();
     console.log(`mock SB up (:${HTTP_PORT} HTTP, :${WS_PORT} WS)\n`);
+    // The READY line says the mock is up; this says it is OUR mock, on our own port, before any client opens (GRN-200).
+    const selfCheck = await fetch(`${BASE}/mock/state`).then((r) => r.status).catch(() => 'down');
+    check('the harness\'s own mock answers /mock/state on its own HTTP port before any client opens', selfCheck === 200, String(selfCheck));
 
     // ── 1. Transport: ack shapes, sync-on-connect, silence on empty caches ──────
     console.log('[1] transport: overlay/panel-client-sb.js against the mock WS');
@@ -876,6 +892,9 @@ async function main() {
     // dispatch, config persistence, the no-token error path) with no Discord token
     // and no network. The mock bridge is killed first so command consumers don't
     // compete. Scratch config/token paths keep sidecar/ untouched.
+    const sidecarDeps = existsSync(resolve(__dirname, 'sidecar', 'node_modules', 'discord.js'));
+    if (!sidecarDeps) check('the sidecar\'s dependencies are installed (sidecar/node_modules/discord.js is missing: run  npm --prefix sidecar ci  and run this again; sections [7] and [8] need them)', false);
+    if (sidecarDeps) {
     console.log('\n[7] real sidecar (token-less): bus layer end-to-end');
     bridge.kill();
     await new Promise((r) => setTimeout(r, 300));
@@ -890,7 +909,7 @@ async function main() {
       // Scratch guard ports live OUTSIDE the 749x block the components claim
       // (Fortuna 7493, Greenroom 7495, Zipper 7496, Octet 7498) — otherwise this
       // suite fails whenever a sibling component's sidecar is running for real.
-      GREENROOM_GUARD_PORT: '7591',
+      GREENROOM_GUARD_PORT: String(GUARD_BASE),
     });
     const shimF = await runShim();
     const sInit = await shimF.inbox.next(4000,
@@ -925,7 +944,8 @@ async function main() {
     // one with GREENROOM_EXIT_ON_SB_CLOSE=1 (must exit when SB drops), one with the
     // feature off (must survive — the default reconnect-forever behaviour).
     console.log('\n[8] exit-on-SB-close: closing Streamer.bot disconnects + quits (opt-in)');
-    const EXIT_WS = 8082, EXIT_HTTP = 7476;
+    const EXIT_HTTP = Number(process.env.SB_EXIT_HTTP_PORT) || HTTP_PORT + 100; // derived, so this and verify:render can run together
+    const EXIT_WS = Number(process.env.SB_EXIT_WS_PORT) || WS_PORT + 100;
     const onCfg = resolve(__dirname, '.verify-exit-on-config.json');
     const onTok = resolve(__dirname, '.verify-exit-on-tokens.json');
     const offCfg = resolve(__dirname, '.verify-exit-off-config.json');
@@ -933,26 +953,29 @@ async function main() {
     let exitMock, onSc, offSc;
     try {
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
-      exitMock = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
+      exitMock = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
       const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: '500' };
       onSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
-        ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '7592',
+        ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: String(GUARD_BASE + 1),
         DISCORD_BRIDGE_CONFIG: onCfg, DISCORD_BRIDGE_TOKENS: onTok,
       });
       offSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
-        ...common, GREENROOM_GUARD_PORT: '7593', // GREENROOM_EXIT_ON_SB_CLOSE unset → feature off
+        ...common, GREENROOM_GUARD_PORT: String(GUARD_BASE + 2), GREENROOM_EXIT_ON_SB_CLOSE: '0', // the feature is off, said explicitly
         DISCORD_BRIDGE_CONFIG: offCfg, DISCORD_BRIDGE_TOKENS: offTok,
       });
       exitMock.kill(); exitMock = null; // "close Streamer.bot"
       const onExited = await waitExit(onSc, 5000);
       check('exitOnSbClose ON: SB closes → sidecar disconnects from voice and exits within grace', onExited);
-      check('exitOnSbClose OFF (default): SB closes → sidecar stays up (reconnect-forever)', offSc.exitCode === null);
+      await new Promise((r) => setTimeout(r, 500 + 300 + 700)); // the grace time, plus margin: the OFF sidecar must have had its full chance to leave
+      check('exitOnSbClose OFF: SB closes → sidecar stays up (reconnect-forever)', offSc.exitCode === null);
     } finally {
       if (onSc) try { onSc.kill(); } catch {}
       if (offSc) try { offSc.kill(); } catch {}
       if (exitMock) try { exitMock.kill(); } catch {}
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
     }
+
+    } // end of the sidecar sections ([7], [8])
 
     // ── 9. config backup CLI: save + restore round-trip (backup.mjs vs the mock) ──
     // The shared mock still holds VDO_PAYLOAD from [2] (room 'testroom', 2 directory
@@ -991,6 +1014,109 @@ async function main() {
     check('restore of a missing/garbage file exits non-zero (refuses to push junk)', bogus.code !== 0, `code=${bogus.code}`);
     mutator.close();
     await rm(backupFile, { force: true });
+
+    // ── 10. mock safety: it announces itself, never takes Streamer.bot's ports, and survives junk (GRN-74 and friends) ──
+    console.log('\n[10] mock safety: Hello with source "mock", own ports, refuses taken ports, survives junk, the bridge guard');
+    {
+      const quick = (script, env, args = [], ms = 8000) => new Promise((res) => {
+        const c = spawn(process.execPath, [script, ...args], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv(env) });
+        let out = '';
+        c.stdout.setEncoding('utf8'); c.stdout.on('data', (d) => (out += d));
+        c.stderr.setEncoding('utf8'); c.stderr.on('data', (d) => (out += d));
+        const t = setTimeout(() => { try { c.kill(); } catch {} res({ code: null, out, timedOut: true }); }, ms);
+        c.on('exit', (code) => { clearTimeout(t); res({ code, out, timedOut: false }); });
+      });
+      const src = await readFile(resolve(__dirname, 'mock-sb-server.mjs'), 'utf8');
+      check('the mock\'s default ports are not Streamer.bot\'s (7474 / 8080): npm run mock cannot land on a live install', !/\|\| (7474|8080)\b/.test(src));
+      const pkg = JSON.parse(await readFile(resolve(__dirname, 'package.json'), 'utf8'));
+      check('package.json: no "start" script (it would run the mock on a streaming PC), "mock" runs it; playwright-core is a pinned devDependency (GRN-158, GRN-219)',
+        !('start' in pkg.scripts) && /mock-sb-server/.test(pkg.scripts.mock || '') && /^\d+\.\d+\.\d+$/.test((pkg.devDependencies || {})['playwright-core'] || ''), JSON.stringify({ scripts: pkg.scripts, dev: pkg.devDependencies }));
+
+      const m10 = await startMockWith({});
+      try {
+        // Hello: every connection is told this is a mock (GRN-74, GRN-195's reuse).
+        const first = await new Promise((res) => {
+          const w = new WebSocket(m10.url); const t = setTimeout(() => { try { w.close(); } catch {} res(null); }, 3000);
+          w.on('message', (raw) => { clearTimeout(t); try { w.close(); } catch {} try { res(JSON.parse(raw.toString())); } catch { res(null); } });
+        });
+        check('the mock sends a Hello on connect, {request:"Hello", info:{name:"greenroom-mock", source:"mock"}}', !!first && first.request === 'Hello' && first.info && first.info.source === 'mock' && first.info.name === 'greenroom-mock', JSON.stringify(first));
+        const sub = await rawClient(m10.url);
+        const ack = await sub.acks.next(3000, (m) => String(m.id).startsWith('sub'), 'Subscribe ack');
+        check('…and the Subscribe ack is still the flat {status, id, events} shape (no result key)', ack.status === 'ok' && !('result' in ack) && !!ack.events, JSON.stringify(ack));
+
+        // GRN-191: the Subscribe match ignores case.
+        const lax = await new Promise((res) => {
+          const w = new WebSocket(m10.url); let got = false;
+          w.on('open', () => { w.send(JSON.stringify({ request: 'Subscribe', id: 'c1', events: { General: ['custom'] } })); setTimeout(() => fetch(m10.base + '/mock/broadcast', { method: 'POST', body: JSON.stringify({ type: 'greenroom:ping' }) }).then((r) => r.arrayBuffer()), 300); });
+          w.on('message', (raw) => { try { const m = JSON.parse(raw.toString()); if (m.event && m.data && m.data.type === 'greenroom:ping') { got = true; } } catch {} });
+          setTimeout(() => { try { w.close(); } catch {} res(got); }, 1500);
+        });
+        check('a Subscribe whose key and type differ only in case (General / custom) still receives the broadcasts', lax);
+
+        // GRN-212: junk frames never end the process.
+        const junkWs = await new Promise((res) => { const w = new WebSocket(m10.url); w.on('open', () => res(w)); });
+        for (const junk of ['null', '"x"', '7', '[1]', '{"request":null}', '{"request":"DoAction","action":null,"args":null,"id":1}', 'not json']) junkWs.send(junk);
+        await new Promise((r) => setTimeout(r, 400));
+        junkWs.terminate(); // an abrupt close, which raises an error event on the server side
+        const alive1 = await fetch(m10.base + '/mock/state').then((r) => r.status).catch(() => 'down');
+        check('junk frames (null, a string, a number, an array, an action with no name or args) and an abrupt close do not end the mock', alive1 === 200, String(alive1));
+
+        // GRN-17: a malformed %-escape is a 400, not a crash.
+        const bad = await new Promise((res) => {
+          import('node:http').then(({ request }) => {
+            const r = request({ host: '127.0.0.1', port: m10.httpPort, path: '/control/%E0%A4%A', method: 'GET' }, (resp) => { resp.resume(); res(resp.statusCode); });
+            r.on('error', () => res('down')); r.end();
+          });
+        });
+        const alive2 = await fetch(m10.base + '/mock/state').then((r) => r.status).catch(() => 'down');
+        check('a request path with a malformed %-escape is answered 400 and the mock keeps running', bad === 400 && alive2 === 200, String(bad) + '/' + alive2);
+
+        // GRN-158: a page the mock serves never falls back to the default Streamer.bot port.
+        const noPort = await fetch(m10.base + '/control/control.html', { redirect: 'manual' });
+        const withPort = await fetch(m10.base + '/control/control.html?sbport=' + m10.wsPort);
+        await withPort.arrayBuffer();
+        check('/control/ and /overlay/ pages requested without ?sbport are redirected to the same URL with sbport=<this mock\'s WS port>; with it they are served',
+          noPort.status === 302 && new URL(noPort.headers.get('location'), m10.base).searchParams.get('sbport') === String(m10.wsPort) && withPort.status === 200, noPort.status + ' ' + noPort.headers.get('location'));
+        sub.close();
+      } finally { m10.child.kill(); }
+
+      // A taken port: the mock refuses to start (GRN-158). Both a loopback-only and an all-interfaces listener count.
+      const { createServer: createTcp } = await import('node:net');
+      for (const host of ['127.0.0.1', '0.0.0.0']) {
+        const blocker = createTcp(); const bp = await new Promise((res) => blocker.listen(0, host, () => res(blocker.address().port)));
+        const freeHttp = await freePort();
+        const r = await quick('mock-sb-server.mjs', { SB_HTTP_PORT: String(freeHttp), SB_WS_PORT: String(bp) });
+        blocker.close();
+        check(`the mock refuses to start when its WebSocket port is already taken (listener on ${host}): exit non-zero, says so, and prints no READY`,
+          !r.timedOut && r.code !== 0 && /already in use|in use/i.test(r.out) && !/READY/.test(r.out), JSON.stringify({ code: r.code, out: r.out.slice(0, 200) }));
+      }
+      // READY (GRN-200): printed once, only after both listeners are bound, and never inside an error line.
+      const ready = await startMockWith({});
+      const probeReady = await fetch(ready.base + '/mock/state').then((r) => r.status).catch(() => 'down');
+      check('the harness helper started the mock on its READY marker and the mock answers at once', probeReady === 200);
+      ready.child.kill();
+
+      // The bridge guard: it sends nothing to anything that is not announcing itself as a mock (GRN-74).
+      const { WebSocketServer } = await import('ws');
+      const sentinel = async (helloFrame) => {
+        const port = await freePort(); const frames = [];
+        const wss = new WebSocketServer({ host: '127.0.0.1', port });
+        wss.on('connection', (c) => { if (helloFrame) c.send(JSON.stringify(helloFrame)); c.on('message', (raw) => frames.push(raw.toString())); });
+        await new Promise((r) => wss.on('listening', r));
+        return { port, frames, close: () => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(() => r()); }) };
+      };
+      for (const [what, hello] of [['a real Streamer.bot Hello (no source)', { request: 'Hello', info: { name: 'Streamer.bot', version: '1.0.7' } }], ['no Hello at all', null]]) {
+        const sn = await sentinel(hello);
+        const r = await quick('mock-discord-bridge.mjs', { SB_WS_URL: `ws://127.0.0.1:${sn.port}/` }, [], 9000);
+        await sn.close();
+        check(`mock:bridge pointed at a server that sent ${what}: names its target first, exits non-zero, and sends it nothing`,
+          !r.timedOut && r.code !== 0 && r.out.split('\n')[0].includes(`ws://127.0.0.1:${sn.port}/`) && sn.frames.length === 0, JSON.stringify({ code: r.code, timedOut: r.timedOut, frames: sn.frames.length, out: r.out.slice(0, 240) }));
+      }
+      const snOk = await sentinel({ request: 'Hello', info: { name: 'Streamer.bot', version: '1.0.7' } });
+      const rOk = await quick('mock-discord-bridge.mjs', { SB_WS_URL: `ws://127.0.0.1:${snOk.port}/` }, ['--allow-real-sb'], 2500);
+      await snOk.close();
+      check('mock:bridge --allow-real-sb drives such a server anyway (it subscribes and pushes)', snOk.frames.length >= 2 && snOk.frames.some((f) => /Subscribe/.test(f)) && snOk.frames.some((f) => /Discord Voice Push/.test(f)), String(snOk.frames.length));
+    }
 
     probe.close();
     producer.close();
