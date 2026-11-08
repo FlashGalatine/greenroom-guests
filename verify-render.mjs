@@ -411,7 +411,7 @@ async function main() {
       }
       return null;
     };
-    // Rows are keyed by their directory index (the inputs carry live values, not
+    // Rows are found by their data-idx (the entry's place in the book when the row was drawn; the inputs carry live values, not
     // value= attributes, so CSS can't match on the name).
     const rowByName = async (name) => {
       const idx = await ctrlPage.evaluate((n) => {
@@ -2347,7 +2347,7 @@ async function main() {
     // ── R15: directory edits commit from cfg, never from half-edited rows (GRN-72, 63, 71, 28, 96, 111, 134, 182) ──
     if (!ONLY || ONLY === 'directory') {
       console.log('\n[R15] directory: a half-edited row never reaches cfg or a push, an edit patches only its own field');
-      const R15_SECTIONS = 'abcdefgh'.split('');
+      const R15_SECTIONS = 'abcdefghijkl'.split('');
       for (const k of (process.env.R15_ONLY || '').split(',').filter(Boolean)) if (!R15_SECTIONS.includes(k)) throw new Error('R15_ONLY=' + k + ': the sections are ' + R15_SECTIONS.join(', '));
       const want = (k) => !process.env.R15_ONLY || process.env.R15_ONLY.split(',').includes(k);
       const DIR_D = [
@@ -2439,19 +2439,30 @@ async function main() {
         check('R15c: blanking a display name restores the old name with a "use × to remove" hint, loses no entry or social, and edits the right entry although the list was reordered by another page',
           !!shown && shown.name === 'Alpha Prime' && shown.hint && dir.length === 3 && !!alpha && alpha.socials.length === 1 && alpha.vdoLabel === 'ALPHA' && !!byName(dir, 'Bravo Boss') && !!byName(dir, 'Cee') && !dir.some((e) => e.auto),
           JSON.stringify({ shown, dir: dir.map((e) => e.displayName + '/' + e.vdoLabel + '/' + e.discordUserId + '/' + (e.socials || []).length) }));
+        // ...and a real edit of that row (its socials) still lands on Alpha, not on whoever is now first in the list
+        await x.api.clear();
+        await p.fill(rowSel(1) + ' textarea.vdo-dir-socials', 'twitch AlphaTV\nbluesky @a.b');
+        await p.keyboard.press('Tab');
+        await sleep(1500);
+        const ps2 = await pushPayloads(x);
+        const dir2 = ps2.length ? ps2[ps2.length - 1].directory : [];
+        check('R15c2: …and a real edit of that row (its socials) lands on Alpha: Bravo and Cee are unchanged in the push',
+          dir2.length === 3 && byName(dir2, 'Alpha Prime') && byName(dir2, 'Alpha Prime').socials.length === 2 && byName(dir2, 'Bravo Boss').socials.length === 0 && byName(dir2, 'Cee').socials.length === 0 && byName(dir2, 'Cee').discordUserId === '200000000000000001',
+          JSON.stringify(dir2.map((e) => e.displayName + '/' + e.vdoLabel + '/' + e.discordUserId + '/' + (e.socials || []).length)));
         await p.close();
       }
       // (d) A keyless draft survives another page's push and a reload, and reaches no push (GRN-96).
       if (want('d')) {
         const x = await seededMock(SEED_D);
         const p = await openControl(x, LIVE, SEED_D);
+        const names = () => p.evaluate(() => [...document.querySelectorAll('#vdoDirectory .vdo-dir-display')].map((i) => i.value));
         await p.click('#btnDirAdd');
         await p.keyboard.type('Keep me');
+        await p.keyboard.press('Tab'); // commits the draft
+        await p.focus('#vdoRoom'); // leaves the editor, so the next push is adopted and drawn at once
+        await sleep(500);
         await foreign(x, { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3, { label: 'ZULU' }), slot(4)] });
-        await sleep(700);
-        await p.keyboard.press('Tab');
-        await sleep(1200);
-        const names = () => p.evaluate(() => [...document.querySelectorAll('#vdoDirectory .vdo-dir-display')].map((i) => i.value));
+        await sleep(900);
         const afterPush = await names();
         await p.reload({ waitUntil: 'load' });
         await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, null, 8000);
@@ -2517,6 +2528,143 @@ async function main() {
         const kept = await p.evaluate(() => !!document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3)').__keep);
         check('R15g: collapsed directory rows build no pickers, and when only voice membership changes the live dot turns on in place (the row is not rebuilt)',
           pickers === 0 && !dotBefore && dotOn && kept, JSON.stringify({ pickers, dotBefore, dotOn, kept }));
+        await p.close();
+      }
+      // (h) S3's old-format mock (the actions broadcast the state as a nested object, which Streamer.bot's date handling rewrites): a
+      // date-shaped label in the room is never auto-added, on either page, so there is no push to answer a rewrite with (GRN-72, GRN-65).
+      if (want('h')) {
+        for (const which of ['control', 'min']) {
+          const x = await startExtra({ SB_WIRE: 'object' });
+          const seed = Object.assign({}, SEED_D, { directory: [] });
+          x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+          await sleep(300);
+          await x.api.clear();
+          const dateLabel = '2024-06-05T10:00:00';
+          const q = '?fixed=1&label=' + encodeURIComponent(dateLabel);
+          let p;
+          if (which === 'control') {
+            p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, q));
+            await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+          } else {
+            p = await newPage(browser, { width: 480, height: 120 }, mockDir(x, q));
+            await p.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+          }
+          await sleep(7000); // several polls and echoes
+          const ps = await pushPayloads(x);
+          const dated = ps.filter((r) => r.directory.some((e) => /^\d{4}-\d{2}-\d{2}T/.test(e.vdoLabel) || /^\d{4}-\d{2}-\d{2}T/.test(e.displayName)));
+          check('R15h' + (which === 'control' ? '1' : '2') + ': ' + which + ' on the old-format mock: a date-shaped label in the room is never auto-added, and the live guest next to it is added once (no push loop)',
+            dated.length === 0 && ps.length <= 2 && ps.some((r) => r.directory.some((e) => e.vdoLabel === 'BRAVO')), JSON.stringify({ pushes: ps.length, dated: dated.length }));
+          await p.close();
+        }
+      }
+      // (i) A draft that holds a label another guest already has (GRN-28, review): it is kept, and its row never edits the other guest.
+      if (want('i')) {
+        const mk = async () => {
+          const x = await seededMock(SEED_D);
+          const p = await openControl(x, LIVE, SEED_D);
+          await p.click('#btnDirAdd');
+          await p.fill(rowSel(4) + ' input.vdo-dir-label', 'BRAVO');
+          await p.fill(rowSel(4) + ' textarea.vdo-dir-socials', 'twitch ZedTV');
+          return { x, p };
+        };
+        const slotOnly = { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3, { label: 'ZULU' }), slot(4)] };
+        {
+          const { x, p } = await mk();
+          await p.keyboard.press('Tab'); // commits the label and the socials (still a draft: no name)
+          await p.focus('#vdoRoom');
+          await sleep(400);
+          await foreign(x, slotOnly);
+          await sleep(900);
+          const rows = await p.evaluate(() => [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].map((r) => r.querySelector('textarea.vdo-dir-socials').value));
+          check('R15i1: a draft whose label another guest already holds (with socials typed) survives another page\'s push', rows.length === 4 && rows.includes('twitch ZedTV'), JSON.stringify(rows));
+          await p.close();
+        }
+        {
+          const { x, p } = await mk();
+          await p.keyboard.press('Tab');
+          await p.focus(rowSel(4) + ' input.vdo-dir-display');
+          await foreign(x, slotOnly); // adopted while the draft's row is still open
+          await sleep(700);
+          await x.api.clear();
+          await p.keyboard.type('Zed');
+          await p.keyboard.press('Tab');
+          await sleep(1500);
+          const dir = await dirOf(x);
+          const bravo = byName(dir, 'Bravo Boss');
+          const zed = byName(dir, 'Zed');
+          check('R15i2: …and naming it afterwards adds a separate guest; the other guest keeps its name and has no new socials',
+            dir.length === 4 && !!bravo && bravo.socials.length === 0 && !!zed && zed.socials.length === 1, JSON.stringify(dir.map((e) => e.displayName + '/' + e.vdoLabel + '/' + (e.socials || []).length)));
+          await p.close();
+        }
+      }
+      // (j) A row whose entry another page re-keyed; the first saved config arriving while a row is mid-edit (GRN-28, review).
+      if (want('j')) {
+        const x = await seededMock(SEED_D);
+        const p = await openControl(x, LIVE, SEED_D);
+        await p.click(rowSel(2) + ' .dir-toggle');
+        await p.fill(rowSel(2) + ' input.vdo-dir-discord-id', '200000000000000007');
+        await foreign(x, { directory: [DIR_D[0], Object.assign({}, DIR_D[1], { vdoLabel: 'BRAVO2' }), DIR_D[2]] }); // another page re-labelled this guest
+        await sleep(700);
+        await x.api.clear();
+        await p.keyboard.press('Tab');
+        await sleep(1500);
+        const dir = await dirOf(x);
+        const bravo = dir.find((e) => e.displayName === 'Bravo Boss');
+        check('R15j1: an entry another page re-labelled while its row is open takes the edit (one guest, no duplicate, nobody else changed)',
+          dir.length === 3 && !!bravo && bravo.vdoLabel === 'BRAVO2' && bravo.discordUserId === '200000000000000007' && !!byName(dir, 'Alpha Prime') && !!byName(dir, 'Cee'), JSON.stringify(dir.map((e) => e.displayName + '/' + e.vdoLabel + '/' + e.discordUserId)));
+        await p.close();
+        // the saved config arrives while a draft is being typed: no "has not returned your saved config" prompt at that moment
+        const y = await startExtra({ SYNC_DELAY_MS: '9000' });
+        y.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_D) });
+        await sleep(300);
+        const dialogs = [];
+        const q = await newPage(browser, { width: 920, height: 1300 });
+        q.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
+        await q.goto(y.api.base + '/control/control.html?sbport=' + y.ws, { waitUntil: 'load' });
+        await sleep(600);
+        await q.click('#btnDirAdd');
+        await q.keyboard.type('Q');
+        await wait(q, () => document.getElementById('vdoRoom')?.value === 'dirroom', null, 16000);
+        await sleep(800);
+        check('R15j2: the saved config arrives while a new guest is being typed: no "Streamer.bot has not returned your saved config" prompt', dialogs.length === 0, JSON.stringify(dialogs));
+        await q.close();
+      }
+      // (k) After a commit the row's summary is current when the operator leaves the editor, and the live dots keep updating while focus stays (review).
+      if (want('k')) {
+        const x = await seededMock(SEED_D);
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?fixed=1&delay=600000'));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, null, 8000);
+        await sleep(600);
+        await p.click('#btnDirAdd');
+        await p.keyboard.type('Zed');
+        await p.fill(rowSel(4) + ' input.vdo-dir-label', 'CHARLIE');
+        await p.keyboard.press('Tab');
+        await p.focus('#vdoRoom'); // leaves the editor
+        await sleep(600);
+        const meta = await p.evaluate(() => document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(4) .dir-meta')?.textContent || '');
+        check('R15k1: a draft completed in the editor shows its saved summary once the editor is left (no waiting for a poll)', /label CHARLIE/.test(meta) && !/not saved/.test(meta), meta);
+        // focus stays inside the editor after a commit: the voice dots still follow
+        await p.click(rowSel(1) + ' .dir-toggle');
+        await p.fill(rowSel(1) + ' textarea.vdo-dir-socials', 'twitch AlphaTV\nbluesky @a.b');
+        await p.keyboard.press('Tab'); // commits; focus stays in the editor
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        const dotOn = await wait(p, () => document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3) .dir-dot')?.classList.contains('live'), null, 5000);
+        check('R15k2: after a commit with focus still in the editor, a guest joining the voice channel still turns that row\'s dot on', dotOn);
+        await p.close();
+      }
+      // (l) Import replaces the book: live guests missing from the file are auto-added again (the once-per-session guard is reset) (review).
+      if (want('l')) {
+        const seed = Object.assign({}, SEED_D, { directory: [] });
+        const x = await seededMock(seed);
+        const p = await openControl(x, LIVE, seed);
+        p.on('dialog', (d) => d.accept());
+        await sleep(3500); // a poll adds ALPHA and BRAVO
+        await x.api.clear();
+        await p.setInputFiles('#cfgImportFile', { name: 'empty.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, seed, { directory: [] }) })) });
+        await sleep(4500); // the import, then the next poll
+        const ps = await pushPayloads(x);
+        check('R15l: after an Import whose book lacks the live guests, the next poll adds them again', ps.some((q) => q.directory.some((e) => e.vdoLabel === 'ALPHA')), JSON.stringify(ps.map((q) => q.directory.length)));
         await p.close();
       }
     }

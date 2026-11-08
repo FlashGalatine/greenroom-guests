@@ -151,9 +151,13 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   (the label / the Discord username) and flagged `auto: true` — so a guest who
   joins mid-stream has a nameplate without an operator present. `auto` means "this
   name is a placeholder"; the control page badges those rows and clears the flag
-  the moment the operator edits the name. A Discord user whose username equals an
+  the moment the operator edits any field of the entry. A Discord user whose username equals an
   existing entry's `displayName` or `vdoLabel` fills that entry's empty
-  `discordUserId` instead of creating a twin.
+  `discordUserId` instead of creating a twin. A page appends a given label or voice
+  user at most once per page session (so a label that Streamer.bot rewrites on the
+  way back cannot make the pages push at each other); **Un-ignore removed**,
+  **Clear auto-added** and an Import reset that, and adopting another page's state
+  runs no auto-add of its own (the next poll or voice update does).
   `directoryAutoAdd: false` disables the whole pass (absent → **on**, so
   pre-upgrade `vdo.state` blobs opt in). `directoryIgnored` is the
   anti-resurrection list — sorted, deduped keys `vdo:<lowercased label>` /

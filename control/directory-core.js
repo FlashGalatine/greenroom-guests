@@ -10,7 +10,7 @@
 //   directoryIgnored:   [ "vdo:<lowercased label>" | "discord:<snowflake>" ]
 //
 // `auto` marks a placeholder name the page invented from a live guest (the VDO
-// label or the Discord username); the operator's first edit of that name clears
+// label or the Discord username); any edit the operator makes to the entry clears
 // the flag. `directoryIgnored` is the anti-resurrection list: removing an entry
 // (or clearing one of its match keys) records the key so the next poll doesn't
 // re-add the guest a second later.

@@ -478,6 +478,11 @@
   // config to arrive, except for the field being typed in at that moment (handle()).
   const dirty = new Set();
   let slotsDeferred = false; // a slots render held back because a Discord ID is being typed; it runs when the field is left
+  // A held-back redraw never runs between a mouse press and its release: it would replace the element under the pointer and lose the click.
+  let pointerDown = false;
+  document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+  document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+  document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
   const dirOpen = new Set(); // expanded directory rows, by entry id (LID; view state only)
 
   // Directory sanitizers, the socials-textarea grammar, and the auto-populate
@@ -806,10 +811,9 @@
       const drafts = oldDir.filter(isDraft); // this page's unfinished rows (GRN-96)
       if (!adoptCfg(v)) return; // not config-shaped: drop it
       carryLids(oldDir, cfg.directory); // an open or half-edited row keeps its entry
-      reappendDrafts(drafts);
-      if (firstSync) reappendDrafts(loadDrafts()); // drafts from before a reload
+      reappendDrafts(drafts, oldDir);
+      if (firstSync) reappendDrafts(loadDrafts(), []); // drafts from before a reload
       gotConfig = true; syncedByMarker = false; // a real config reached this page
-      if (firstSync) releaseFocusForAdoption();
       markSynced();
       // The first saved config to arrive replaces the form: what was typed before it was never saved against it (a declined Save,
       // text typed during the hydrate window), so those marks go. A field being typed in right now keeps its text (a render never
@@ -822,6 +826,8 @@
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
       // equal what we just adopted.
       lastPushedSig = JSON.stringify(assemblePayload());
+      // Release a focused slot or directory control only now, synced and baselined: a pending edit it commits is then an ordinary push.
+      if (firstSync) releaseFocusForAdoption();
       renderAll();
       if (heal) { cfg.slots.forEach((s) => { s.streamID = ''; }); hasRoster = false; renderSlots(true); }
       // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding here
@@ -1129,6 +1135,7 @@
   });
   function flushSlots() {
     if (!slotsDeferred) return;
+    if (pointerDown) { clearTimeout(slotsFlushTimer); slotsFlushTimer = setTimeout(flushSlots, SLOTS_FLUSH_MS); return; }
     const ae = document.activeElement;
     if (ae && ae.tagName === 'SELECT' && els.slots.contains(ae)) {
       // The operator has just moved onto a pick box: rebuilding it now would snap its list shut. Redraw once it is left.
@@ -1141,12 +1148,16 @@
   // ── Guest directory section ───────────────────────────────────────────────
   // Rows are collapsed summaries — live dot · display name · match keys — that
   // expand into the full editor; the search box and "live only" decide which ones
-  // render at all. Entries filtered OUT still live in cfg.directory: every DOM
-  // read MERGES by the row's data-idx instead of rebuilding the array, so
-  // narrowing the search can never drop a guest.
+  // render at all. Entries filtered OUT still live in cfg.directory, which is the
+  // only copy of the book: nothing reads the whole directory back from the page.
+  // Each entry has a page-local id (LID); a row carries it and the values it was drawn
+  // showing (data-base*), and a change (commitRow) writes only the fields that differ
+  // from them, on the entry found by id.
   //
-  // Same guards as renderSlots: signature-deduped (the Discord feed would
-  // otherwise rebuild this ~10×/s) and skipped while the operator is mid-edit.
+  // Rendering is signature-deduped (the Discord feed would otherwise rebuild this
+  // ~10×/s); when only voice membership changed the dots and pick lists are updated in
+  // place, and while the operator is inside the editor the rows are not redrawn but
+  // marked stale (dirStale) and redrawn when focus leaves.
   function entryLive(entry, liveSet, users) {
     const vdo = !!(entry.vdoLabel && liveSet.has(String(entry.vdoLabel).trim().toLowerCase()));
     const disc = !!(entry.discordUserId && users[entry.discordUserId]);
@@ -1182,12 +1193,30 @@
           || (e.discordUserId && o.discordUserId && e.discordUserId === o.discordUserId)));
       if (m) { e[LID] = m[LID]; used.add(m[LID]); }
     }
+    // an entry whose only key was changed by the other writer: pair what is left by on-stream name
+    for (const e of newDir) {
+      if (e[LID] || !String(e.displayName ?? '').trim()) continue;
+      const name = String(e.displayName).trim().toLowerCase();
+      const m = oldDir.find((o) => o[LID] && !used.has(o[LID]) && String(o.displayName ?? '').trim().toLowerCase() === name);
+      if (m) { e[LID] = m[LID]; used.add(m[LID]); }
+    }
   }
-  // Drafts (isDraft entries) are the page's own work in progress: they survive another writer's state (re-appended after it is
-  // adopted unless the adopted book already has their label or user) and a reload (localStorage, never the wire).
-  function reappendDrafts(drafts) {
+  // Drafts (isDraft entries) are the page's own work in progress: they survive another writer's state and a reload (localStorage,
+  // never the wire). A draft whose key the adopted book holds is dropped only when that key is NEW to the book (another page, or
+  // auto-add, made the entry for the same guest: the draft is absorbed, and gives its name and socials to that entry while it is
+  // still a placeholder). If another entry already held the key before the adoption, the draft is a duplicate-key draft in
+  // progress and stays.
+  function reappendDrafts(drafts, oldDir) {
+    const sameKey = (a, b) => (a.vdoLabel && b.vdoLabel && GRDir.labelKey(a.vdoLabel) === GRDir.labelKey(b.vdoLabel)) || (a.discordUserId && b.discordUserId && a.discordUserId === b.discordUserId);
     for (const d of drafts) {
-      if ((d.vdoLabel && GRDir.findByLabel(cfg.directory, d.vdoLabel)) || (d.discordUserId && GRDir.findByUserId(cfg.directory, d.discordUserId))) continue;
+      const hit = (d.vdoLabel && GRDir.findByLabel(cfg.directory, d.vdoLabel)) || (d.discordUserId && GRDir.findByUserId(cfg.directory, d.discordUserId));
+      if (hit && hit !== d && !oldDir.some((o) => o !== d && sameKey(d, o))) {
+        if (hit.auto) {
+          if (String(d.displayName ?? '').trim()) { hit.displayName = d.displayName; hit.auto = false; }
+          if ((d.socials || []).length) { hit.socials = d.socials; hit.auto = false; }
+        }
+        continue;
+      }
       if (!cfg.directory.includes(d)) cfg.directory.push(d);
     }
   }
@@ -1304,7 +1333,11 @@
       if (liveSig !== dirLiveSig) { dirLiveSig = liveSig; updateDirectoryLive(live, liveSet, users); } // membership only: in place
       return;
     }
-    if (els.directory.contains(document.activeElement)) { dirStale = true; return; } // operator mid-edit: redraw when focus leaves
+    if (els.directory.contains(document.activeElement)) { // operator mid-edit: the rows are redrawn when focus leaves; the dots and pick lists still follow
+      dirStale = true;
+      if (liveSig !== dirLiveSig) { dirLiveSig = liveSig; updateDirectoryLive(live, liveSet, users); }
+      return;
+    }
     dirStale = false;
     dirSig = sig;
     dirLiveSig = liveSig;
@@ -1440,7 +1473,12 @@
     if (!dirStale) return;
     if (e.relatedTarget && els.directory.contains(e.relatedTarget)) return; // still inside the editor
     clearTimeout(dirFlushTimer);
-    dirFlushTimer = setTimeout(() => { if (dirStale) renderDirectory(true); }, 150);
+    const flush = () => {
+      if (!dirStale) return;
+      if (pointerDown) { dirFlushTimer = setTimeout(flush, 150); return; }
+      renderDirectory(true);
+    };
+    dirFlushTimer = setTimeout(flush, 150);
   });
 
   // What a row is showing right now, raw (the base it was drawn with is in its data attributes).
@@ -1455,14 +1493,19 @@
   function setBase(row, b) {
     row.dataset.baseLabel = b.label; row.dataset.baseDisc = b.disc; row.dataset.baseName = b.name; row.dataset.baseSocials = b.socials;
   }
-  // The entry a row belongs to: by its page id; if another writer's state has been adopted since the row was drawn, by the keys the
-  // row was drawn showing (and the row takes that entry's id from then on).
+  // The entry a row belongs to: by its page id. If another writer's state has been adopted since the row was drawn and nothing in it
+  // carried the id over, by the keys the row was drawn showing, but only an entry that also agrees on the on-stream name: the page
+  // never guesses between guests (the row takes the id of the entry it finds).
   function rowTarget(row) {
     const lid = Number(row.dataset.lid);
     const hit = cfg.directory.find((e) => e[LID] === lid);
     if (hit) return hit;
     const b = baseOf(row);
-    const e = (b.label.trim() && GRDir.findByLabel(cfg.directory, b.label)) || (b.disc && GRDir.findByUserId(cfg.directory, b.disc)) || null;
+    const name = b.name.trim().toLowerCase();
+    const agrees = (e) => !!e && !!name && String(e.displayName ?? '').trim().toLowerCase() === name;
+    const byLabel = b.label.trim() && GRDir.findByLabel(cfg.directory, b.label);
+    const byUser = b.disc && GRDir.findByUserId(cfg.directory, b.disc);
+    const e = (agrees(byLabel) && byLabel) || (agrees(byUser) && byUser) || null;
     if (e) e[LID] = lid;
     return e;
   }
@@ -1481,7 +1524,15 @@
     const b = baseOf(row);
     const lid = Number(row.dataset.lid);
     let e = rowTarget(row);
-    if (!e) { // another page removed the entry while this row was open: this edit brings it back
+    if (!e && ((b.label.trim() && GRDir.findByLabel(cfg.directory, b.label)) || (b.disc && GRDir.findByUserId(cfg.directory, b.disc)))) {
+      // The keys this row was drawn with now belong to a guest it cannot tell apart from its own (another page changed it): do not guess
+      // which entry the edit is for. Show the book as it is now.
+      dirSig = ''; dirStale = true;
+      setCfgStatus('A guest you were editing was changed on another page, so its row was reloaded. Make the edit again.');
+      renderDirectory(true);
+      return;
+    }
+    if (!e) { // another page removed the entry while this row was open (or it is a draft that is gone): this edit brings it back
       e = { vdoLabel: b.label.trim(), discordUserId: b.disc, displayName: b.name.trim(), socials: GRDir.parseSocialsText(b.socials), auto: false };
       e[LID] = lid;
       cfg.directory.push(e);
@@ -1529,8 +1580,12 @@
       if (badge) badge.remove();
     }
     setBase(row, b);
-    dirSig = ''; // the rows are redrawn by the next render that finds the operator elsewhere (never under the Tab that caused this)
-    renderDirectoryCounts(); // the counts and the footer buttons follow at once
+    // The rows are redrawn when the operator leaves the editor (never under the Tab that caused this); until then this row's summary
+    // is refreshed in place and the counts and footer buttons follow at once.
+    dirSig = ''; dirStale = true;
+    const meta = row.querySelector('.dir-meta');
+    if (meta) { meta.textContent = metaText(e, e.discordUserId ? ((discord && discord.users) || {})[e.discordUserId] : null) || 'no match key yet'; meta.title = meta.textContent + ' — click to edit'; }
+    renderDirectoryCounts();
     if (touched) operatorAction(() => assembleAndPush(false));
   }
 
@@ -1610,7 +1665,7 @@
     const btn = e.target.closest('.vdo-dir-remove');
     if (!btn) return;
     const entry = rowTarget(row);
-    if (!entry) { dirSig = ''; renderDirectory(true); return; } // already gone
+    if (!entry) { dirSig = ''; btn.blur(); renderDirectory(true); return; } // already gone
     const hasContent = entry.vdoLabel || entry.discordUserId || entry.displayName || (entry.socials || []).length;
     if (hasContent && !confirm(`Remove "${entry.displayName || entry.vdoLabel || entry.discordUserId}" from the directory?\n\nThey will not be auto-added again (undo with "Un-ignore removed").`)) return;
     ignoreKeys(entry.vdoLabel && GRDir.labelKey(entry.vdoLabel), entry.discordUserId && GRDir.userKey(entry.discordUserId));
@@ -2161,7 +2216,8 @@
       dirty.clear(); // an import replaces what was typed
       hydrated = true;
       gotConfig = true; syncedByMarker = false; // this page now holds a real config
-      dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
+      dirOpen.clear(); // a different directory → the open-row ids are meaningless
+      autoAdded.clear(); // a new book: live guests it lacks are added again by the next poll
       blankIfOffOrMoved(prev); // a disabled backup, or one that moves to another room, carries no live streams
       const sentBefore = pushSeq;
       renderAll(); // (switching a running director off pushes the blank state itself)
