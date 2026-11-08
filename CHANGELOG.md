@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.34] — 2026-11-08
+
+**Update in this order: back up, update the pages, then re-paste the actions.** Run `npm run backup` first, while the old actions are still in place. Update the whole Greenroom folder (the pages and `backup.mjs`), restart OBS or refresh every Greenroom source, and reload the dock, `director-min` and any control page open in a browser tab. Only then re-paste `VDO Push`, `VDO Sync` and `Discord Voice Push` into Streamer.bot and compile each. Re-pasting first has a price: a guest slot, nameplate or roster source still older than 1.0.29 shows nothing as soon as the new frames arrive, and a dock or `director-min` source older than 1.0.24 can overwrite your saved `vdo.state` with its defaults.
+
+A guest or Discord user whose name looks like a timestamp can no longer break the overlays or damage your saved config. The three state actions now send the saved state as one escaped string, so Streamer.bot's own JSON parser never reads it.
+
+### Fixed
+
+- **A name that looks like a date no longer rewrites your guest labels or stops the broadcast.** Streamer.bot re-formatted date-shaped text inside the old nested state (a guest labelled `2024-02-03T04:05:06.000Z` came back as `…06Z`, so no slot matched the guest and the cam stayed blank, and the pages then pushed the rewritten label into your saved config), and for a value outside the date range it refused to broadcast at all (an "SB action error" on the dock, and a `director-min` showing no saved config). A guest could cause this just by choosing such a display name. The state now travels as `vdoninjaJson` and `discordVoiceJson`, unchanged. The pages read both the new and the old shape.
+- **A failed broadcast no longer leaves a saved state behind.** `VDO Push` and `Discord Voice Push` broadcast first and save second, so a state no client has seen is never kept.
+- **One failed `VDO Sync` replay no longer stops the other.** Each replay has its own `try`, and an error report that itself fails cannot end the action.
+- **A fresh install is told so.** With nothing saved, `VDO Sync` answers `{"type":"vdo:sync:empty"}`, which the control pages (since 1.0.24) read as "synced, nothing saved" instead of waiting for a reply that never comes.
+- **`npm run backup` reads both shapes** (it is run before the actions are re-pasted), says what a failing `VDO Sync` or `VDO Push` reported instead of suggesting an edit, and says when its copy came through the old format (which re-formats date-shaped names): take a fresh backup after the update.
+- **The dock and `director-min` say the right thing.** The empty-state marker no longer cancels a Save you confirmed (the dock claimed "the saved config arrived"); a saved config Streamer.bot cannot read is called damaged, not "a fresh install"; and the "date-like text" hint appears only for Streamer.bot's own date failure, not for every error.
+- **Comments and docs say what the code does.** The actions no longer claim "vdo first" or that a stale stream ID replays for at most 2.5 s, and point at the dedicated blocking `Greenroom State` queue. `PROTOCOL.md` and the setup guide now say that an ok ack only means the action started, that an invalid argument or an exception shows as an error broadcast, that an action that failed to compile is silent (so always click Compile), and that `Discord Bridge Start` only logs.
+
+### Added
+
+- **Damaged state is refused.** `VDO Push` and `Discord Voice Push` accept only one valid JSON object (no repeated key, nesting at most 32 deep) and answer anything else with `payload rejected, NOT cached`. `VDO Sync` checks each saved state before replaying it; an invalid one is reported ("cached state is not valid JSON - Import a backup or re-save"), not replayed, and kept, never deleted. This is a separate commit and can be taken out without touching the string-field change.
+- **`npm run verify:cs`** compiles the three actions as shipped with the C# compiler that comes with .NET Framework 4 (against `mscorlib` only, which is stricter than Streamer.bot's editor) and runs them against a stub of Streamer.bot: every frame, the order of calls, and 26,036 fuzzed payloads against a plain JavaScript check. Set `GREENROOM_NEWTONSOFT_DLL` to Streamer.bot's `Newtonsoft.Json.dll` and it also parses each frame the way Streamer.bot does. It skips itself when no C# compiler is found.
+- Test support: the mock Streamer.bot sends string fields by default, answers an empty `vdo.state` with the marker, and refuses damaged payloads. `SB_WIRE=object` keeps the old behaviour (nested objects, cache before broadcast, one `try` around Sync, and an emulation of Streamer.bot's date handling checked against the real library) so the pages' compatibility with an old paste stays tested. `verify` and `verify:render` cover the old and new wire, and a guest label shaped like a timestamp goes through the guest overlay, the dock and `director-min` together: green with string fields, red in object mode.
+
+**Deploy:** back up, copy `control/` and `overlay/`, restart OBS, then re-paste and compile `VDO Push`, `VDO Sync` and `Discord Voice Push` (see the top of this entry). No bridge restart. `verify` 154/154, `verify:render` 192/192, `verify:cs` 57/57.
+
 ## [1.0.29] — 2026-11-07
 
 The overlays and control pages share one, more careful way of talking to Streamer.bot: they connect once the page is ready, check what Streamer.bot answers, reconnect quickly, and accept the string-field state frames a later action release will send. Nothing to re-paste: this release works with the actions you already have.
@@ -184,6 +208,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.34]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.29...v1.0.34
 [1.0.29]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.24...v1.0.29
 [1.0.24]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.17...v1.0.24
 [1.0.17]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.13...v1.0.17
