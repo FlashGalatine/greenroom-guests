@@ -9,6 +9,24 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.37] — 2026-11-08
+
+Developer tooling only: nothing to copy, re-paste, restart or refresh. The repo's own scripts can no longer write into a running Streamer.bot.
+
+### Fixed
+
+- **The mock Streamer.bot can no longer be mistaken for the real one.** It listens on :7478 (HTTP) and :8084 (WebSocket) instead of Streamer.bot's :7474 and :8080, refuses to start when either port is already taken (on loopback or on all interfaces), greets every connection with a Hello whose `info.source` is `mock`, and serves the control and overlay pages only with `?sbport`: a request without it is redirected to the same URL with this mock's port, so a page it serves never falls back to the default port. `npm run mock` replaces `npm start`.
+- **`npm run mock:bridge` acts only on the mock.** It prints its target first, subscribes and pushes only after a Hello that says `source: "mock"`, and otherwise says why and exits without sending a byte. `--allow-real-sb` overrides that on purpose; the header says what it then does (the real sidecar also obeys the commands it sends, and its pushes overwrite the live roster).
+- **The test scripts pass an allowlisted environment to everything they start.** An exported `SB_WS_URL` used to steer the mock bridge, and `backup.mjs`, at whatever it named. With a listener that must never be spoken to (`tools/sentinel.mjs`) in its place, the old `verify` sent it a `Subscribe` and a `Discord Voice Push`; `verify` and `verify:render` now send it nothing.
+- **The mock survives bad input.** A frame that is not a JSON object, an action with no name or arguments, an abrupt close, and a request path with a malformed `%` escape (now a 400) no longer end the process. The mock matches `Subscribe`'s source and type without regard to case.
+- **The test scripts wait for the right thing.** The mock prints one `[mock] READY http=<port> ws=<port>` line once both listeners are up, and the scripts wait for exactly that and fail if the child exits first. `verify`'s exit-on-close ports derive from its own (so it and `verify:render` can run together), its sidecar guard ports come from `VERIFY_GUARD_BASE`, the "off" sidecar is told its setting explicitly and given its full grace time, and a missing sidecar install is one clear failure instead of a stack trace.
+
+### Changed
+
+- `playwright-core` is now a pinned `devDependency`, so a plain `npm install` keeps it (the README no longer asks for `npm install --no-save`). The README says which install is which and how to drive a real Streamer.bot on purpose.
+
+**Deploy:** none for a streamer. Developers: run `npm run mock` (new ports); `npm run mock:bridge -- --allow-real-sb` with `SB_WS_URL` set drives a real Streamer.bot. `verify` 175/175, `verify:render` 192/192.
+
 ## [1.0.34] — 2026-11-08
 
 **Update in this order: back up, update the pages, then re-paste the actions.** Run `npm run backup` first, while the old actions are still in place. Update the whole Greenroom folder (the pages and `backup.mjs`), restart OBS or refresh every Greenroom source, and reload the dock, `director-min` and any control page open in a browser tab. Only then re-paste `VDO Push`, `VDO Sync` and `Discord Voice Push` into Streamer.bot and compile each. Re-pasting first has a price: a guest slot, nameplate or roster source still older than 1.0.29 shows nothing as soon as the new frames arrive, and a dock or `director-min` source older than 1.0.24 can overwrite your saved `vdo.state` with its defaults.
@@ -208,6 +226,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.37]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.34...v1.0.37
 [1.0.34]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.29...v1.0.34
 [1.0.29]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.24...v1.0.29
 [1.0.24]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.17...v1.0.24
