@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.46] — 2026-11-08
+
+The dock and the `director-min` source now change only what the operator touched. Switching the director off, clearing or changing the room, editing one slot, typing a Room or Password, and copying a link each do exactly one thing, and none of them can write a stale screen over what another page just saved.
+
+### Fixed
+
+- **Switching the director off, clearing the room, or moving to another room sends ONE push, and it carries no live stream IDs.** Before, Save pushed first (with the old room's IDs) and then pushed again once the director stopped, so the overlays saw the cams for a moment. The director is now switched first and the push that follows is blank. This follows the config, not the director frame: a dock opened by LAN name (no secure context, so no director frame) and a backup Import while the director is off blank the IDs too, and an Import that switches a running director off is one push, not two. Moving to another room (or password) starts with empty IDs, so a stream from the old room is never shown under the new one.
+- **`director-min` can no longer put the cams back on air after a disable.** Adopting the blank push used to re-resolve its own live roster into the config, and its next auto-add push (a Discord join, say) re-armed the cams even with the director off and `control.html` closed. A disabled config, or one with no room, now has no live streams on either page. A saved state that is switched off but still holds stream IDs (left by an older race) is blanked once by the first page that reads it.
+- **A slot edit changes one field of one slot.** The slots panel used to re-read all four slots from the screen on every change. While a Discord ID was being typed the panel is not redrawn, so the screen could be behind what another page had just saved, and the edit wrote that stale text back over it. A change now patches the field that fired, and picking a different label empties that slot's stream until the director resolves it.
+- **The panel is no longer frozen while a pick box has focus.** Only a Discord ID being typed holds a redraw back; it runs when the field is left (and waits while the operator is on a pick box, so a list they just opened is not snapped shut). A guest who joins now shows up in the pickers while a slot's box is focused, and the focused control keeps its focus across the redraw.
+- **A committed pick or toggle no longer keeps the focus.** A stray key or a wheel turn on the label, mode or Discord-user box, or Space on Mirror, could swap, blank or flip the on-air slot; the control is released as soon as the change is made. The Copy and Open buttons are released after use too.
+- **The "director enabled" box changes the director only.** It used to save the Room, Password and viewFlags text you were still typing as well. Those still need Save, and the "unsaved changes" badge says so.
+- **Room, Password and viewFlags you have typed but not saved survive.** Another page's push used to overwrite the half-typed text. It is now kept, an "unsaved changes" badge shows and Save is outlined; a push that makes the saved value equal the text clears the mark, and otherwise only Save or Import clears it (so does the first saved config to arrive, except for the field you are typing in at that moment).
+- **A Save or a tick you decline before the saved config has arrived changes nothing.** Before, the page kept the declined room and started its director in it once Streamer.bot reported an empty state.
+- **The invite and manage links follow the saved room and password,** not the half-typed text, and say "unsaved: press Save" while either is unsaved. A link copied mid-edit used to name a room the director was not in.
+- **Copy says what happened.** "Copied" shows only when the copy worked; otherwise "Copy failed — select & Ctrl+C" (a slot's Copy says "Copy failed") and the link stays selected. A double-clicked Copy no longer sticks on "Copied", and the button no longer keeps focus.
+- **A reply from a director frame that has since been pointed elsewhere is dropped.** The poll carries the frame's generation (`sb-vdo:<n>` / `sb-vdo-min:<n>`) and a reply tagged for another one is ignored; a reply with no tag is still read.
+
+### Added
+
+- Tests: `verify` gains the poll-tag checks; `verify:render` has a new gestures section (R14: one push per gesture, a slot edit with focus in the panel, the heal, the disable-then-Discord-join case, an insecure dock, Import with the director off, typed fields, links, Copy, a poll in flight at an untick). `RENDER_ONLY=gestures` runs it alone, and `R14_ONLY=a,b` picks its sections.
+
+**Deploy:** copy the `control/` folder, reload the dock and refresh the `director-min` source. Nothing to re-paste, nothing to restart. `verify` 245/245, `verify:render` 243/243.
+
 ## [1.0.43] — 2026-11-08
 
 The dock and the `director-min` source no longer trust the vdo.ninja director's guest list when it is not real. A director that has just started, one that only knows some of the guests, one that has gone quiet, or one whose reply has changed shape can no longer blank a guest who is on air.
@@ -267,6 +291,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.46]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.43...v1.0.46
 [1.0.43]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.40...v1.0.43
 [1.0.40]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.37...v1.0.40
 [1.0.37]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.34...v1.0.37
