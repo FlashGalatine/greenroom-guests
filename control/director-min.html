@@ -41,6 +41,7 @@
 <span id="status">greenroom director: boot…</span>
 <iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
 <script src="vdo-parse.js"></script>
+<script src="director-loop.js"></script>
 <script src="directory-core.js"></script>
 <script>
 (function () {
@@ -87,7 +88,6 @@
   const POLL_MS = 2500;
   const FIRST_PROBE_MS = 1500;
   const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
-  const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
 
   // Wire compatibility (same rules as control.html). Fields this page does not know pass
   // through every push; `rev` and `writer` are reserved for a later release and are never
@@ -116,6 +116,27 @@
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {},
     directory: [], directoryAutoAdd: true, directoryIgnored: [], extra: {} };
+  // The director iframe's loop (control/director-loop.js), shared with control.html: a Worker tick, replies only from the
+  // frame and the allowed origins, silence named, reload with backoff, and the settle session for stream IDs.
+  const directorLoop = GRDirector.create({
+    iframe: director, base: DIRECTOR_BASE, cib: 'sb-vdo-min', pollMs: POLL_MS, firstProbeMs: FIRST_PROBE_MS,
+    extraOrigins: window.__VDO_DIRECTOR_EXTRA_ORIGINS || [], timing: window.__VDO_DIRECTOR_TIMING,
+    hooks: {
+      connecting: () => show(`room ${cfg.room} · director connecting…`),
+      hint: () => show(`room ${cfg.room} · director still connecting… check the room, the password and that vdo.ninja is reachable`),
+      // Quiet for about 3 polls: keep the last resolved stream IDs (a push never blanks them), say so.
+      silent: () => { hasRoster = false; show('director not responding'); },
+      retrying: () => show('director not responding, retrying'),
+      unrecognised: () => show('director: reply unrecognised - check vdo.ninja version'),
+      reply: (r) => {
+        roster = r;
+        hasRoster = true;
+        show(`room ${cfg.room} · ${roster.length} guest(s)`);
+        runAutoAdd(); // new label in the room → placeholder nameplate entry
+        assembleAndPush(true); // auto-follow: re-resolve every poll
+      },
+    },
+  });
   let roster = [];
   let hasRoster = false;
   // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
@@ -125,7 +146,6 @@
   let syncTimer = null;
   let lastPushedSig = '';
   let frameUrl = '';
-  let pollTimer = null;
   let discordUsers = {};    // last discord:voice:update users map (auto-add input only)
 
   // The directory sanitizers + auto-populate live in directory-core.js, shared
@@ -234,11 +254,17 @@
   }
 
   function assemblePayload() {
-    const byLabel = new Map(roster.map((g) => [g.label, g.streamID]));
+    const nowMs = Date.now();
     const slots = cfg.slots.map((s, i) => {
-      const streamID = hasRoster
-        ? (s.label ? (byLabel.get(s.label) || '') : '')
-        : String(s.streamID || '');
+      // Same rule as control.html: an empty label never carries a stream; with a current roster the shared resolver decides
+      // (sticky for a shared label, held while the director settles, blank at once for a guest seen and lost); with none,
+      // the held resolution is kept.
+      let streamID;
+      if (!s.label) streamID = '';
+      else if (hasRoster) {
+        const live = VdoParse.resolveSlot(roster, s.label, s.streamID, '');
+        streamID = VdoParse.resolveSlotID(s.label, s.streamID, new Map([[s.label, live]]), directorLoop.sess, nowMs, VdoParse.SETTLE_MS);
+      } else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
         slot: i + 1,
@@ -458,6 +484,7 @@
   // ── Director iframe + loop (same as control.html, minus the editor) ────────
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
+    if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
     const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
     let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
     if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
@@ -467,46 +494,20 @@
 
   function syncDirectorFrame() {
     const url = directorUrl();
+    if (!url && cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/');
     if (url === frameUrl) return;
     frameUrl = url;
     if (url) {
-      director.src = url;
-      show(`room ${cfg.room} · director connecting…`);
-      startPolling();
+      directorLoop.start(url); // points the frame at the room, starts the poll, begins a fresh settle session
     } else {
-      director.src = 'about:blank';
-      stopPolling();
+      directorLoop.stop();
       roster = [];
       hasRoster = false;
-      show(cfg.enabled ? 'no room configured' : 'director disabled');
+      show(cfg.enabled && cfg.room && !window.isSecureContext ? 'director needs a secure page: open via http://127.0.0.1:<port>/' : (cfg.enabled ? 'no room configured' : 'director disabled'));
     }
   }
 
-  function startPolling() {
-    stopPolling();
-    pollTimer = setInterval(pollGuestList, POLL_MS);
-    setTimeout(pollGuestList, FIRST_PROBE_MS);
-  }
-  function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  }
-  function pollGuestList() {
-    if (!frameUrl || !director.contentWindow) return;
-    try {
-      director.contentWindow.postMessage({ getGuestList: true, cib: 'sb-vdo-min' }, DIRECTOR_ORIGIN);
-    } catch (_) { /* iframe not ready yet */ }
-  }
-
-  window.addEventListener('message', (e) => {
-    if (e.origin !== DIRECTOR_ORIGIN) return;
-    const d = e.data;
-    if (!d || typeof d !== 'object' || !('guestList' in d)) return;
-    roster = VdoParse.parseGuestList(d);
-    hasRoster = true;
-    show(`room ${cfg.room} · ${roster.length} guest(s)`);
-    runAutoAdd(); // new label in the room → placeholder nameplate entry
-    assembleAndPush(true); // auto-follow: re-resolve every poll
-  });
+  window.addEventListener('message', (e) => directorLoop.onMessage(e));
 
   if (!WS_URL) { // an invalid ?sbport: say so, and never connect (nor fall back to 8080)
     connProblem = 'invalid ?sbport (use a port number, 1-65535)';

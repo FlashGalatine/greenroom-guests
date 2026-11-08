@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11).
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn' and 'labels' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels' and 'roster' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -1650,6 +1650,157 @@ async function main() {
       check('R12: …still true after the page has waited longer than the "names both causes" timer',
         /damaged/i.test(await pgDm.evaluate(() => document.getElementById('status')?.textContent || '')) && /damaged/i.test(await pgDc.evaluate(() => document.getElementById('syncStatus')?.textContent || '')));
       await pgDc.close(); await pgDm.close(); damaged.prod.close(); damaged.proc.kill();
+    }
+
+    // ── R13: the director's roster is trusted only when it is real (GRN-25, 26, 66, 89, 95, 115, 123, 126, 161, 183) ──
+    if (!ONLY || ONLY === 'roster') {
+      console.log('\n[R13] roster: a cold or partial director, an unrecognised reply, a failover origin, a silent director, duplicate labels');
+      const SEED_R = { enabled: true, room: 'rosterroom', password: 'pw1', viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'hash' }, directory: [] };
+      const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const blankedBy = (payloads) => payloads.filter((p) => (p.slots[0] && p.slots[0].streamID === '') || (p.slots[1] && p.slots[1].streamID === ''));
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const frameOf = (page) => page.frames().find((f) => /vdo-director/.test(f.url()));
+      const guestSrc = (page) => page.evaluate(() => document.getElementById('frame')?.getAttribute('src') || '');
+
+      // (a) A cold start on a director-min reload: its first replies are empty, yet nothing on air goes blank.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        await x.api.clear();
+        const guest = await newPage(browser, { width: 640, height: 360 });
+        await guest.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(guest, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 8000);
+        const min = await newPage(browser, { width: 480, height: 120 }, mockDir(x, '?fixed=1&coldstart=3'));
+        await min.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        let wentBlank = false;
+        for (let i = 0; i < 40; i++) { if ((await guestSrc(guest)) === 'about:blank') wentBlank = true; await sleep(250); } // 10 s: the three empty replies, then the real roster
+        const ps = await pushPayloads(x);
+        const sawRoster = await wait(min, () => /2 guest/.test(document.getElementById('status')?.textContent || ''), null, 6000);
+        check('R13a: director-min reloaded with resolved IDs and a cold director (3 empty replies): the guest slot never goes to about:blank, no push blanks a slot, and the real roster is then read',
+          !wentBlank && blankedBy(ps).length === 0 && sawRoster, JSON.stringify({ wentBlank, blanked: blankedBy(ps).length, sawRoster }));
+        await min.close(); await guest.close();
+      }
+      // (b) A partial roster blanks no label it has not reported (inside the settle window); control.html opened and closed
+      // about 2.5 s later while director-min runs leaves the IDs intact.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        await x.api.clear();
+        const min = await newPage(browser, { width: 480, height: 120 }, mockDir(x, '?fixed=1&late=ALPHA:60000'));
+        await min.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(min, () => /1 guest/.test(document.getElementById('status')?.textContent || ''), null, 8000); // only BRAVO has been reported
+        const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?coldstart=1'));
+        await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(2500);
+        await ctl.close();
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const st = await x.api.state();
+        check('R13b: a partial roster (ALPHA not yet reported) blanks neither ALPHA nor BRAVO, and a control.html opened and closed ~2.5 s later changes no stream ID in vdo.state',
+          blankedBy(ps).length === 0 && st.vdo && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222', JSON.stringify({ blanked: blankedBy(ps).length, ids: st.vdo && st.vdo.slots.map((q) => q.streamID) }));
+        await min.close();
+      }
+      // (c) An unrecognised reply (renamed fields) leaves resolved slots alone and says so; hasRoster does not flip.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        await x.api.clear();
+        const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?renamed=1'));
+        await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        const said = await wait(ctl, () => /reply unrecognised/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        await sleep(3000);
+        const ps = await pushPayloads(x);
+        const st = await x.api.state();
+        check('R13c: a director reply with renamed fields is reported ("reply unrecognised"), pushes nothing, and leaves every resolved slot as it was',
+          said && ps.length === 0 && st.vdo.slots[0].streamID === 'aaa111', JSON.stringify({ said, pushes: ps.length }));
+        await ctl.close();
+      }
+      // (d) The failover origin: a director page that answers from another origin is heard once that origin is allowed.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const other = 'http://localhost:' + x.http;
+        const dirUrl = mockDir(x, '?fixed=1&failover=1');
+        const heard = async (allow) => {
+          const p = await newPage(browser, { width: 920, height: 1300 }, dirUrl);
+          if (allow) await p.addInitScript('window.__VDO_DIRECTOR_EXTRA_ORIGINS = ' + JSON.stringify([other]) + ';');
+          await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+          const ok = await wait(p, () => /connected · 2 guests/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+          await p.close();
+          return ok;
+        };
+        const without = await heard(false);
+        const withIt = await heard(true);
+        check('R13d: a reply from a second origin (the failover case) is ignored until that origin is allowed, then the pill reaches "connected"', !without && withIt, JSON.stringify({ without, withIt }));
+      }
+      // (e) A silent director: the first request fails, later ones work: the page says so, reloads the frame once, and reaches connected, never blanking a slot.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        await x.api.clear();
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?fixed=1'));
+        await p.addInitScript('window.__VDO_DIRECTOR_TIMING = { silentMs: 2500, retryAfterMs: 4500, backoffMs: [4000, 8000], hintMs: 2000 };');
+        let dirRequests = 0;
+        await p.route(/\/mock\/vdo-director\.html/, (route) => { dirRequests++; if (dirRequests === 1) route.abort(); else route.continue(); });
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        const saidSilent = await wait(p, () => /not responding/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        const connected = await wait(p, () => /connected · 2 guests/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 15000);
+        const ps = await pushPayloads(x);
+        check('R13e: a director whose first request fails: the pill says "not responding", the frame is reloaded (a second request), the pill reaches "connected", and no push blanks a slot',
+          saidSilent && connected && dirRequests >= 2 && blankedBy(ps).length === 0, JSON.stringify({ saidSilent, connected, dirRequests, blanked: blankedBy(ps).length }));
+        await p.close();
+      }
+      // (f) An empty label carries no stream; a label shared by two guests is sticky and fails closed (GRN-123, GRN-26, GRN-126).
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?fixed=1'));
+        await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(ctl, () => /connected · 2 guests/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        const setRoster = async (gl) => { const f = frameOf(ctl); await f.evaluate((g) => window.__setRoster(g), gl); };
+        const lastSlot = async (n) => { const ps = await pushPayloads(x); const q = await x.api.state(); return q.vdo && q.vdo.slots[n].streamID; };
+        const D = { 0: { streamID: 'dIrEcToR00', label: '' } };
+        await x.api.clear();
+        await setRoster({ ...D, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'zzz999', label: 'ALPHA' }, 3: { streamID: 'bbb222', label: 'BRAVO' } });
+        await sleep(3500);
+        const keepsPrev = (await lastSlot(0)) === 'aaa111';
+        const warned = await ctl.evaluate(() => /2 streams!/.test(document.getElementById('vdoSlots')?.textContent || ''));
+        await setRoster({ ...D, 1: { streamID: 'zzz999', label: 'ALPHA' }, 2: { streamID: 'yyy888', label: 'ALPHA' }, 3: { streamID: 'bbb222', label: 'BRAVO' } });
+        await sleep(3500);
+        const failsClosed = (await lastSlot(0)) === '';
+        await setRoster({ ...D, 1: { streamID: 'aaa333', label: 'ALPHA' }, 3: { streamID: 'bbb222', label: 'BRAVO' } });
+        await sleep(3500);
+        const rejoins = (await lastSlot(0)) === 'aaa333';
+        check('R13f: a label two guests share keeps the stream it had (and shows "2 streams!"), goes empty when that stream is not among them, and a unique label follows a rejoin',
+          keepsPrev && warned && failsClosed && rejoins, JSON.stringify({ keepsPrev, warned, failsClosed, rejoins }));
+        // clearing the label empties the slot: the persisted stream ID is '' and the overlay goes blank
+        await ctl.selectOption('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel', '');
+        await sleep(3500);
+        check('R13g: choosing "none" for a slot persists an EMPTY stream ID for it (an empty label never keeps a stream)', (await lastSlot(1)) === '', String(await lastSlot(1)));
+        await ctl.close();
+      }
+      // (g) An insecure page does not start a director that can never answer (GRN-161).
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?fixed=1'));
+        await p.addInitScript('Object.defineProperty(window, "isSecureContext", { value: false });');
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, () => document.getElementById('vdoRoom')?.value === 'rosterroom', null, 8000);
+        await sleep(3500);
+        const st = await p.evaluate(() => ({ pill: document.getElementById('vdoStatus')?.textContent || '', frame: document.getElementById('vdoDirector')?.getAttribute('src') || '', warn: !document.getElementById('cryptoWarn')?.hidden }));
+        check('R13h: on a page that is not a secure context the director is NOT started (the frame stays blank, the pill says why) and the banner shows', /secure page/i.test(st.pill) && /about:blank|^$/.test(st.frame) && st.warn, JSON.stringify(st));
+        await p.close();
+      }
     }
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');

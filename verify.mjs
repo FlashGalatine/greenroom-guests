@@ -607,6 +607,104 @@ async function main() {
       check('parser never throws', false, String(e));
     }
 
+    // ── 5a. The shared resolver and the director loop (GRN-25, 26, 115, 123, 126, 66, 89, 95, 183) ──
+    console.log('\n[5a] roster rules: control/vdo-parse.js resolvers and the control/director-loop.js state machine');
+    {
+      const R = (label, streamID) => ({ label, streamID });
+      // recognised or not (GRN-115)
+      check('guestListOk: an empty guestList and a real one are recognised; a missing, non-object or entry-less-of-streamID guestList is not',
+        P.guestListOk({ guestList: {} }) && P.guestListOk({ guestList: { 0: { streamID: 'a', label: 'X' } } })
+        && !P.guestListOk({}) && !P.guestListOk(null) && !P.guestListOk({ guestList: 'x' }) && !P.guestListOk({ guestList: [] })
+        && !P.guestListOk({ guestList: { 1: { stream: 'a', name: 'X' }, 2: { stream: 'b', name: 'Y' } } }) && !P.guestListOk({ guestList: { 1: null } }));
+      // who a slot follows (GRN-26)
+      const roster1 = [R('ALPHA', 'a1'), R('BRAVO', 'b1')];
+      const dup = [R('ALPHA', 'a1'), R('ALPHA', 'a9'), R('BRAVO', 'b1')];
+      check('resolveSlot: a unique label follows its stream (leave and rejoin included)', P.resolveSlot(roster1, 'ALPHA', '', '') === 'a1' && P.resolveSlot([R('ALPHA', 'a3')], 'ALPHA', 'a1', '') === 'a3' && P.resolveSlot(roster1, 'NOBODY', 'x', '') === '');
+      check('resolveSlot: a duplicate label keeps the previous stream if it is still there (even if a joiner is listed first), else nobody (fail closed)',
+        P.resolveSlot(dup, 'ALPHA', 'a1', '') === 'a1' && P.resolveSlot([R('ALPHA', 'a9'), R('ALPHA', 'a1')], 'ALPHA', 'a1', '') === 'a1'
+        && P.resolveSlot(dup, 'ALPHA', '', '') === '' && P.resolveSlot(dup, 'ALPHA', 'gone', '') === '');
+      check('resolveSlot: the result does not depend on the order the director lists the guests in',
+        P.resolveSlot([R('ALPHA', 'a1'), R('ALPHA', 'a9')], 'ALPHA', 'a9', '') === P.resolveSlot([R('ALPHA', 'a9'), R('ALPHA', 'a1')], 'ALPHA', 'a9', '') && P.resolveSlot([R('ALPHA', 'a1'), R('ALPHA', 'a9')], 'ALPHA', 'a9', '') === 'a9');
+      check('resolveSlot: a pinned stream that is in the room under that label wins; an empty label never binds',
+        P.resolveSlot(dup, 'ALPHA', 'a1', 'a9') === 'a9' && P.resolveSlot(dup, 'ALPHA', 'a1', 'zzz') === 'a1' && P.resolveSlot(dup, '', 'a1', '') === '');
+      check('duplicateLabels lists the competing streams', JSON.stringify([...P.duplicateLabels(dup)]) === JSON.stringify([['ALPHA', ['a1', 'a9']]]) && P.duplicateLabels(roster1).size === 0);
+      // the settle window (GRN-25)
+      const lm = (r) => new Map(r.map((g) => [g.label, g.streamID]));
+      let sess = { startedAt: 1000, seen: new Set() };
+      check('resolveSlotID: a cold start (empty or partial first reply) keeps the held stream of a label not reported yet, for the settle window only',
+        P.resolveSlotID('ALPHA', 'a1', lm([]), sess, 1000 + 3000, 10000) === 'a1' && P.resolveSlotID('ALPHA', 'a1', lm([R('BRAVO', 'b1')]), sess, 1000 + 9999, 10000) === 'a1'
+        && P.resolveSlotID('ALPHA', 'a1', lm([]), sess, 1000 + 10000, 10000) === '');
+      sess = { startedAt: 1000, seen: new Set() };
+      check('resolveSlotID: a live label returns its stream and is remembered; seen then lost, it blanks AT ONCE, inside the window too',
+        P.resolveSlotID('ALPHA', 'a1', lm([R('ALPHA', 'a2')]), sess, 1100, 10000) === 'a2' && P.resolveSlotID('ALPHA', 'a2', lm([]), sess, 1200, 10000) === '' && sess.seen.has('ALPHA'));
+      check('resolveSlotID: an empty label is always blank, held stream or not (GRN-123)', P.resolveSlotID('', 'a1', lm([]), { startedAt: 0, seen: new Set() }, 1, 10000) === '' && P.resolveSlotID('', 'a1', lm([R('', 'x')]), { startedAt: 0, seen: new Set() }, 1, 10000) === '');
+
+      // the loop, with a fake clock, iframe and ticker
+      const dlSrc = await readFile(resolve(__dirname, 'control', 'director-loop.js'), 'utf8');
+      const savedLoc = globalThis.location, savedWin = globalThis.window;
+      globalThis.location = { href: 'http://127.0.0.1:7475/control/control.html' };
+      globalThis.window = { addEventListener() {} };
+      new Function(dlSrc)(); // (the location/window stubs stay until the end of this block: create() reads location)
+      const GRD = globalThis.GRDirector;
+      const mkLoop = (extra = {}) => {
+        let t = 100000; const posts = []; const timers = []; const calls = [];
+        const frame = { src: '', contentWindow: { postMessage(m, o) { posts.push([m, o]); } } };
+        const loop = GRD.create({ iframe: frame, base: 'http://127.0.0.1:7475/mock/vdo-director.html', cib: 'sb-vdo', now: () => t, makeTicker: () => ({ stop() {} }),
+          setTimeout: (fn, ms) => { timers.push(fn); }, extraOrigins: extra.origins || [],
+          hooks: { connecting: () => calls.push('connecting'), reply: (r) => calls.push('reply:' + r.length), unrecognised: () => calls.push('unrecognised'), silent: () => calls.push('silent'), hint: () => calls.push('hint'), retrying: (n) => calls.push('retrying:' + n) } });
+        return { loop, frame, posts, timers, calls, advance: (ms) => { t += ms; }, flush: () => { while (timers.length) timers.shift()(); } };
+      };
+      let L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      const sess0 = L.loop.sess;
+      const ev = (origin, data, source = L.frame.contentWindow) => ({ origin, source, data });
+      const good = { guestList: { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'a1', label: 'ALPHA' } } };
+      L.loop.onMessage(ev('https://evil.example', good)); L.loop.onMessage(ev('http://127.0.0.1:7475', good, {}));
+      check('the loop answers only the iframe\'s own window, from an allowed origin: a wrong origin and a wrong source are ignored',
+        !L.calls.some((c) => c.startsWith('reply')) && L.calls.join() === 'connecting', L.calls.join());
+      L.loop.onMessage(ev('http://127.0.0.1:7475', good)); L.loop.onMessage(ev('https://cdn-backup.vdo.ninja', good));
+      check('…the director\'s own origin and the cdn-backup failover origin are both accepted, each reply handing over the parsed roster', L.calls.join() === 'connecting,reply:1,reply:1', L.calls.join());
+      L = mkLoop({ origins: ['http://localhost:7475'] });
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      L.loop.onMessage({ origin: 'http://localhost:7475', source: L.frame.contentWindow, data: good });
+      check('…and an origin added by the test hook (the mock director\'s second origin) is accepted too', L.calls.join() === 'connecting,reply:1', L.calls.join());
+      L.loop.onMessage(ev('http://127.0.0.1:7475', { guestList: { 1: { stream: 'a1', name: 'ALPHA' } } }));
+      L.loop.onMessage(ev('http://127.0.0.1:7475', { guestList: 'x' }));
+      check('a reply with renamed fields or a non-object guestList is reported as unrecognised, never as a roster', L.calls.join() === 'connecting,reply:1,unrecognised,unrecognised', L.calls.join());
+      L.loop.tick();
+      check('the poll is posted with targetOrigin \'*\' (the body holds no secret), so a failover origin still receives it', L.posts.length === 1 && L.posts[0][1] === '*' && L.posts[0][0].getGuestList === true);
+
+      // liveness (GRN-95, GRN-183): silence is named, then the frame is reloaded with backoff, resetting the settle session
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      const s1 = L.loop.sess;
+      L.advance(5000); L.loop.tick();
+      check('before 3 polls of silence nothing is reported', L.calls.join() === 'connecting');
+      L.advance(3000); L.loop.tick();
+      check('about 3 polls (7.5 s) of silence: the page is told (hooks.silent), once', L.calls.join() === 'connecting,silent');
+      L.advance(8000); L.loop.tick();
+      check('15 s with no answer at all adds the "connecting" hint, once', L.calls.join() === 'connecting,silent,hint', L.calls.join());
+      L.advance(10000); L.loop.tick(); L.flush();
+      check('about 25 s of silence reloads the frame (about:blank, then the URL again) and starts a NEW settle session',
+        L.calls.slice(-1)[0] === 'retrying:1' && L.frame.src.includes('director=r') && L.loop.sess !== s1 && L.loop.sess.seen.size === 0 && L.loop.retries === 1, L.calls.join());
+      const afterFirst = L.calls.length;
+      L.advance(26000); L.loop.tick(); L.flush();
+      check('…and does not reload again inside the 30 s backoff', L.calls.length === afterFirst || !L.calls.slice(afterFirst).some((c) => c.startsWith('retrying')), L.calls.slice(afterFirst).join());
+      L.advance(10000); L.loop.tick(); L.flush();
+      check('…but does once the backoff has passed', L.calls.some((c) => c === 'retrying:2'), L.calls.join());
+      L.loop.onMessage(ev('http://127.0.0.1:7475', good));
+      check('a reply ends the silence and the retry count', L.calls.slice(-1)[0] === 'reply:1' && L.loop.retries === 0);
+      // nudge: only when nothing has ever answered
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r'); L.loop.nudge(); L.flush();
+      const nudged = L.calls.includes('retrying:1');
+      L.loop.onMessage(ev('http://127.0.0.1:7475', good)); L.calls.length = 0; L.loop.nudge(); L.flush();
+      check('nudge (the room was saved again) reloads a frame nothing has answered, and leaves a working one alone', nudged && !L.calls.includes('retrying:1'));
+      L.loop.stop();
+      check('stop points the frame at about:blank and ends the loop', L.frame.src === 'about:blank' && L.loop.url === '');
+      globalThis.location = savedLoc; globalThis.window = savedWin;
+    }
+
     // ── 5b. Guest-directory core: sanitizers + the auto-populate rule ───────────
     // control/directory-core.js is the shared brain both control pages load, so it
     // gets unit-tested directly here (same trick as vdo-parse.js above).
@@ -829,6 +927,10 @@ async function main() {
     const minRes = await fetch(`${BASE}/control/director-min.html`);
     const minBody = await minRes.text();
     check('/control/director-min.html 200 + wired (VDO Push, vdo-parse.js)', minRes.status === 200 && minBody.includes("'VDO Push'") && minBody.includes('vdo-parse.js'));
+    const dlRes = await fetch(`${BASE}/control/director-loop.js`);
+    check('/control/director-loop.js 200 javascript + exports GRDirector', dlRes.status === 200 && (dlRes.headers.get('content-type') || '').includes('javascript') && (await dlRes.text()).includes('globalThis.GRDirector'));
+    check('both control pages load director-loop.js and run the director through it, with no poll loop of their own (GRN-66)',
+      [ctrlBody, minBody].every((b) => b.includes('director-loop.js') && b.includes('GRDirector.create') && b.includes('directorLoop.onMessage') && !/setInterval\(pollGuestList/.test(b) && !/function pollGuestList/.test(b)));
     // (The director-min strip guard is a behaviour test now: verify-render R9, GRN-202.)
     check('director-min auto-populates too (shared core + the Discord-feed source)',
       minBody.includes('directory-core.js') && minBody.includes('GRDir.autoPopulate')

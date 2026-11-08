@@ -183,9 +183,10 @@
       <textarea id="cfgExportText" readonly spellcheck="false" aria-label="Exported config (JSON)"></textarea>
       <div class="btns"><button id="btnCfgExportCopy" type="button">Copy</button></div>
     </div>
-    <div id="cryptoWarn" class="warn" hidden>crypto.subtle unavailable (non-secure origin) —
-      the &amp;hash= invite mode can't be computed here. Open this page via 127.0.0.1, or use
-      plaintext/none password mode.</div>
+    <div id="cryptoWarn" class="warn" hidden>This page is not on a secure origin (crypto.subtle is unavailable) —
+      the &amp;hash= invite mode can't be computed here, and the director is NOT started: vdo.ninja
+      would not accept it, and slots would never resolve. Open this page via http://127.0.0.1:&lt;port&gt;/ (not
+      a LAN name or file://), or use plaintext/none password mode.</div>
   </section>
 
   <section>
@@ -313,6 +314,7 @@
 <iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
 
 <script src="vdo-parse.js"></script>
+<script src="director-loop.js"></script>
 <script src="directory-core.js"></script>
 <script>
 (function () {
@@ -364,7 +366,6 @@
   // Test hook: point the director iframe at mock-vdo-director.html to run the
   // enumeration loop offline. The accepted postMessage origin follows the URL.
   const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
-  const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
   const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
 
   const $ = (id) => document.getElementById(id);
@@ -417,6 +418,29 @@
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(),
     invite: defaultInvite(), directory: [], directoryAutoAdd: true, directoryIgnored: [], extra: {} };
+  // The director iframe's loop (control/director-loop.js): poll from a Worker tick, accept replies only from the frame itself
+  // and the allowed origins, say when it goes quiet, reload it with a backoff, and keep the settle session.
+  const directorLoop = GRDirector.create({
+    iframe: els.director, base: DIRECTOR_BASE, cib: 'sb-vdo', pollMs: POLL_MS, firstProbeMs: FIRST_PROBE_MS,
+    extraOrigins: window.__VDO_DIRECTOR_EXTRA_ORIGINS || [], timing: window.__VDO_DIRECTOR_TIMING,
+    hooks: {
+      connecting: () => setPill(els.vdoStatus, 'director: connecting…', ''),
+      hint: () => setPill(els.vdoStatus, 'director: still connecting… check the room, the password and that vdo.ninja is reachable', ''),
+      // Quiet for about 3 polls: the roster is no longer current, so pushes keep the last resolved stream IDs (never blank them).
+      silent: () => { hasRoster = false; setPill(els.vdoStatus, 'director: not responding', 'error'); },
+      retrying: () => setPill(els.vdoStatus, 'director: not responding, retrying', 'error'),
+      unrecognised: () => setPill(els.vdoStatus, 'director: reply unrecognised - check vdo.ninja version', 'error'),
+      reply: (r) => {
+        roster = r; // defensive: [] on any malformed shape
+        hasRoster = true;
+        setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}`, 'live');
+        renderSlots();
+        runAutoAdd(); // new label in the room → placeholder directory entry
+        renderDirectory(); // live-label picker options + live dots
+        assembleAndPush(true); // auto-follow: re-resolve every poll
+      },
+    },
+  });
   let roster = [];          // live [{label, streamID}] from the director iframe
   let hasRoster = false;    // at least one director reply this session
   let discord = null;       // last discordVoice payload
@@ -440,7 +464,6 @@
   let dirSig = '';
   let favsSig = '';
   let frameUrl = '';
-  let pollTimer = null;
   const dirOpen = new Set(); // expanded directory rows, by array index (view state only)
 
   // Directory sanitizers, the socials-textarea grammar, and the auto-populate
@@ -816,11 +839,17 @@
 
   // ── Payload assembly + push ───────────────────────────────────────────────
   function assemblePayload() {
-    const byLabel = new Map(roster.map((g) => [g.label, g.streamID]));
+    const nowMs = Date.now();
     const slots = cfg.slots.map((s, i) => {
-      const streamID = hasRoster
-        ? (s.label ? (byLabel.get(s.label) || '') : '')
-        : String(s.streamID || ''); // no roster yet: preserve hydrated resolution
+      // An empty label never carries a stream. With a current roster the shared resolver decides (a label shared by several
+      // guests stays with the stream it had; a label not reported yet keeps its held stream while the director is still
+      // settling; one seen and lost blanks at once). With no current roster the held resolution is preserved.
+      let streamID;
+      if (!s.label) streamID = '';
+      else if (hasRoster) {
+        const live = VdoParse.resolveSlot(roster, s.label, s.streamID, '');
+        streamID = VdoParse.resolveSlotID(s.label, s.streamID, new Map([[s.label, live]]), directorLoop.sess, nowMs, VdoParse.SETTLE_MS);
+      } else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
         slot: i + 1,
@@ -867,6 +896,7 @@
   // ── Director iframe + enumeration loop ────────────────────────────────────
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
+    if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
     const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
     let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
     if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
@@ -876,17 +906,16 @@
 
   function syncDirectorFrame() {
     const url = directorUrl();
+    // An insecure page never starts the director: say so even though the (blank) URL did not change.
+    if (!url && cfg.enabled && cfg.room && !window.isSecureContext) setPill(els.vdoStatus, 'director: needs a secure page (open via 127.0.0.1)', 'error');
     if (url === frameUrl) return;
     frameUrl = url;
     if (url) {
-      els.director.src = url;
-      setPill(els.vdoStatus, 'director: connecting…', '');
-      startPolling();
+      directorLoop.start(url); // points the frame at the room, starts the poll, and begins a fresh settle session
     } else {
-      els.director.src = 'about:blank';
-      stopPolling();
+      directorLoop.stop(); // the frame goes to about:blank
       roster = [];
-      setPill(els.vdoStatus, 'director: idle', '');
+      setPill(els.vdoStatus, cfg.enabled && cfg.room && !window.isSecureContext ? 'director: needs a secure page (open via 127.0.0.1)' : 'director: idle', cfg.enabled && cfg.room && !window.isSecureContext ? 'error' : '');
       renderSlots();
       // Blank every slot's overlay (mirrors the old panel's disable behavior).
       if (hydrated) {
@@ -897,33 +926,7 @@
     }
   }
 
-  function startPolling() {
-    stopPolling();
-    pollTimer = setInterval(pollGuestList, POLL_MS);
-    setTimeout(pollGuestList, FIRST_PROBE_MS); // first probe after the iframe connects
-  }
-  function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  }
-  function pollGuestList() {
-    if (!frameUrl || !els.director.contentWindow) return;
-    try {
-      els.director.contentWindow.postMessage({ getGuestList: true, cib: 'sb-vdo' }, DIRECTOR_ORIGIN);
-    } catch (_) { /* iframe not ready yet */ }
-  }
-
-  window.addEventListener('message', (e) => {
-    if (e.origin !== DIRECTOR_ORIGIN) return;
-    const d = e.data;
-    if (!d || typeof d !== 'object' || !('guestList' in d)) return;
-    roster = VdoParse.parseGuestList(d); // defensive: [] on any malformed shape
-    hasRoster = true;
-    setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}`, 'live');
-    renderSlots();
-    runAutoAdd(); // new label in the room → placeholder directory entry
-    renderDirectory(); // live-label picker options + live dots
-    assembleAndPush(true); // auto-follow: re-resolve every poll
-  });
+  window.addEventListener('message', (e) => directorLoop.onMessage(e));
 
   // ── Rendering (focus-guarded, signature-deduped) ──────────────────────────
   function setPill(el, text, cls) { el.textContent = text; el.className = 'pill' + (cls ? ' ' + cls : ''); }
@@ -955,7 +958,8 @@
 
   function renderSlots(force) {
     const live = rosterLabels();
-    const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig() });
+    const dupes = VdoParse.duplicateLabels(roster); // labels more than one live stream is using
+    const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig(), dupes: [...dupes] });
     if (!force && sig === slotsSig && els.slots.childElementCount) return;
     if (els.slots.contains(document.activeElement)) return; // operator mid-edit
     slotsSig = sig;
@@ -1015,6 +1019,15 @@
       id.textContent = s.streamID || '—';
       id.title = s.streamID || 'no stream resolved';
       webcamWrap.append(sel, mirLabel, id);
+      if (s.label && dupes.has(s.label)) {
+        // Anyone in the room can pick any label: say that this one is shared, and which streams compete for it.
+        const dup = document.createElement('span');
+        dup.className = 'vdo-dup';
+        dup.style.cssText = 'color:#ff9a3c;font-weight:600;margin-left:6px;cursor:help';
+        dup.textContent = `${dupes.get(s.label).length} streams!`;
+        dup.title = `Several guests use the label "${s.label}" (${dupes.get(s.label).join(', ')}). The slot keeps the stream it had, and stays empty if that one leaves. Give each guest their own link with a unique label.`;
+        webcamWrap.append(dup);
+      }
 
       // Discord controls: user id + pick-from-channel convenience.
       const discordWrap = document.createElement('span');
@@ -1478,7 +1491,9 @@
     operatorAction(() => {
       reportPush(assembleAndPush(false, true));
       rebuildLinks();
+      const before = frameUrl;
       syncDirectorFrame();
+      if (frameUrl && frameUrl === before) directorLoop.nudge(); // same URL, and nothing has answered yet: try the frame again
     });
   }
   $('btnVdoSave').addEventListener('click', saveRoom);
@@ -1661,7 +1676,7 @@
   $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
   $('btnVdoInviteOpen').addEventListener('click', (e) => { if (!els.inviteLink.value) e.preventDefault(); });
   $('btnVdoManageOpen').addEventListener('click', (e) => { if (!els.manageLink.value) e.preventDefault(); });
-  if (!(window.crypto && crypto.subtle)) els.cryptoWarn.hidden = false;
+  if (!(window.crypto && crypto.subtle) || !window.isSecureContext) els.cryptoWarn.hidden = false;
 
   // ── Discord section ───────────────────────────────────────────────────────
   function sendCmd(command, value) {

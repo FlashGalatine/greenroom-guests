@@ -24,6 +24,11 @@
   ?fixed=1 answers every poll with the same roster (ALPHA aaa111, BRAVO bbb222), so a
   page that has adopted a matching config must make zero pushes however many polls pass.
   ?label=<text> renames ALPHA on every poll (a guest whose display name looks like a timestamp).
+  ?coldstart=N answers the first N polls with a roster holding only the director itself (a director that has
+  not seen its guests yet). ?late=<LABEL>:<ms> keeps that guest out of every reply until <ms> after page load.
+  ?renamed=1 answers with renamed fields (stream/name instead of streamID/label): a shape change, not an empty room.
+  ?failover=1 moves this page from 127.0.0.1 to localhost on load (a different origin, as vdo.ninja's cdn-backup
+  failover is), so a page must allow the second origin (window.__VDO_DIRECTOR_EXTRA_ORIGINS) to hear it.
   ?malformed=1 answers the first four polls with malformed shapes (null guestList,
   string guestList, entry missing streamID, numeric label/streamID) before going
   normal — the defensive-parser cases, live.
@@ -48,6 +53,12 @@
   const MALFORMED = P.get('malformed') === '1';
   const FIXED = P.get('fixed') === '1';
   const ALPHA = P.get('label') || 'ALPHA'; // ?label=<text> renames ALPHA (every poll, whatever the timeline)
+  const COLDSTART = Number(P.get('coldstart')) || 0;
+  const RENAMED = P.get('renamed') === '1';
+  const LATE = (() => { const v = P.get('late') || ''; const i = v.lastIndexOf(':'); return i > 0 ? { label: v.slice(0, i), ms: Number(v.slice(i + 1)) || 0 } : null; })();
+  if (P.get('failover') === '1' && location.hostname === '127.0.0.1') {
+    location.replace(location.href.replace('//127.0.0.1', '//localhost').replace('failover=1', 'failover=0'));
+  }
   const t0 = Date.now();
   let polls = 0;
   let malformedServed = 0;
@@ -82,8 +93,14 @@
     let reply;
     if (MALFORMED && malformedServed < MALFORMED_REPLIES.length) {
       reply = Object.assign({}, MALFORMED_REPLIES[malformedServed++], { cib: d.cib });
+    } else if (polls <= COLDSTART) {
+      reply = { guestList: { 0: { streamID: 'dIrEcToR00', label: '' } }, cib: d.cib };
+    } else if (RENAMED) {
+      reply = { guestList: { 0: { stream: 'dIrEcToR00', name: '' }, 1: { stream: 'aaa111', name: 'ALPHA' }, 2: { stream: 'bbb222', name: 'BRAVO' } }, cib: d.cib };
     } else {
-      reply = { guestList: forcedRoster || rosterAt(Date.now() - t0), cib: d.cib };
+      let gl = forcedRoster || rosterAt(Date.now() - t0);
+      if (LATE && Date.now() - t0 < LATE.ms) gl = Object.fromEntries(Object.entries(gl).filter(([, g]) => g.label !== LATE.label));
+      reply = { guestList: gl, cib: d.cib };
     }
     // '*' is fine here — this is a local test mock, and the real director replies
     // cross-origin anyway (the control page filters on the iframe's origin).
