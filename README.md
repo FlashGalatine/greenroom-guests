@@ -140,7 +140,7 @@ roster is intentionally not snapshotted.
 ```
 npm install          # root deps: ws (also used by the backup CLI) and playwright-core (dev, for verify:render)
 npm --prefix sidecar ci   # the Discord bridge's dependencies; verify needs them for its sidecar sections
-npm run verify       # 105 checks: transport, both push round-trips (incl. the guest
+npm run verify       # checks: transport, both push round-trips (incl. the guest
                      # directory), persisted-vs-non-persisted restart semantics, the
                      # command bus, the REAL sidecar token-less over the bus, the
                      # exit-when-Streamer.bot-closes lifecycle (opt-in leave+quit vs
@@ -149,7 +149,7 @@ npm run verify       # 105 checks: transport, both push round-trips (incl. the g
                      # (sanitizers + auto-add: fixpoint, order-independent, ignore
                      # list), HTTP serving + tripwires (incl. "no token string in
                      # control.html" and the director-min directory strip-guard)
-npm run verify:render  # 44 real-browser checks: guest slot URL assembly + the
+npm run verify:render  # real-browser checks: guest slot URL assembly + the
                        # auto-follow REJOIN swap driven by a scripted fake director,
                        # nameplates (lower-third + standalone + rotator + hide rules),
                        # PFP glow, roster badges/order/hide + directory name override,
@@ -165,10 +165,11 @@ npm run verify:cs      # compiles the three state actions as shipped (the C# com
                        # and it also re-parses each frame the way Streamer.bot does,
                        # which is what the date-shaped guest label checks need.
 npm run mock         # mock Streamer.bot (:7478 HTTP, :8084 WebSocket: never Streamer.bot's own ports) for hands-on dev;
-                     # it refuses to start if either port is taken
+                     # it refuses to start if either port is taken, and never uses Streamer.bot's own 7474 / 8080
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live). It acts only on a server whose Hello says it is
-                     # the mock, and exits otherwise. To drive a REAL Streamer.bot on purpose: close the real bridge first,
-                     # then  SB_WS_URL=ws://127.0.0.1:8080/ npm run mock:bridge -- --allow-real-sb
+                     # the mock; otherwise it sends no Subscribe or action and exits. To drive a REAL Streamer.bot on purpose: close the real bridge first,
+                     # then (PowerShell)  $env:SB_WS_URL='ws://127.0.0.1:8080/'; npm run mock:bridge -- --allow-real-sb
+                     #      (bash)        SB_WS_URL=ws://127.0.0.1:8080/ npm run mock:bridge -- --allow-real-sb
 ```
 
 The mocks prove the protocol and the pixels; what only a live session can prove

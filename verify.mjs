@@ -1057,9 +1057,23 @@ async function main() {
         const junkWs = await new Promise((res) => { const w = new WebSocket(m10.url); w.on('open', () => res(w)); });
         for (const junk of ['null', '"x"', '7', '[1]', '{"request":null}', '{"request":"DoAction","action":null,"args":null,"id":1}', 'not json']) junkWs.send(junk);
         await new Promise((r) => setTimeout(r, 400));
-        junkWs.terminate(); // an abrupt close, which raises an error event on the server side
+        junkWs.terminate(); // an abrupt close
         const alive1 = await fetch(m10.base + '/mock/state').then((r) => r.status).catch(() => 'down');
         check('junk frames (null, a string, a number, an array, an action with no name or args) and an abrupt close do not end the mock', alive1 === 200, String(alive1));
+        // A WebSocket protocol violation (an unmasked client frame) raises an 'error' event on the server's socket. Without the
+        // mock's per-connection error handler that is an uncaught exception, and the process ends.
+        await new Promise((res) => {
+          import('node:net').then(({ connect }) => {
+            const sock = connect(m10.wsPort, '127.0.0.1');
+            let upgraded = false;
+            sock.on('data', (d) => { if (!upgraded && /101/.test(d.toString())) { upgraded = true; sock.write(Buffer.from([0x81, 0x01, 0x41])); setTimeout(() => { sock.destroy(); res(); }, 400); } });
+            sock.on('connect', () => sock.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'));
+            sock.on('error', () => res());
+            setTimeout(res, 3000);
+          });
+        });
+        const alive1b = await fetch(m10.base + '/mock/state').then((r) => r.status).catch(() => 'down');
+        check('a WebSocket protocol violation (an unmasked client frame) does not end the mock either', alive1b === 200, String(alive1b));
 
         // GRN-17: a malformed %-escape is a 400, not a crash.
         const bad = await new Promise((res) => {
@@ -1077,6 +1091,21 @@ async function main() {
         await withPort.arrayBuffer();
         check('/control/ and /overlay/ pages requested without ?sbport are redirected to the same URL with sbport=<this mock\'s WS port>; with it they are served',
           noPort.status === 302 && new URL(noPort.headers.get('location'), m10.base).searchParams.get('sbport') === String(m10.wsPort) && withPort.status === 200, noPort.status + ' ' + noPort.headers.get('location'));
+        {
+          // The browser reads the extension case-insensitively and the query from the FIRST '?'. A URL where the mock and the browser
+          // disagree used to be served unredirected (the page then falls back to port 8080) or redirected forever.
+          const hop = async (u) => { const r = await fetch(m10.base + u, { redirect: 'manual' }); await r.arrayBuffer(); return { status: r.status, loc: r.headers.get('location') }; };
+          const settle = async (u) => { let cur = u; for (let i = 0; i < 4; i++) { const h = await hop(cur); if (h.status !== 302) return { status: h.status, url: cur, hops: i }; cur = h.loc; } return { status: 302, url: cur, hops: 4 }; };
+          const sbOf = (u) => new URLSearchParams(u.slice(u.indexOf('?') + 1)).get('sbport');
+          const variants = ['/control/control.HTML', '/overlay/vdoninja-guest.Html?slot=1', '/control/control.html?x=1?y=2', '/control/control.html?sbport?x=1', '/control/control.html?slot=1&sbport?x=1'];
+          const bad = [];
+          for (const v of variants) {
+            const r = await settle(v);
+            if (!(r.status === 200 && sbOf(r.url) === String(m10.wsPort))) bad.push(v + ' -> ' + r.status + ' ' + r.url + ' (' + r.hops + ' hops)');
+          }
+          check('pages are only served with this mock\'s ?sbport as a BROWSER reads it: an upper-case extension, a second "?" or a stray "?" after the key are redirected (once) to a URL whose sbport is this mock\'s, never served bare and never looped',
+            bad.length === 0, JSON.stringify(bad));
+        }
         sub.close();
       } finally { m10.child.kill(); }
 
@@ -1090,11 +1119,37 @@ async function main() {
         check(`the mock refuses to start when its WebSocket port is already taken (listener on ${host}): exit non-zero, says so, and prints no READY`,
           !r.timedOut && r.code !== 0 && /already in use|in use/i.test(r.out) && !/READY/.test(r.out), JSON.stringify({ code: r.code, out: r.out.slice(0, 200) }));
       }
+      {
+        const blocker6 = createTcp();
+        const bp6 = await new Promise((res) => { blocker6.once('error', () => res(0)); blocker6.listen(0, '::', () => res(blocker6.address().port)); });
+        if (bp6) {
+          const freeHttp6 = await freePort();
+          const r6 = await quick('mock-sb-server.mjs', { SB_HTTP_PORT: String(freeHttp6), SB_WS_PORT: String(bp6) });
+          blocker6.close();
+          check('the mock refuses to start when its WebSocket port is held by a dual-stack [::] listener too', !r6.timedOut && r6.code !== 0 && /in use/i.test(r6.out) && !/READY/.test(r6.out), JSON.stringify({ code: r6.code, out: r6.out.slice(0, 200) }));
+        } else console.log('  (no IPv6 on this machine: the [::] port check is not exercised)');
+        const rSb = await quick('mock-sb-server.mjs', { SB_HTTP_PORT: '7474', SB_WS_PORT: String(await freePort()) });
+        const rSb2 = await quick('mock-sb-server.mjs', { SB_HTTP_PORT: String(await freePort()), SB_WS_PORT: '8080' });
+        check('the mock refuses Streamer.bot\'s own ports (7474, 8080) outright, even if SB_HTTP_PORT / SB_WS_PORT are exported for the real tools, and prints no READY',
+          [rSb, rSb2].every((r) => !r.timedOut && r.code !== 0 && /Streamer\.bot's own/.test(r.out) && !/READY/.test(r.out)), JSON.stringify([rSb.out.slice(0, 160), rSb2.out.slice(0, 160)]));
+      }
       // READY (GRN-200): printed once, only after both listeners are bound, and never inside an error line.
-      const ready = await startMockWith({});
-      const probeReady = await fetch(ready.base + '/mock/state').then((r) => r.status).catch(() => 'down');
-      check('the harness helper started the mock on its READY marker and the mock answers at once', probeReady === 200);
-      ready.child.kill();
+      {
+        const rp = await freePort(), rw = await freePort();
+        const rc = spawn(process.execPath, ['mock-sb-server.mjs'], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv({ SB_HTTP_PORT: String(rp), SB_WS_PORT: String(rw) }) });
+        let rout = '', rerr = '', hello = null;
+        rc.stdout.setEncoding('utf8'); rc.stdout.on('data', (d) => { rout += d; });
+        rc.stderr.setEncoding('utf8'); rc.stderr.on('data', (d) => { rerr += d; });
+        const t0 = Date.now(); while (!/READY/.test(rout) && Date.now() - t0 < 6000) await new Promise((r) => setTimeout(r, 25));
+        // the moment READY is seen, both listeners must already answer
+        const httpNow = await fetch('http://127.0.0.1:' + rp + '/mock/state').then((r) => r.status).catch(() => 'down');
+        hello = await new Promise((res) => { const w = new WebSocket('ws://127.0.0.1:' + rw + '/'); const t = setTimeout(() => { try { w.close(); } catch {} res(null); }, 2000); w.on('message', (raw) => { clearTimeout(t); try { w.close(); } catch {} try { res(JSON.parse(raw.toString())); } catch { res(null); } }); w.on('error', () => res(null)); });
+        await new Promise((r) => setTimeout(r, 300));
+        rc.kill();
+        check('READY is printed exactly once, on stdout, with the real ports, and both listeners already answer when it is seen',
+          (rout.match(/\[mock\] READY/g) || []).length === 1 && rout.includes('READY http=' + rp + ' ws=' + rw) && !/READY/.test(rerr) && httpNow === 200 && !!hello && hello.info && hello.info.source === 'mock',
+          JSON.stringify({ rout: rout.slice(-200), httpNow, hello }));
+      }
 
       // The bridge guard: it sends nothing to anything that is not announcing itself as a mock (GRN-74).
       const { WebSocketServer } = await import('ws');
@@ -1109,13 +1164,58 @@ async function main() {
         const sn = await sentinel(hello);
         const r = await quick('mock-discord-bridge.mjs', { SB_WS_URL: `ws://127.0.0.1:${sn.port}/` }, [], 9000);
         await sn.close();
-        check(`mock:bridge pointed at a server that sent ${what}: names its target first, exits non-zero, and sends it nothing`,
-          !r.timedOut && r.code !== 0 && r.out.split('\n')[0].includes(`ws://127.0.0.1:${sn.port}/`) && sn.frames.length === 0, JSON.stringify({ code: r.code, timedOut: r.timedOut, frames: sn.frames.length, out: r.out.slice(0, 240) }));
+        check(`mock:bridge pointed at a server that sent ${what}: names its target first, REFUSES (exit 2), and sends it nothing`,
+          !r.timedOut && r.code === 2 && /REFUSING to act on/.test(r.out) && r.out.split('\n')[0].includes(`ws://127.0.0.1:${sn.port}/`) && sn.frames.length === 0, JSON.stringify({ code: r.code, timedOut: r.timedOut, frames: sn.frames.length, out: r.out.slice(0, 240) }));
+      }
+      {
+        // a server that hangs up before it says Hello: the bridge reconnects (it does not exit later with a stale 'no Hello' reason)
+        const port = await freePort(); const frames = [];
+        const wss = new WebSocketServer({ host: '127.0.0.1', port });
+        wss.on('connection', (c) => { c.on('message', (raw) => frames.push(raw.toString())); setTimeout(() => { try { c.close(); } catch {} }, 150); });
+        await new Promise((r) => wss.on('listening', r));
+        const rc = await quick('mock-discord-bridge.mjs', { SB_WS_URL: 'ws://127.0.0.1:' + port + '/' }, [], 5200);
+        for (const c of wss.clients) c.terminate();
+        await new Promise((r) => wss.close(r));
+        check('mock:bridge whose server hangs up before the Hello retries (still running after 5 s, no stale "no Hello" refusal) and sends nothing',
+          rc.timedOut && !/REFUSING/.test(rc.out) && /retrying/.test(rc.out) && frames.length === 0, JSON.stringify({ timedOut: rc.timedOut, out: rc.out.slice(0, 260), frames: frames.length }));
       }
       const snOk = await sentinel({ request: 'Hello', info: { name: 'Streamer.bot', version: '1.0.7' } });
       const rOk = await quick('mock-discord-bridge.mjs', { SB_WS_URL: `ws://127.0.0.1:${snOk.port}/` }, ['--allow-real-sb'], 2500);
       await snOk.close();
       check('mock:bridge --allow-real-sb drives such a server anyway (it subscribes and pushes)', snOk.frames.length >= 2 && snOk.frames.some((f) => /Subscribe/.test(f)) && snOk.frames.some((f) => /Discord Voice Push/.test(f)), String(snOk.frames.length));
+    }
+
+    // ── 11. the harness's environment allowlist, under a hostile shell (GRN-208, GRN-209) ──
+    console.log('\n[11] harness environment: a shell that exports SB_WS_URL and friends reaches nothing the harness starts');
+    {
+      const { WebSocketServer } = await import('ws');
+      const frames = []; const connections = [];
+      const sPort = await freePort();
+      const sWss = new WebSocketServer({ host: '127.0.0.1', port: sPort });
+      sWss.on('connection', (c) => { connections.push(1); c.on('message', (raw) => frames.push(raw.toString().slice(0, 80))); c.on('error', () => {}); });
+      await new Promise((r) => sWss.on('listening', r));
+      const hostile = { SB_WS_URL: 'ws://127.0.0.1:' + sPort + '/', SB_WS_PORT_HOSTILE: '1', GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: '1', DISCORD_BRIDGE_CONFIG: 'Z:/nowhere/config.json', DISCORD_BRIDGE_TOKENS: 'Z:/nowhere/tokens.json' };
+      const saved = {}; for (const k of Object.keys(hostile)) { saved[k] = process.env[k]; process.env[k] = hostile[k]; }
+      let envMock, envBridge, envOut = null;
+      try {
+        envMock = await startMockWith({});
+        envBridge = await startChild('mock-discord-bridge.mjs', '[mock-bridge] up', { SB_WS_URL: envMock.url, SB_WS_PORT: String(envMock.wsPort) });
+        const bk = resolve(__dirname, '.verify-backup-env.json');
+        const seed = await rawClient(envMock.url);
+        seed.doAction('VDO Push', { payload: JSON.stringify(VDO_PAYLOAD) });
+        await new Promise((r) => setTimeout(r, 400));
+        // runNode with NO explicit SB_WS_URL: the harness default is its own mock, whatever the shell exported
+        envOut = await runNode(['backup.mjs', 'save', bk], { SB_WS_PORT: String(envMock.wsPort) });
+        seed.close();
+        await rm(bk, { force: true });
+      } finally {
+        for (const k of Object.keys(hostile)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+        if (envBridge) envBridge.kill();
+        if (envMock) envMock.child.kill();
+        await new Promise((r) => sWss.close(r));
+      }
+      check('with SB_WS_URL, GREENROOM_* and DISCORD_BRIDGE_* exported to a listener that must never be spoken to, the mock bridge, backup.mjs and the mocks the harness starts send it nothing and never connect',
+        frames.length === 0 && connections.length === 0 && !!envOut, JSON.stringify({ frames, connections: connections.length, backup: envOut && envOut.out.slice(0, 160) }));
     }
 
     probe.close();

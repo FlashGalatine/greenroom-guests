@@ -1,7 +1,7 @@
 // Screenshot generator for docs/ — spawns the mock SB server, stages a lively
 // state (3-user voice channel, one speaking, favorites, a bound guest slot), and
 // captures the roster overlay (row + grid) and the control page at 2× scale.
-// Run: npm run shots   (requires playwright-core: npm install --no-save playwright-core)
+// Run: npm run shots   (playwright-core is a pinned devDependency: a plain  npm install  provides it)
 
 import { spawn } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
@@ -26,11 +26,13 @@ function startMock() {
       // an allowlisted environment, not the shell's: nothing exported there can point this at a live Streamer.bot
       env: Object.fromEntries([...['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'LANG', 'TZ'].filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]), ['SB_HTTP_PORT', String(HTTP_PORT)], ['SB_WS_PORT', String(WS_PORT)]]),
     });
-    let out = '';
-    const t = setTimeout(() => rej(new Error('mock no start\n' + out)), 8000);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { out += d; if (out.includes('[mock] READY')) { clearTimeout(t); res(child); } });
-    child.stderr.on('data', () => {});
+    let out = '', settled = false;
+    const t = setTimeout(() => { settled = true; try { child.kill(); } catch {} rej(new Error('mock did not start in 8s\n' + out)); }, 8000);
+    const onData = (d) => { out += d; if (!settled && out.includes('[mock] READY')) { settled = true; clearTimeout(t); res(child); } };
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', onData);
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', onData);
+    // a mock that exits first (a taken port, say) is reported at once, with its own words
+    child.on('exit', (code) => { if (!settled) { settled = true; clearTimeout(t); rej(new Error(`mock exited ${code} before it was ready\n` + out)); } });
   });
 }
 

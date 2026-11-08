@@ -24,7 +24,7 @@
 //        director loop (which doubles as the director-min strip-guard at runtime).
 //
 // Requires a Chromium channel on the machine (system Edge/Chrome):
-//   npm install --no-save playwright-core
+//   npm install            (playwright-core is a pinned devDependency)
 // External hosts (vdo.ninja, Discord CDN) are route-blocked — we assert iframe/img
 // URL assembly and classes, never remote content. Screenshots (gitignored):
 // roster-check.png, control-check.png, nameplate-check.png.

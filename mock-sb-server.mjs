@@ -22,7 +22,7 @@
 //                                  {vdo?, discord?} (null clears one): a corrupt saved state
 //       /                       -> a landing page for quick manual testing
 //
-//     Test options (environment variables, all off by default):
+//     Test options (environment variables; everything is off by default except the Hello):
 //       SYNC_DELAY_MS=<n>       VDO Sync broadcasts its replay n ms after the request
 //                               (a slow first sync). The caches are read at request time.
 //       SB_WIRE=object          the OLD action behaviour, kept so the pages' compatibility with an
@@ -45,15 +45,16 @@
 //       SB_SUBSCRIBE=none|error Subscribe is never answered, or answered {status:'error'}
 //       SB_SUBSCRIBE_DELAY_MS=<n>  the Subscribe reply (ok or error) comes n ms late
 //       SB_DOACTION=error       every DoAction is answered {status:'error'} and not run
-//       SB_HELLO=plain|auth     send a Hello frame on connect: plain, or carrying an authentication block
+//       SB_HELLO=none|plain|auth every connection gets a Hello (info.source 'mock') unless SB_HELLO=none; 'plain' is the
+//                               same as the default, 'auth' adds an authentication block
 //       SB_AUTH=close|serve     with SB_HELLO=auth: close a client that sends any request, or serve
 //                               requests anyway (Authentication on, Enforce off); default: refuse them
 //       SB_SYNC_DROP=1          the first VDO Sync is acked but its replay is never broadcast
 //       The four mode options above can also be changed while running:
-//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve
+//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve   (hello=mock = the default)
 //       GET /mock/dropall       close every WebSocket client (they reconnect)
 //       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
-//       SB_DROP=1               accept each connection and close it ~100 ms later, unanswered
+//       SB_DROP=1               accept each connection, greet it, answer no request, and close it ~100 ms later
 //       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
 //
 //   • WebSocket Server on :8084 (not SB's 8080) — speaks SB's envelope and implements the FIVE
@@ -76,7 +77,7 @@
 //     On `Subscribe` it needs the general source and the Custom event (matched without regard to
 //     case); anything else is acked but receives nothing.
 //     Every connection is greeted with {request:'Hello', info:{name:'greenroom-mock', source:'mock'}}
-//     (SB_HELLO=none|plain|auth change that), so a client can tell this is not Streamer.bot.
+//     (SB_HELLO=none removes it, =auth adds an authentication block), so a client can tell this is not Streamer.bot.
 //     It refuses to start when either port is already taken, and prints one `[mock] READY http=<p> ws=<p>`
 //     line once both listeners are up.
 //     DoAction is ALWAYS acked {status:'ok'} — ok means the action STARTED, not that it
@@ -122,12 +123,26 @@ const connLog = []; // WebSocket connect times
 
 // Refuse to start on a port something already holds, on loopback OR on all interfaces (a listener on 0.0.0.0 can sit under
 // a loopback bind on Windows without raising an error, which would leave two servers answering one port).
+// Loopback, every IPv4 interface, and the IPv6 wildcard and loopback (a dual-stack listener is how .NET and Node servers
+// usually bind). A machine without IPv6 (EAFNOSUPPORT / EADDRNOTAVAIL) simply has nothing to collide with there.
 async function portFree(port) {
-  for (const host of ['127.0.0.1', '0.0.0.0']) {
-    const ok = await new Promise((res) => { const t = createTcpServer(); t.once('error', () => res(false)); t.listen(port, host, () => t.close(() => res(true))); });
-    if (!ok) return false;
+  for (const host of ['127.0.0.1', '0.0.0.0', '::', '::1']) {
+    const res = await new Promise((r) => { const t = createTcpServer(); t.once('error', (e) => r(e.code || 'ERR')); t.listen(port, host, () => t.close(() => r('ok'))); });
+    if (res === 'ok' || res === 'EAFNOSUPPORT' || res === 'EADDRNOTAVAIL') continue;
+    return false;
   }
   return true;
+}
+// SB_HTTP_PORT and SB_WS_PORT are also the names the real tools (the sidecar, backup.mjs) read to find a live Streamer.bot, so a
+// shell that exports them for those would otherwise point the mock at the live ports. Streamer.bot's own are refused outright,
+// before anything is bound.
+if (!process.argv.includes('--allow-sb-ports')) {
+  for (const [what, port, own] of [['HTTP', HTTP_PORT, 7474], ['WebSocket', WS_PORT, 8080]]) {
+    if (port === own) {
+      console.error(`[mock] the ${what} port ${port} is Streamer.bot's own. The mock will not use it. Choose another with SB_HTTP_PORT / SB_WS_PORT (or pass --allow-sb-ports if you really mean it).`);
+      process.exit(1);
+    }
+  }
 }
 for (const [what, port] of [['HTTP', HTTP_PORT], ['WebSocket', WS_PORT]]) {
   if (!(await portFree(port))) {
@@ -366,7 +381,8 @@ async function handleHttp(req, res) {
   const url = req.url || '/';
   let path;
   try { path = decodeURIComponent(url.split('?')[0]); } catch { res.writeHead(400, { 'content-type': 'text/plain' }); res.end('bad request'); return; }
-  const query = new URLSearchParams(url.split('?')[1] || '');
+  const rawQuery = url.includes('?') ? url.slice(url.indexOf('?') + 1) : ''; // a browser's query starts at the FIRST '?'
+  const query = new URLSearchParams(rawQuery);
 
   if (path === '/mock/actions') {
     const body = JSON.stringify({ actions: actionsLog }, null, 1);
@@ -461,8 +477,7 @@ async function handleHttp(req, res) {
   }
   // A page served from here must talk to THIS mock, never fall back to the default Streamer.bot port: with no ?sbport,
   // send the same URL back with it.
-  if (file.endsWith('.html') && !query.has('sbport')) {
-    const rawQuery = url.includes('?') ? url.slice(url.indexOf('?') + 1) : '';
+  if (extname(file).toLowerCase() === '.html' && !query.has('sbport')) {
     res.writeHead(302, { location: url.split('?')[0] + '?' + (rawQuery ? rawQuery + '&' : '') + 'sbport=' + WS_PORT });
     res.end();
     return;

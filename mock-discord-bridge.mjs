@@ -20,7 +20,9 @@
 //
 // SAFETY: this program does nothing to a server until that server's Hello frame says it is the mock
 // (info.source === 'mock'). Pointed at anything else (a real Streamer.bot says no such thing, and an unresponsive
-// server says nothing) it logs why and exits without sending a byte. To drive a REAL Streamer.bot on purpose, pass
+// server says nothing) it logs why and exits. It sends no Subscribe and no action: all it ever does to such a server is
+// open the connection, read the Hello and hang up. (If nothing is listening at all it keeps retrying, so it can be
+// started before the mock.) To drive a REAL Streamer.bot on purpose, pass
 // --allow-real-sb with SB_WS_URL=ws://127.0.0.1:8080/. Know what that does: the real sidecar also obeys Connect,
 // Leave, USE and settings edits sent over the bus, and the pushes below overwrite the live discord.state, so close
 // the real sidecar first and use it only on a Streamer.bot you are free to disturb.
@@ -198,7 +200,7 @@ function dispatch(command, value) {
 }
 
 function refuse(why) {
-  console.log(`[mock-bridge] REFUSING to act on ${WS_URL}: ${why}. Nothing was sent. (--allow-real-sb overrides this on purpose.)`);
+  console.log(`[mock-bridge] REFUSING to act on ${WS_URL}: ${why}. No Subscribe or action was sent. (--allow-real-sb overrides this on purpose.)`);
   process.exit(2);
 }
 
@@ -240,6 +242,7 @@ function connect() {
     dispatch(String(d.command || ''), String(d.value ?? ''));
   });
   ws.on('close', () => {
+    clearTimeout(helloTimer); // a stale 'no Hello' timer must never act on a connection that has already ended
     stopTimers();
     console.log(`[mock-bridge] disconnected — retrying in ${RECONNECT_MS}ms`);
     setTimeout(connect, RECONNECT_MS);
