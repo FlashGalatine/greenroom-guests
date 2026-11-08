@@ -830,9 +830,14 @@ async function main() {
     const pgY = await newPage(browser, { width: 920, height: 1300 });
     await pgY.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
     await wait(pgY, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
-    await fresh.api.broadcast({ type: 'vdo:error', message: 'Streamer.bot could not parse the payload' });
+    await fresh.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON' });
+    await wait(pgY, () => /payload rejected/.test(document.getElementById('sbStatus')?.textContent || ''), null, 4000);
+    check('R8c: an error that has nothing to do with dates (the new push check) is not blamed on a date-shaped entry',
+      await pgY.evaluate(() => { const t = document.getElementById('sbStatus')?.textContent || ''; return /payload rejected/.test(t) && !/date-like/.test(t); }),
+      await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
+    await fresh.api.broadcast({ type: 'vdo:error', message: 'The added or subtracted value results in an un-representable DateTime.' });
     const namedPill = await wait(pgY, (n) => (document.getElementById('sbStatus')?.textContent || '').includes(n), DATE_LABEL, 4000);
-    check('R8c: the vdo:error pill names the date-shaped directory entry', namedPill,
+    check('R8c: Streamer.bot\'s own date failure (an old action paste) names the date-shaped directory entry', namedPill,
       await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
     await pgY.close(); dateProd.close();
 
@@ -1592,6 +1597,47 @@ async function main() {
         check(`R11 ${what}: the old object format is red (the cam stays blank, and either the saved label was rewritten or an SB action error shows)`,
           !bad.painted && (bad.cachedLabel !== label || /error/i.test(bad.pill)), JSON.stringify(bad));
       }
+    }
+
+    // ── R12: the empty marker, and a saved config Streamer.bot cannot read ─────────────────────────────
+    if (!ONLY || ONLY === 'labels') {
+      console.log('\n[R12] sync messages: marker + confirm, error hints, a damaged saved config');
+      // (a) A fresh install whose first VDO Sync is slow: the operator confirms the 'replace' prompt, and the empty marker
+      // arrives while that prompt is open. The marker means nothing is saved, so the confirmed Save must still go out.
+      const slowFresh = await startExtra({ SYNC_DELAY_MS: '2500' });
+      const pgM = await newPage(browser, { width: 920, height: 1300 });
+      let askedM = 0;
+      pgM.on('dialog', async (d) => { askedM++; await sleep(3500); await d.accept(); });
+      await pgM.goto(`${slowFresh.api.base}/control/control.html?sbport=${slowFresh.ws}`, { waitUntil: 'load' });
+      await sleep(800);
+      await pgM.fill('#vdoRoom', 'confirm-room');
+      await pgM.click('#btnVdoSave');
+      let pushedM = null;
+      for (let i = 0; i < 30 && !pushedM; i++) {
+        pushedM = pushesOf(await slowFresh.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean).find((p) => p.room === 'confirm-room');
+        if (!pushedM) await sleep(250);
+      }
+      const statusM = await pgM.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+      check('R12: the operator confirmed a Save while the first VDO Sync was slow, the empty marker arrived meanwhile: the Save goes out, and the page does not claim a saved config arrived',
+        askedM === 1 && !!pushedM && !/arrived/.test(statusM), JSON.stringify({ askedM, pushed: !!pushedM, statusM }));
+      await pgM.close(); slowFresh.prod.close(); slowFresh.proc.kill();
+
+      // (b) A saved vdo.state that is not valid JSON: VDO Sync reports it. The pages say that, not 'a fresh install'.
+      const damaged = await startExtra({});
+      await fetch(`${damaged.api.base}/mock/setcache`, { method: 'POST', body: JSON.stringify({ vdo: '{"enabled":true,"room":"evil"},"type":"x"}' }) }).then((r) => r.arrayBuffer());
+      const pgDc = await newPage(browser, { width: 920, height: 1300 });
+      const pgDm = await newPage(browser, { width: 480, height: 120 });
+      await Promise.all([pgDc.goto(`${damaged.api.base}/control/control.html?sbport=${damaged.ws}`), pgDm.goto(`${damaged.api.base}/control/director-min.html?sbport=${damaged.ws}`)]);
+      const dmgC = await wait(pgDc, () => { const e = document.getElementById('syncStatus'); return !!e && !e.hidden && /damaged/i.test(e.textContent); }, null, 9000);
+      const dmgTxt = await pgDc.evaluate(() => document.getElementById('syncStatus')?.textContent || '');
+      check('R12: control.html says the saved config is damaged (and gives the remedy), not "a fresh install"', dmgC && !/fresh install/.test(dmgTxt) && /Import a backup or re-save/.test(dmgTxt), dmgTxt);
+      const dmgM = await wait(pgDm, () => /damaged/i.test(document.getElementById('status')?.textContent || ''), null, 9000);
+      const dmgMtxt = await pgDm.evaluate(() => document.getElementById('status')?.textContent || '');
+      check('R12: director-min says so too, and stays put past the 5 s "fresh install" message', dmgM && !/fresh install/.test(dmgMtxt), dmgMtxt);
+      await sleep(5500);
+      check('R12: …still true after the page has waited longer than the "names both causes" timer',
+        /damaged/i.test(await pgDm.evaluate(() => document.getElementById('status')?.textContent || '')) && /damaged/i.test(await pgDc.evaluate(() => document.getElementById('syncStatus')?.textContent || '')));
+      await pgDc.close(); await pgDm.close(); damaged.prod.close(); damaged.proc.kill();
     }
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');

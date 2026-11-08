@@ -43,8 +43,9 @@ C# Code**, paste the whole file from `actions/`, and click **Compile** — it mu
 report success. *An ok ack only means the action started. An action that failed
 to compile is silent (it acks ok and broadcasts nothing; the symptom is a blank or
 stale overlay), so always click Compile and confirm it succeeds. An invalid
-argument or a runtime exception inside a compiled action is reported by an error
-broadcast, which the control page shows.*
+argument or a runtime exception inside a compiled state action (`VDO Push`, `VDO Sync`,
+`Discord Voice Push`) is reported by an error broadcast, which the control page shows;
+`Discord Bridge Start` only writes to Streamer.bot's log.*
 
 | Action name | File | Notes |
 |---|---|---|
@@ -55,8 +56,8 @@ broadcast, which the control page shows.*
 | `Discord Bridge Start` *(optional)* | `actions/discord-bridge-start.cs` | **References step below** |
 
 **Put the three state actions on their own blocking queue.** `VDO Push`,
-`Discord Voice Push` and `VDO Sync` each read or write a saved state and then
-broadcast it. On Streamer.bot's Default queue, which is non-blocking, actions
+`Discord Voice Push` and `VDO Sync` each read or write a saved state and broadcast it
+(a push broadcasts, then saves; a sync reads, then broadcasts). On Streamer.bot's Default queue, which is non-blocking, actions
 run concurrently, so a `VDO Sync` replay can land after a newer push and put
 stale state back on the pages. Serialise the three:
 
@@ -76,20 +77,28 @@ broadcast, so this queue is the only protection against that race today.
 `VDO Sync` and `Discord Voice Push` broadcast the state as an escaped string field
 (`vdoninjaJson`, `discordVoiceJson`) instead of a nested object, so a guest or Discord
 name that looks like a timestamp can no longer be rewritten, or stop the broadcast,
-inside Streamer.bot. The pages read both shapes from 1.0.24 (control pages) and 1.0.29
-(overlays), which is why the order matters:
+inside Streamer.bot. The pages read both shapes (the control pages since 1.0.24, the
+overlays since 1.0.29), which is why the order matters:
 
 1. Run `npm run backup` while the **old actions are still in place** (it reads both
-   shapes).
-2. Copy the `control/` and `overlay/` folders over the old ones, then restart OBS
-   (or refresh every Greenroom browser source and reload the dock), so every page
-   loads code that understands the new frames.
+   shapes). Two caveats: if a guest label or name looks like a date or time, the old
+   actions hand the backup a re-formatted copy (the tool says so when it happens), and if
+   such a name makes the old `VDO Sync` fail, the backup stops with that error. Neither
+   changes your saved config: carry on with steps 2 and 3, then take the backup again.
+   That one is exact.
+2. Update the **whole Greenroom folder** (or, at least, `control/`, `overlay/` and
+   `backup.mjs`: an older `backup.mjs` cannot read the new frames and would say there is
+   nothing to back up), then restart OBS or refresh **every** Greenroom browser source
+   (guest slots, nameplates and the roster) and reload the dock, `director-min` and any
+   control page you keep open in a browser tab, so every page loads code that
+   understands the new frames.
 3. **Only then** re-paste `VDO Push`, `VDO Sync` and `Discord Voice Push` into
    Streamer.bot and click **Compile** on each. No bridge restart is needed.
 
-If the actions are re-pasted before the pages are updated, a guest-slot source still
-on code older than 1.0.29 shows a blank cam when the new frames arrive, and a dock or
-`director-min` source older than 1.0.24 can overwrite `vdo.state` with its defaults.
+If the actions are re-pasted before the pages are updated, any overlay source (a guest
+slot, a nameplate, the roster) still on code older than 1.0.29 shows nothing when the new
+frames arrive, and a dock or `director-min` source older than 1.0.24 can overwrite
+`vdo.state` with its defaults.
 
 **Protect your saved config.** The room, slots and guest directory live only in
 Streamer.bot's persisted `vdo.state`.

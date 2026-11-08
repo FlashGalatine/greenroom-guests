@@ -26,8 +26,9 @@
 // empty discord.state is skipped (a webcam-only setup never has one).
 // Each cached blob is checked with the push actions' strict JSON validator before it is
 // replayed. An invalid cache is reported ({ type:"vdo:error" } or "discord:voice:error",
-// "cached state is not valid JSON - Import a backup or re-save"), not replayed, and KEPT:
-// the action never unsets a global, so a backup Import or the next push can still fix it.
+// "cached state is not valid JSON - …" with the remedy that fits: Import a backup or re-save
+// for the persisted vdo.state, the bridge's next push for the non-persisted discord.state),
+// not replayed, and KEPT: the action never unsets a global.
 
 using System;
 using System.Collections.Generic;
@@ -57,7 +58,7 @@ public class CPHInline
             else
             {
                 ok = false;
-                Invalid("vdo:error", "vdo.state", vdoWhy);
+                Invalid("vdo:error", "vdo.state", vdoWhy, "cached state is not valid JSON - Import a backup or re-save");
             }
         }
         catch (Exception ex)
@@ -80,7 +81,7 @@ public class CPHInline
                 else
                 {
                     ok = false;
-                    Invalid("discord:voice:error", "discord.state", discordWhy);
+                    Invalid("discord:voice:error", "discord.state", discordWhy, "cached state is not valid JSON - the bridge replaces it with its next push (restart the bridge to force one)");
                 }
             }
         }
@@ -102,10 +103,10 @@ public class CPHInline
     }
 
     // A cached blob that is not a valid JSON object: say so, replay nothing, leave the global alone.
-    void Invalid(string type, string name, string why)
+    void Invalid(string type, string name, string why, string message)
     {
         CPH.LogWarn("[VDO Sync] " + name + " is not valid JSON (" + why + "); not replayed, and kept as it is");
-        Send(type, "cached state is not valid JSON - Import a backup or re-save");
+        Send(type, message);
     }
 
     void Send(string type, string message)
@@ -194,7 +195,7 @@ public class CPHInline
         string e = ReadString(s, ref i);
         if (e != null) return e;
         string key = DecodeKey(s, start, i);
-        if (keys.ContainsKey(key)) return "duplicate key \"" + key + "\"";
+        if (keys.ContainsKey(key)) return "duplicate key \"" + (key.Length > 40 ? key.Substring(0, 40) + "..." : key) + "\"";
         keys[key] = true;
         SkipWs(s, ref i);
         if (i >= s.Length || s[i] != ':') return "expected ':' at " + i;

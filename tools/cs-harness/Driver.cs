@@ -4,10 +4,11 @@
 //   RESET
 //   ARG <name> <base64 utf8>            set an action argument
 //   SETVAR <0|1> <name> <base64 utf8>   preset a global (1 = persisted store)
-//   THROW <|first|all>                  make WebsocketBroadcastJson fail ("" = never)
+//   THROW <|first|all|type:<t>>         make WebsocketBroadcastJson fail ("" = never; type:<t> = frames of that type)
 //   NEWTONSOFT <0|1>                    parse + re-serialise frames like Streamer.bot (if built in)
 //   RUN <vdo-push|vdo-sync|discord-voice-push>   -> RESULT true|false, FRAME.., VAR.., TRACE.., END
-//   FUZZ <file>                         each line "<exp>\t<base64 payload>"; runs vdo-push; writes <file>.result
+//   FUZZ <file>                         (the rest of the line is the path) each line "<exp>\t<base64 payload>"; runs vdo-push; writes <file>.result
+//   RAW <base64 text>                   broadcast that text as a frame (through Newtonsoft if NEWTONSOFT is on) -> THREW.., FRAME.., END
 //   CAPS                                -> CAPS newtonsoft=<0|1>
 using System;
 using System.Collections.Generic;
@@ -70,11 +71,21 @@ public static class Driver
                         stdout.WriteLine("END");
                         break;
                     }
+                    case "RAW":
+                    {
+                        C.Frames.Clear(); C.Trace.Clear();
+                        try { C.WebsocketBroadcastJson(FromB64(p.Length > 1 ? p[1] : "")); }
+                        catch (Exception ex) { stdout.WriteLine("THREW " + ex.GetType().Name); }
+                        foreach (string f in C.Frames) stdout.WriteLine("FRAME " + B64(f));
+                        stdout.WriteLine("END");
+                        break;
+                    }
                     case "FUZZ":
                     {
+                        string path = line.Substring(5);
                         var result = new StringBuilder();
                         int n = 0;
-                        foreach (string l in File.ReadAllLines(p[1]))
+                        foreach (string l in File.ReadAllLines(path))
                         {
                             if (l.Length == 0) continue;
                             string payload = FromB64(l.Split('\t')[1]);
@@ -84,7 +95,7 @@ public static class Driver
                             result.Append(C.Persisted.ContainsKey("vdo.state") ? 'A' : 'R');
                             n++;
                         }
-                        File.WriteAllText(p[1] + ".result", result.ToString());
+                        File.WriteAllText(path + ".result", result.ToString());
                         stdout.WriteLine("FUZZED " + n);
                         break;
                     }

@@ -24,8 +24,8 @@ Streamer.bot is the entire bus — there is no other server.
 // (Greenroom does not authenticate). It clears on the next healthy connection.
 
 // DoAction — an ack {id, status:'ok'} means only that the action STARTED, not that it
-// succeeded. An invalid argument or a runtime exception inside a running action is
-// reported by an error broadcast (see "Error broadcasts" below). An action whose C#
+// succeeded. An invalid argument or a runtime exception inside a running state action is
+// reported by an error broadcast (see "Error broadcasts" below; Discord Bridge Start only logs). An action whose C#
 // failed to COMPILE is silent: it acks ok and broadcasts nothing (the symptom is a
 // blank or stale overlay), so always click Compile and confirm it succeeds.
 { "request": "DoAction", "id": "2", "action": { "name": "VDO Push" }, "args": { "payload": "{...}" } }
@@ -75,7 +75,8 @@ containers nest at most 32 deep. Anything else is refused with an error broadcas
 (`payload rejected, NOT cached: <reason>`), so damaged text, such as a half-built
 `{…},"type":"x"}`, never reaches the cache. `VDO Sync` applies the same check to each
 cached blob before replaying it; an invalid one is reported (`cached state is not
-valid JSON - Import a backup or re-save`), not replayed, and **kept** (the action
+valid JSON - …`, with the remedy that fits: Import a backup or re-save for `vdo.state`,
+the bridge's next push for `discord.state`), not replayed, and **kept** (the action
 never unsets a global). The only other C#-built JSON is the tiny command broadcast
 and the error shapes. The broadcast comes **before** the cache write, so a broadcast
 that fails (an exception in `WebsocketBroadcastJson`) never leaves a saved state

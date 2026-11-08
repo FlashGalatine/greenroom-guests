@@ -159,10 +159,11 @@ npm run verify:render  # 44 real-browser checks: guest slot URL assembly + the
 npm run verify:cs      # compiles the three state actions as shipped (the C# compiler
                        # that comes with .NET Framework 4, against mscorlib only) and
                        # runs them against a stub of Streamer.bot: every frame, the
-                       # broadcast-before-cache order, date-shaped guest labels.
-                       # Skips itself when no C# compiler is found. Set
+                       # broadcast-before-cache order, the strict JSON check. Skips
+                       # itself when no C# compiler is found. Set
                        # GREENROOM_NEWTONSOFT_DLL to Streamer.bot's Newtonsoft.Json.dll
-                       # to re-parse each frame the way Streamer.bot does.
+                       # and it also re-parses each frame the way Streamer.bot does,
+                       # which is what the date-shaped guest label checks need.
 npm start            # mock Streamer.bot (:7474/:8080) for hands-on dev
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
 ```

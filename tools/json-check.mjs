@@ -3,10 +3,20 @@
 // tools/cs-harness/fuzz.mjs uses it as the oracle the compiled action must agree with.
 //
 // A text passes when it is ONE JSON object (RFC 8259, nothing after it), no object repeats a key
-// (compared after decoding escapes, so "a" and "a" collide), and containers are nested at most
+// (compared after decoding escapes, so "a" and "\u0061" collide), and containers are nested at most
 // MAX_DEPTH deep, the top-level object counting as 1.
 
 export const MAX_DEPTH = 32;
+
+// What the actions do before they validate: C# string.Trim() on .NET Framework. It differs from JavaScript's
+// trim() in exactly two characters: U+0085 is stripped by .NET only, U+FEFF (the byte order mark) by JavaScript only.
+export function netTrim(s) {
+  const strips = (c) => (c === '\ufeff' ? false : c === '\u0085' || /\s/.test(c));
+  let a = 0, z = s.length;
+  while (a < z && strips(s[a])) a++;
+  while (z > a && strips(s[z - 1])) z--;
+  return s.slice(a, z);
+}
 
 // null when the text is acceptable, else a short reason.
 export function objectError(text) {

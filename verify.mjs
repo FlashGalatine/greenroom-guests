@@ -404,6 +404,12 @@ async function main() {
         strC.doAction('Discord Voice Push', { payload: SPLICES[1] });
         const dsp = await strP.events.next(2000, (d) => d.type === 'discord:voice:error' || d.type === 'discord:voice:update', 'discord verdict');
         check('string mode: Discord Voice Push refuses a splice too', dsp.type === 'discord:voice:error' && /rejected, NOT cached/.test(dsp.message) && (await stateOf(strMock)).discord === null);
+        for (const junk of ['null', '[1]', '"x"', '7']) {
+          const res = await fetch(`${strMock.base}/mock/setcache`, { method: 'POST', body: junk }).then((r) => r.status).catch(() => 'down');
+          if (res !== 400) refused.push('setcache ' + junk + ' -> ' + res);
+        }
+        check('the mock refuses a /mock/setcache body that is not an object with a 400 and keeps running',
+          !refused.some((x) => /^setcache/.test(x)) && (await fetch(`${strMock.base}/mock/state`).then((r) => r.status).catch(() => 'down')) === 200, JSON.stringify(refused.filter((x) => /^setcache/.test(x))));
         // …and a cached state that is not valid JSON (a corrupt persisted global) is reported, skipped and kept by VDO Sync,
         // while the other replay still goes out.
         const setCache = (body) => fetch(`${strMock.base}/mock/setcache`, { method: 'POST', body: JSON.stringify(body) }).then((r) => r.arrayBuffer());
@@ -435,13 +441,15 @@ async function main() {
         // Backup against an older actions paste (the deploy order runs it BEFORE the actions are updated).
         const bkFile = resolve(__dirname, '.verify-backup-object.json');
         await rm(bkFile, { force: true });
-        const bkSave = await runNode(['backup.mjs', 'save', bkFile], { SB_WS_PORT: String(objMock.wsPort) });
+        const bkSave = await runNode(['backup.mjs', 'save', bkFile], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url });
         let bk = null; try { bk = JSON.parse(await readFile(bkFile, 'utf8')); } catch { /* left null */ }
         check('backup save works against the old object format (room + directory intact)',
           bkSave.code === 0 && !!bk && bk.vdoninja && bk.vdoninja.room === 'testroom' && bk.vdoninja.directory.length === 2, bkSave.out.trim().slice(0, 200));
+        check('…and says the copy came through the old broadcast format (which re-formats date-shaped names), so a fresh backup after the update is the exact one',
+          /OLD broadcast format/.test(bkSave.out) && /after re-pasting/.test(bkSave.out), bkSave.out.trim().slice(0, 300));
         objC.doAction('VDO Push', { payload: JSON.stringify({ ...VDO_PAYLOAD, room: 'CHANGED' }) });
         await objP.events.next(2000, (d) => d.type === 'vdoninja:update' && d.vdoninja.room === 'CHANGED', 'object-mode change');
-        const bkRestore = await runNode(['backup.mjs', 'restore', bkFile], { SB_WS_PORT: String(objMock.wsPort) });
+        const bkRestore = await runNode(['backup.mjs', 'restore', bkFile], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url });
         check('backup restore works against the old object format (the snapshot is back in the cache)',
           bkRestore.code === 0 && /restored/.test(bkRestore.out) && (await stateOf(objMock)).vdo.room === 'testroom', bkRestore.out.trim().slice(0, 200));
         await rm(bkFile, { force: true });
@@ -455,6 +463,9 @@ async function main() {
         const o3 = await objP.events.next(2000, byType('vdoninja:update'), 'ms-date label');
         check('object mode: a /Date(ms)/ label turns into ISO text', o3.vdoninja.slots[0].label === '2023-11-14T22:13:20Z', o3.vdoninja.slots[0].label);
 
+        objC.doAction('VDO Push', { payload: labelled('/Date(-1234)/') });
+        const o3b = await objP.events.next(2000, byType('vdoninja:update'), 'negative ms-date label');
+        check('object mode: /Date(-1234)/ is 1234 ms before 1970 (a four-digit negative value is not an offset)', o3b.vdoninja.slots[0].label === '1969-12-31T23:59:58.766Z', o3b.vdoninja.slots[0].label);
         objC.doAction('Discord Voice Push', { payload: JSON.stringify(DISCORD_PAYLOAD) });
         await objP.events.next(2000, byType('discord:voice:update'), 'object-mode discord update');
         objP.events.drain();
@@ -469,6 +480,10 @@ async function main() {
         const o5 = await objP.events.next(2000, (d) => d.type === 'vdo:error' || d.type === 'vdoninja:update', 'sync result');
         check('object mode: the Sync of that cache fails the same way, and the Discord replay never goes out (ONE try around both)',
           o5.type === 'vdo:error' && await rejects(objP.events.next(600, byType('discord:voice:update'), 'a discord replay')), JSON.stringify(o5).slice(0, 160));
+        const bkBad = await runNode(['backup.mjs', 'save', bkFile], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url });
+        check('backup save against the old wire with a saved label that makes the old VDO Sync throw: exits non-zero, shows the error, and tells the operator to carry on with the update and back up again afterwards',
+          bkBad.code !== 0 && /reported an error/.test(bkBad.out) && /DateTime/.test(bkBad.out) && /back up again/.test(bkBad.out), bkBad.out.trim().slice(0, 400));
+        await rm(bkFile, { force: true });
         await fetch(`${objMock.base}/mock/restart?vdo=1`);
         objP.events.drain();
         objC.doAction('VDO Sync', {});
@@ -821,8 +836,16 @@ async function main() {
     check('vdo-sync.cs: both replays are string fields (vdoninjaJson, discordVoiceJson), and an empty vdo.state broadcasts vdo:sync:empty',
       sync.includes('\\"vdoninjaJson\\":" + JsonStr(vdo)') && sync.includes('\\"discordVoiceJson\\":" + JsonStr(discord)')
       && sync.includes('{\\"type\\":\\"vdo:sync:empty\\"}') && !sync.includes('\\"vdoninja\\":"') && !sync.includes('\\"discordVoice\\":"'));
-    check('vdo-sync.cs: the two replays are separate try blocks (one failure never stops the other)',
-      (sync.match(/\btry\b/g) || []).length >= 2 && sync.includes('Report("vdo:error", ex)') && sync.includes('Report("discord:voice:error", ex)'));
+    {
+      // Structure, not a count of the word 'try' (the Send helper has one too): the vdo read sits in a try, a catch that reports it
+      // closes that try before the Discord read starts, and the Discord read sits in its own try.
+      const iV = sync.indexOf('GetGlobalVar<string>("vdo.state", true)'), iD = sync.indexOf('GetGlobalVar<string>("discord.state", false)');
+      const between = iV >= 0 && iD > iV ? sync.slice(iV, iD) : '';
+      check('vdo-sync.cs: the two replays are separate try blocks (the vdo try is closed by its own catch before the Discord one opens)',
+        iV > 0 && /\btry\b[^{]*\{[^{}]*$/.test(sync.slice(0, iV).replace(/\{[^{}]*\}/g, '')) === true
+        && /catch \(Exception ex\)\s*\{[^}]*Report\("vdo:error", ex\)/.test(between) && /\btry\b/.test(between.slice(between.indexOf('Report("vdo:error", ex)')))
+        && sync.slice(iD).includes('Report("discord:voice:error", ex)'));
+    }
     check('discord-voice-push.cs: the payload is validated (ObjectError) before anything is broadcast or cached; a refusal says NOT cached',
       before(dPush, 'string why = ObjectError(payload);', 'WebsocketBroadcastJson(') && dPush.includes('payload rejected, NOT cached: '));
     check('vdo-sync.cs: each cached blob is validated before it is replayed; an invalid one is reported and kept, never unset',

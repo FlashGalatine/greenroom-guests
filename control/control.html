@@ -431,6 +431,8 @@
   // can never write the built-in defaults into a "backup".
   let gotConfig = false;
   let unsyncedOverride = false; // true only while a confirmed operator action runs
+  let syncedByMarker = false;   // synced by {type:'vdo:sync:empty'} (nothing saved), not by a saved config
+  let syncError = '';           // a saved config Streamer.bot reported as unreadable, while the page is not yet synced
   let syncPhase = 0;            // 0 quiet · 1 'has not answered' · 2 names both causes
   let syncTimer = null;
   let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
@@ -514,6 +516,11 @@
     const el = els.syncStatus;
     if (schemaTooNew) { el.hidden = false; el.textContent = MSG_RELOAD; return; }
     // (while requests are being refused the SB pill says why; blaming VDO Sync would mislead)
+    if (syncError && !synced && !connFault) {
+      el.hidden = false;
+      el.textContent = `Streamer.bot reports that its saved config is damaged (${syncError}). Nothing is pushed on its own; saving asks first, and replaces it.`;
+      return;
+    }
     if (synced || syncPhase === 0 || connFault) { el.hidden = true; el.textContent = ''; return; }
     el.hidden = false;
     el.textContent = syncPhase >= 2 ? MSG_SYNC_LONG : MSG_SYNC_SHORT;
@@ -538,6 +545,7 @@
     hydrated = true;
     if (synced) return;
     synced = true;
+    syncError = '';
     clearTimeout(syncTimer);
     renderSyncStatus();
     // A refused request (VDO Sync, usually) is moot once the saved config has arrived another way.
@@ -572,7 +580,7 @@
     // it brought the saved config, the operator's yes was about replacing something that is
     // no longer missing, and nothing is pushed over it.
     setTimeout(() => {
-      if (synced) { setCfgStatus(MSG_SYNC_ARRIVED); return; }
+      if (synced && !syncedByMarker) { setCfgStatus(MSG_SYNC_ARRIVED); return; }
       unsyncedOverride = true;
       try { fn(); } finally { unsyncedOverride = false; }
     }, CONFIRM_DEFER_MS);
@@ -752,14 +760,14 @@
       if (!v) return; // no usable state in the frame: drop it, never mark the page synced
       const sig = JSON.stringify(v);
       if (sig === lastPushedSig) { // our own echo: a real config is in this page
-        gotConfig = true;
+        gotConfig = true; syncedByMarker = false;
         renderExportButton();
         markSynced();
         return;
       }
       const firstSync = !synced;
       if (!adoptCfg(v)) return; // not config-shaped: drop it
-      gotConfig = true; // a real config reached this page
+      gotConfig = true; syncedByMarker = false; // a real config reached this page
       if (firstSync) releaseFocusForAdoption();
       markSynced();
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
@@ -770,6 +778,7 @@
       if (runAutoAdd()) { renderDirectory(); assembleAndPush(false); }
     } else if (d.type === 'vdo:sync:empty') {
       // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
+      if (!synced) syncedByMarker = true;
       markSynced();
       renderAll();
     } else if (d.type === 'discord:voice:update') {
@@ -784,9 +793,12 @@
       if (grew) assembleAndPush(false);
     } else if (d.type === 'vdo:error' || d.type === 'discord:voice:error') {
       let text = 'SB action error: ' + (d.message || d.type);
-      // A date-shaped label or name makes Streamer.bot's JSON parse throw (GRN-60): name
-      // the entries that look like that, so the operator knows what to remove or rename.
-      const bad = dateShapedEntries();
+      // A saved config the actions cannot read: say so on the sync line (not 'a fresh install').
+      if (d.type === 'vdo:error' && !synced && /not valid JSON/i.test(d.message || '')) { syncError = d.message; renderSyncStatus(); }
+      // Streamer.bot's own date parse throws on a date-shaped label or name only with an OLD action paste (GRN-60;
+      // the string-field actions never let it see them): then name the entries that look like that, so the operator
+      // knows what to remove or rename. Any other error is not blamed on them.
+      const bad = /DateTime/i.test(d.message || '') ? dateShapedEntries() : [];
       if (bad.length) text += ` · date-like text in ${bad.map((b) => '"' + b + '"').join(', ')}: remove or rename it`;
       setPill(els.sbStatus, text, 'error');
     }
@@ -1845,7 +1857,7 @@
     operatorAction(() => {
       adoptCfg(payload);
       hydrated = true;
-      gotConfig = true; // this page now holds a real config
+      gotConfig = true; syncedByMarker = false; // this page now holds a real config
       dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
       renderAll();
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export

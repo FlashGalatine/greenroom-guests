@@ -288,8 +288,8 @@
       lastDiscord = msg.discordVoice || null;
       render();
     } else if (msg.type === 'vdoninja:update') {
-      // Stored and applied on every render — VDO Sync replays vdo before
-      // discord, so never assume arrival order.
+      // Stored and applied on every render — VDO Sync promises no order between
+      // its two replays, so never assume arrival order.
       directory = GRNameplate.sanitizeDirectory(msg.vdoninja && msg.vdoninja.directory);
       render();
     } else if (msg.type === 'sync') {

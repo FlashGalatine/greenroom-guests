@@ -148,7 +148,7 @@ public class CPHInline
         string e = ReadString(s, ref i);
         if (e != null) return e;
         string key = DecodeKey(s, start, i);
-        if (keys.ContainsKey(key)) return "duplicate key \"" + key + "\"";
+        if (keys.ContainsKey(key)) return "duplicate key \"" + (key.Length > 40 ? key.Substring(0, 40) + "..." : key) + "\"";
         keys[key] = true;
         SkipWs(s, ref i);
         if (i >= s.Length || s[i] != ':') return "expected ':' at " + i;

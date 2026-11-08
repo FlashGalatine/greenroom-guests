@@ -20,7 +20,8 @@ namespace Harness
         public List<string> Frames = new List<string>();   // what reached the WebSocket clients
         public List<string> Trace = new List<string>();    // every CPH call, in order
 
-        // "" = never fails; "first" = the first broadcast throws; "all" = every broadcast throws.
+        // "" = never fails; "first" = the first broadcast throws; "all" = every broadcast throws;
+        // "type:<frame type>" = a broadcast whose frame has that "type" throws.
         public string ThrowOnBroadcast = "";
         public bool Reserialize;     // (NEWTONSOFT builds only) parse + re-serialise like Streamer.bot
         int broadcasts;
@@ -62,7 +63,8 @@ namespace Harness
         {
             broadcasts++;
             Trace.Add("Broadcast");
-            if (ThrowOnBroadcast == "all" || (ThrowOnBroadcast == "first" && broadcasts == 1))
+            bool byType = ThrowOnBroadcast.StartsWith("type:") && data.Contains("\"type\":\"" + ThrowOnBroadcast.Substring(5) + "\"");
+            if (ThrowOnBroadcast == "all" || (ThrowOnBroadcast == "first" && broadcasts == 1) || byType)
             {
                 Trace.Add("Broadcast-throws");
                 throw new InvalidOperationException("stub: broadcast failed");

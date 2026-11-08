@@ -33,9 +33,11 @@ if (!CSC) {
   process.exit(0);
 }
 const NEWTONSOFT_DLL = process.env.GREENROOM_NEWTONSOFT_DLL && existsSync(process.env.GREENROOM_NEWTONSOFT_DLL) ? process.env.GREENROOM_NEWTONSOFT_DLL : '';
+if (process.env.GREENROOM_NEWTONSOFT_DLL && !NEWTONSOFT_DLL) console.log('WARNING: GREENROOM_NEWTONSOFT_DLL is set but that file does not exist, so the Newtonsoft checks are skipped.');
 let PRIVATE_LABELS = [];
-if (process.env.GREENROOM_PRIVATE_LABELS && existsSync(process.env.GREENROOM_PRIVATE_LABELS)) {
+if (process.env.GREENROOM_PRIVATE_LABELS) {
   try { PRIVATE_LABELS = JSON.parse(readFileSync(process.env.GREENROOM_PRIVATE_LABELS, 'utf8')).filter((x) => typeof x === 'string'); } catch {}
+  if (!PRIVATE_LABELS.length) console.log('WARNING: GREENROOM_PRIVATE_LABELS is set but gave no labels (a missing file, bad JSON, or not an array of strings), so no private label is checked.');
 }
 
 const ACTIONS = [['vdo-push', 'Act_VdoPush'], ['vdo-sync', 'Act_VdoSync'], ['discord-voice-push', 'Act_DiscordVoicePush']];
@@ -60,6 +62,14 @@ function csc(args) {
 }
 
 let child, buf = '', waiter = null;
+// Stop the harness, WAIT for it to exit (on Windows a running exe cannot be deleted), then remove the temp dir.
+async function cleanup() {
+  if (child) {
+    try { child.stdin.end(); child.kill(); } catch {}
+    await new Promise((res) => { if (child.exitCode !== null) return res(); child.once('exit', res); setTimeout(res, 4000); });
+  }
+  try { rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 }); } catch {}
+}
 function sendRaw(line) { child.stdin.write(line + '\n'); }
 function onData(d) {
   buf += d;
@@ -107,7 +117,8 @@ const DISC = { channelId: '222', connected: true, hostInChannel: true, users: { 
 const VDO_TXT = JSON.stringify(VDO), DISC_TXT = JSON.stringify(DISC);
 // A date-shaped label that Newtonsoft would rewrite when it parses the frame (benign: it is only re-formatted).
 const withLabel = (label) => JSON.stringify({ ...VDO, slots: [{ ...VDO.slots[0], label }], directory: [{ ...VDO.directory[0], vdoLabel: label, displayName: label }] });
-const REWRITTEN_LABELS = ['2024-02-03T04:05:06.000Z', '2024-02-03T04:05:06+02:00', '/Date(1700000000000)/'];
+const HOST_OFFSET = -new Date(2024, 1, 3).getTimezoneOffset(); // an offset label equal to the host's own would come back unchanged
+const REWRITTEN_LABELS = ['2024-02-03T04:05:06.000Z', '2024-02-03T04:05:06' + (HOST_OFFSET === 120 ? '-11:00' : '+02:00'), '/Date(1700000000000)/'];
 
 async function main() {
   console.log('Greenroom — C# actions: compile and run\n');
@@ -123,7 +134,7 @@ async function main() {
     if (NEWTONSOFT_DLL) copyFileSync(NEWTONSOFT_DLL, join(tmp, 'Newtonsoft.Json.dll'));
     const build = csc(['/target:exe', `/out:${exe}`, ...extra, resolve(HARNESS, 'Stub.cs'), resolve(HARNESS, 'Driver.cs'), ...wrapped]);
     check('the run harness builds', build.ok, build.out.slice(0, 600));
-    if (!stubOnly.ok || !build.ok) return;
+    if (!stubOnly.ok || !build.ok) throw new Error('the actions or the harness did not compile, so nothing could be run (see the FAIL lines above)');
 
     child = spawn(exe, [], { cwd: tmp, stdio: ['pipe', 'pipe', 'inherit'] });
     child.stdout.setEncoding('utf8');
@@ -131,6 +142,28 @@ async function main() {
     const caps = (await cmd('CAPS'))[0];
     const hasNewtonsoft = /newtonsoft=1/.test(caps);
     console.log(`  (Newtonsoft round trip ${hasNewtonsoft ? 'ON' : 'off: set GREENROOM_NEWTONSOFT_DLL to enable'}; ${PRIVATE_LABELS.length} private label(s))`);
+
+    if (hasNewtonsoft) {
+      // Positive controls. The label checks below send the state as a string field, which Newtonsoft never parses, so they
+      // would pass for ANY label. Here the same payload goes out the OLD way (nested in the frame): it must be rewritten, or
+      // make the parse throw, or the checks below could not fail for the reason they name.
+      const oldWay = async (payload) => {
+        await cmd('NEWTONSOFT 1');
+        const lines = await cmd('RAW ' + b64('{"type":"vdoninja:update","vdoninja":' + payload + '}'), (l) => l === 'END');
+        const f = lines.find((l) => l.startsWith('FRAME '));
+        const j = f ? jp(unb64(f.slice(6))) : undefined;
+        return { threw: lines.some((l) => l.startsWith('THREW ')), changedTo: j && j.vdoninja && j.vdoninja.slots && j.vdoninja.slots[0].label };
+      };
+      for (const label of REWRITTEN_LABELS) {
+        const o = await oldWay(withLabel(label));
+        check(`control: ${label} sent the OLD way (nested in the frame) is rewritten by Newtonsoft`, !o.threw && typeof o.changedTo === 'string' && o.changedTo !== label, JSON.stringify(o));
+      }
+      for (const label of PRIVATE_LABELS) {
+        const o = await oldWay(withLabel(label));
+        if (o.threw || (typeof o.changedTo === 'string' && o.changedTo !== label)) check('control: a private label sent the OLD way throws or is rewritten', true);
+        else console.log('  NOTE: a private label is neither rewritten nor refused by this Newtonsoft on this host, so its checks below prove nothing here');
+      }
+    }
 
     // ── 2. VDO Push ─────────────────────────────────────────────────────────────
     console.log('\n[2] VDO Push: the state travels as an escaped string field, broadcast before it is cached');
@@ -183,9 +216,12 @@ async function main() {
       r.json.some((j) => j && j.type === 'vdo:sync:empty') && r.json.some((j) => j && j.type === 'discord:voice:update'), JSON.stringify(r.frames).slice(0, 200));
     r = await run('vdo-sync', {});
     check('both caches empty: only the empty marker', r.result === true && r.frames.length === 1 && !!r.json[0] && r.json[0].type === 'vdo:sync:empty', JSON.stringify(r.frames));
-    r = await run('vdo-sync', { vars: [[true, 'vdo.state', VDO_TXT], [false, 'discord.state', DISC_TXT]], throwOn: 'first' });
-    check('one replay that fails does not stop the other (separate try blocks): the Discord replay is still sent',
+    r = await run('vdo-sync', { vars: [[true, 'vdo.state', VDO_TXT], [false, 'discord.state', DISC_TXT]], throwOn: 'type:vdoninja:update' });
+    check('a vdo replay that fails does not stop the Discord replay (separate try blocks, whichever runs first): vdo:error, and the Discord frame is still sent',
       r.json.some((j) => j && j.type === 'discord:voice:update') && r.json.some((j) => j && j.type === 'vdo:error'), JSON.stringify(r.frames).slice(0, 220));
+    r = await run('vdo-sync', { vars: [[true, 'vdo.state', VDO_TXT], [false, 'discord.state', DISC_TXT]], throwOn: 'type:discord:voice:update' });
+    check('…and a Discord replay that fails does not stop the vdo replay: discord:voice:error, and the vdo frame is still sent',
+      r.json.some((j) => j && j.type === 'vdoninja:update') && r.json.some((j) => j && j.type === 'discord:voice:error'), JSON.stringify(r.frames).slice(0, 220));
     if (hasNewtonsoft) {
       for (const label of REWRITTEN_LABELS) {
         const payload = withLabel(label);
@@ -213,11 +249,16 @@ async function main() {
           && !r.json.some((j) => j && /update$/.test(j.type || '')), JSON.stringify(r.frames).slice(0, 200));
       }
     }
+    const LONGKEY = 'k'.repeat(5000);
+    r = await run('vdo-push', { args: { payload: `{"${LONGKEY}":1,"${LONGKEY}":2}` } });
+    check('a repeated 5,000-character key is refused with a short reason (the error frame does not echo the whole key)',
+      r.result === false && r.json.some((j) => j && j.type === 'vdo:error' && /duplicate key/.test(j.message || '') && String(j.message).length < 200), String(r.json[0] && r.json[0].message).length + ' characters');
     const rows = fuzzRows();
     const file = join(tmp, 'fuzz.tsv');
     writeFileSync(file, rows.map((x) => x.exp + '\t' + b64(x.s)).join('\n') + '\n');
-    await cmd('FUZZ ' + file, (l) => /^FUZZED|^ERR/.test(l));
-    const got = readFileSync(file + '.result', 'utf8');
+    const fuzzReply = await cmd('FUZZ ' + file, (l) => /^FUZZED|^ERR/.test(l));
+    check('the fuzz run completed in the harness', fuzzReply.some((l) => /^FUZZED/.test(l)), fuzzReply.join(' ').slice(0, 300));
+    const got = existsSync(file + '.result') ? readFileSync(file + '.result', 'utf8') : '';
     const mism = [];
     rows.forEach((x, i) => { if (got[i] !== x.exp) mism.push({ i, exp: x.exp, got: got[i], s: x.s.slice(0, 80) }); });
     check(`the validator agrees with JSON.parse (+ top-level object, no duplicate keys, depth 32) on ${rows.length} fuzz cases`, mism.length === 0,
@@ -229,14 +270,13 @@ async function main() {
     }
     r = await run('vdo-sync', { vars: [[true, 'vdo.state', SPLICES[1]], [false, 'discord.state', DISC_TXT]] });
     check('Sync with a corrupt cached vdo.state: vdo:error ("cached state is not valid JSON"), the cache is KEPT, the Discord replay still goes out',
-      r.json.some((j) => j && j.type === 'vdo:error' && /not valid JSON/.test(j.message || '')) && r.vars['vdo.state'] === SPLICES[1] && r.json.some((j) => j && j.type === 'discord:voice:update'), JSON.stringify(r.frames).slice(0, 220));
+      r.json.some((j) => j && j.type === 'vdo:error' && /not valid JSON/.test(j.message || '') && /Import a backup or re-save/.test(j.message || '')) && r.vars['vdo.state'] === SPLICES[1] && r.json.some((j) => j && j.type === 'discord:voice:update'), JSON.stringify(r.frames).slice(0, 220));
     r = await run('vdo-sync', { vars: [[true, 'vdo.state', VDO_TXT], [false, 'discord.state', SPLICES[0]]] });
     check('Sync with a corrupt cached discord.state: discord:voice:error, the cache is KEPT, the vdo replay still goes out',
-      r.json.some((j) => j && j.type === 'discord:voice:error' && /not valid JSON/.test(j.message || '')) && r.vars['discord.state'] === SPLICES[0] && r.json.some((j) => j && j.type === 'vdoninja:update')
+      r.json.some((j) => j && j.type === 'discord:voice:error' && /not valid JSON/.test(j.message || '') && !/Import a backup/.test(j.message || '') && /bridge/.test(j.message || '')) && r.vars['discord.state'] === SPLICES[0] && r.json.some((j) => j && j.type === 'vdoninja:update')
       && !r.trace.some((t) => /^Unset:/.test(t)), JSON.stringify(r.frames).slice(0, 220));
   } finally {
-    try { child && child.kill(); } catch {}
-    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+    await cleanup();
   }
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

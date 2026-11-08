@@ -71,7 +71,8 @@
 //     with a vdo:error / discord:voice:error frame "payload rejected, NOT cached: …" and nothing
 //     is cached, as in the C#; so is a missing payload. A cached state that is not valid JSON
 //     (inject one with POST /mock/setcache) is reported by VDO Sync as "cached state is not valid
-//     JSON - Import a backup or re-save", skipped, and KEPT; the other replay still runs.
+//     JSON - Import a backup or re-save" (for the Discord state: "the bridge replaces it with its
+//     next push"), skipped, and KEPT; the other replay still runs.
 //     On `Subscribe` it enforces the real-SB lowercase `general` source key — a
 //     wrong-case subscribe is acked but receives nothing, exactly like real SB.
 //     DoAction is ALWAYS acked {status:'ok'} — ok means the action STARTED, not that it
@@ -86,7 +87,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { objectError } from './tools/json-check.mjs';
+import { objectError, netTrim } from './tools/json-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONTROL_DIR = resolve(__dirname, 'control');
@@ -146,18 +147,22 @@ function customEvent(data) {
 
 // ── Streamer.bot's own JSON parse, as the OLD actions met it (SB_WIRE=object only) ──────────────
 // WebsocketBroadcastJson parses its argument with Newtonsoft's JObject.Parse (default date handling)
-// and writes it back out. These are the effects checked against the real library; keys are never
-// touched, only string VALUES, at any depth:
+// and writes it back out. The effects below were checked against the real library (12.0.1, .NET
+// Framework 4) for a table of about 60 label shapes; keys are never touched, only string VALUES, at
+// any depth. This is NOT a full model of Newtonsoft's date grammar: it covers the shapes a guest
+// label or Discord name plausibly has, and it is exact for dates in the last few decades (the
+// host's time-zone rules before that differ between JavaScript and .NET).
 //   2024-02-03T04:05:06.000Z      -> 2024-02-03T04:05:06Z        (fraction trimmed; none when zero)
 //   2024-02-03T04:05:06+02:00     -> the host's local time with its own offset (…-05:00 on a UTC-5 host)
-//   2024-02-03T04:05:06           -> unchanged (no zone)          2024-02-30T…, hour 25, a 60th second
-//   /Date(1700000000000)/         -> 2023-11-14T22:13:20Z                           -> not a date, unchanged
+//   2024-02-03T04:05:06           -> unchanged (no zone)
+//   2024-02-30T…, hour 25, a 60th second, a date-only value -> not a date, unchanged
+//   /Date(1700000000000)/         -> 2023-11-14T22:13:20Z
 //   a date outside 0001-01-01 … 9999-12-31 (a 24:00:00 that rolls past the end, a /Date(ms)/ out of
 //   range) makes the whole parse THROW, so the broadcast never happens.
 const NJ_MIN_MS = -62135596800000;
 const NJ_MAX_MS = 253402300799999;
 const NJ_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
-const NJ_MS = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/;
+const NJ_MS = /^\/Date\((-?\d+)(?:([+-])(\d{4}))?\)\/$/;
 const p2 = (n) => String(n).padStart(2, '0');
 const njFrac = (digits) => { const t = (digits || '').replace(/0+$/, ''); return t ? '.' + t : ''; };
 const njUnrepresentable = () => new RangeError('The added or subtracted value results in an un-representable DateTime.');
@@ -183,7 +188,7 @@ function njString(s) {
     const ms = Number(m[1]);
     if (ms < NJ_MIN_MS || ms > NJ_MAX_MS) throw njUnrepresentable();
     const digits = String(new Date(ms).getUTCMilliseconds()).padStart(3, '0');
-    if (/[+-]\d{4}\)\/$/.test(s)) return njLocal(ms, digits); // an offset marks the value Local
+    if (m[2]) return njLocal(ms, digits); // an offset marks the value Local (a bare -1234 is milliseconds)
     return njClock(new Date(ms), 'getUTC', digits) + 'Z';
   }
   m = NJ_ISO.exec(s);
@@ -236,7 +241,7 @@ function push(name, args) {
   const kind = KINDS[name];
   let payload = args.payload;
   if (typeof payload !== 'string' || !payload) { console.log(`[mock] ${name}: no payload argument`); emitError(kind, `${name} called without a 'payload' argument`); return; }
-  payload = payload.trim();
+  payload = netTrim(payload); // C# string.Trim(), which is not quite JavaScript's trim()
   if (WIRE_OBJECT) {
     if (!payload.startsWith('{') || !payload.endsWith('}')) { console.log(`[mock] ${name}: payload is not a JSON object string`); emitError(kind, `${name} payload must be a JSON object string`); return; }
     caches[kind.key] = payload; // the old actions cached first…
@@ -266,7 +271,7 @@ function syncReplay(snap) {
   for (const [name, text, marker] of [['VDO Push', snap.vdo, EMPTY_MARKER], ['Discord Voice Push', snap.discord, false]]) {
     const kind = KINDS[name];
     try {
-      if (text && objectError(text)) { console.log(`[mock] VDO Sync: the cached ${kind.key} state is not valid JSON — reported, kept, not replayed`); emitError(kind, 'cached state is not valid JSON - Import a backup or re-save'); }
+      if (text && objectError(text)) { console.log(`[mock] VDO Sync: the cached ${kind.key} state is not valid JSON — reported, kept, not replayed`); emitError(kind, kind.key === 'vdo' ? 'cached state is not valid JSON - Import a backup or re-save' : 'cached state is not valid JSON - the bridge replaces it with its next push (restart the bridge to force one)'); }
       else if (text) { broadcastRaw(customEvent(updateData(kind, text))); sent++; }
       else if (marker) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
     } catch (e) { console.log(`[mock] VDO Sync: ${e.message}`); emitError(kind, e.message); }
@@ -396,6 +401,7 @@ const http = createServer(async (req, res) => {
     req.on('end', () => {
       let d;
       try { d = JSON.parse(body); } catch { res.writeHead(400); res.end('body is not JSON'); return; }
+      if (!d || typeof d !== 'object' || Array.isArray(d)) { res.writeHead(400); res.end('body must be a JSON object'); return; }
       for (const k of ['vdo', 'discord']) if (k in d) caches[k] = typeof d[k] === 'string' ? d[k] : null;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));

@@ -4,7 +4,7 @@
 //   A = the action must accept and cache it      R = it must reject it, caching nothing
 // Seeded, so every run uses the same cases.
 
-import { objectError } from '../json-check.mjs';
+import { objectError, netTrim } from '../json-check.mjs';
 
 const BS = String.fromCharCode(92); // one backslash
 
@@ -36,7 +36,7 @@ export function fuzzRows(seedStart = 12345) {
   const oracle = (s) => (objectError(s) === null ? 'A' : 'R');
   const rows = [];
   // The actions Trim the payload before validating, so the oracle sees the trimmed text.
-  const add = (s, kind) => rows.push({ s, kind, exp: oracle(s.trim()) });
+  const add = (s, kind) => rows.push({ s, kind, exp: oracle(netTrim(s)) });
   add(JSON.stringify(VDO), 'canon');
   add(JSON.stringify(DISC), 'canon');
   for (let i = 0; i < 6000; i++) add(JSON.stringify(obj(0)), 'stringify');
@@ -57,6 +57,8 @@ export function fuzzRows(seedStart = 12345) {
     '{"a":' + '['.repeat(31) + ']'.repeat(31) + '}', '{"a":' + '['.repeat(32) + ']'.repeat(32) + '}',
     // a key repeated through an escape is still a repeat
     '{"a":1,"' + BS + 'u0061":2}', '{"ab":1,"a' + BS + 'u0062":2}', '{"a":{"b":1},"c":{"b":2}}',
+    // edge characters that .NET's Trim() and JavaScript's trim() treat differently (U+FEFF only JS strips, U+0085 only .NET)
+    '\ufeff{"a":1}', '{"a":1}\ufeff', '\u0085{"a":1}', '{"a":1}\u0085', ' \u00a0{"a":1}\u00a0 ', '\u2028{"a":1}\u2029',
     '{"enabled":true,"room":"evil"},"type":"x"}', '{"enabled":true,"room":"evil"},"type":"x","pad":{}', '{not json}'];
   for (const s of HAND) add(s, 'hand');
   return rows;

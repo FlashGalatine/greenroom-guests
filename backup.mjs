@@ -119,13 +119,24 @@ async function save(file) {
         + 'or the "VDO Sync" action is not answering (check that it exists and that its C# compiled).');
     }
     if (data.type === 'vdo:sync:empty') die('Streamer.bot has no vdo.state saved yet — nothing to back up. Open the control page and set a room or add a guest first (it pushes on the first edit).');
-    if (data.type === 'vdo:error') die(`the "VDO Sync" action reported an error: ${data.message || '(no message)'}`);
+    if (data.type === 'vdo:error') {
+      // Streamer.bot's own date parse can refuse to broadcast a state (an old VDO Sync pastes it into the frame as an object).
+      const dateHint = /DateTime/i.test(data.message || '')
+        ? ' This is the old broadcast format failing on a date-shaped name in your saved config; the saved config itself is intact. Carry on with the update, then back up again afterwards (the new actions send it unchanged).'
+        : '';
+      die(`the "VDO Sync" action reported an error: ${data.message || '(no message)'}.${dateHint}`);
+    }
     const payload = stateOf(data);
+    const oldWire = data.vdoninjaJson === undefined; // the nested object an older VDO Sync broadcasts
     const envelope = { kind: 'greenroom-vdo-backup', savedAt: new Date().toISOString(), vdoninja: payload };
     await mkdir(dirname(out), { recursive: true });
     await writeFile(out, JSON.stringify(envelope, null, 2) + '\n', 'utf-8');
     console.log(`saved ${out}`);
     console.log(`  ${summarize(payload)}`);
+    if (oldWire) {
+      console.log('  note: this copy came through the OLD broadcast format, in which Streamer.bot re-formats any guest label or name that looks like a date or time.');
+      console.log('        If you have such names, take a fresh backup after re-pasting the three state actions: that one is exact.');
+    }
   } finally { sb.close(); }
 }
 

@@ -188,6 +188,7 @@
   // ── Sync state (GRN-24) ────────────────────────────────────────────────────
   const MSG_SYNC_SHORT = 'VDO Sync has not answered: nothing is pushed until it does';
   const MSG_SYNC_LONG = 'no saved config from Streamer.bot: a fresh install, or VDO Sync is missing or not compiled';
+  let syncError = ''; // a saved config Streamer.bot reported as unreadable (VDO Sync said so), until a config arrives
   const SYNC_RETRY_MS = [2000, 4000, 8000]; // then every SYNC_REPEAT_MS
   const SYNC_REPEAT_MS = 15000;
   const SYNC_SAY_MS = 1200;
@@ -195,6 +196,7 @@
   function markSynced() {
     if (synced) return;
     synced = true;
+    syncError = '';
     clearTimeout(syncTimer);
     transientProblem = ''; // a refused request (VDO Sync, usually) is moot once the saved config has arrived
   }
@@ -343,8 +345,8 @@
       fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
       // Say why nothing is happening while the saved config has not come back (a connection
       // problem, if there is one, outranks these in show()).
-      setTimeout(() => { if (!synced) { waitText = MSG_SYNC_SHORT; show(waitText); } }, SYNC_SAY_MS);
-      setTimeout(() => { if (!synced) { waitText = MSG_SYNC_LONG; show(waitText); } }, SYNC_NAME_CAUSES_MS);
+      setTimeout(() => { if (!synced) { waitText = syncError || MSG_SYNC_SHORT; show(waitText); } }, SYNC_SAY_MS);
+      setTimeout(() => { if (!synced) { waitText = syncError || MSG_SYNC_LONG; show(waitText); } }, SYNC_NAME_CAUSES_MS);
     };
     sock.onmessage = (evt) => {
       if (ws !== sock) return;
@@ -419,6 +421,13 @@
         // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.
         markSynced();
         show('no saved config yet');
+      } else if (d.type === 'vdo:error') {
+        // VDO Sync found a saved config it cannot read: say so, instead of 'a fresh install'.
+        if (!synced && /not valid JSON/i.test(d.message || '')) {
+          syncError = 'Streamer.bot reports its saved config is damaged (' + d.message + '); nothing is pushed until it is replaced';
+          waitText = syncError;
+          show(waitText);
+        }
       } else if (d.type === 'discord:voice:update') {
         // Voice-channel arrivals are an auto-add source of their own — no director
         // and no room needed. This feed is chatty (~10/s while people talk); the
