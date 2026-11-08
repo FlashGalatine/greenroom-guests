@@ -72,6 +72,7 @@
   .hint { color: var(--dim); font-size: 12px; }
   button.primary.attn { box-shadow: 0 0 0 2px var(--amber); }
   .vdo-unsaved-note { color: var(--amber); font-size: 12px; }
+  .vdo-invite-opts input.bad { border-color: var(--red); }
 
   /* Slots */
   .vdo-slot-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
@@ -174,6 +175,7 @@
       <button id="btnVdoSave" class="primary">Save</button>
       <span id="vdoUnsaved" class="pill warn" hidden>unsaved changes</span>
     </div>
+    <div id="vdoRoomEff" class="hint" role="status"></div>
     <div class="row">
       <label style="flex:1; display:flex; gap:6px; align-items:center;">viewFlags
         <input type="text" id="vdoViewFlags" style="flex:1" spellcheck="false" /></label>
@@ -241,30 +243,25 @@
           <option value="none">none</option>
         </select></label>
       <span id="vdoInvPwNote" class="warn" hidden></span>
-      <label>label <input type="text" id="vdoInvLabel" placeholder="&amp;label=" /></label>
-      <label>push id <input type="text" id="vdoInvPush" placeholder="&amp;push=" /></label>
-      <label>video bitrate <input type="text" id="vdoInvVideoBitrate" placeholder="kbps" inputmode="numeric" /></label>
+      <label title="Each guest is asked for a display name when they open the link (a bare &amp;label). A guest who cancels the prompt joins without a label and cannot be bound to a slot."><input type="checkbox" id="vdoInvAskName" /> ask each guest for a name</label>
+      <label>label <input type="text" id="vdoInvLabel" placeholder="&amp;label=" title="One guest's label (it wins over the name prompt). It must differ for every guest: make a new link for each guest." /></label>
+      <label>push id <input type="text" id="vdoInvPush" placeholder="&amp;push=" title="One guest's stream (push) ID. It must differ for every guest; vdo.ninja refuses an ID that is already in use. A slot's 'pin' button pins it to the guest's push ID." /></label>
+      <button id="btnVdoInviteNew" type="button" title="Fill in a unique label and a random push ID for one more guest">new guest link</button>
+      <span id="vdoInvLabelWarn" class="warn" hidden>No label: guests from this link can't be bound to a slot.</span>
+      <label>video bitrate <input type="text" id="vdoInvVideoBitrate" placeholder="kbps" inputmode="numeric" title="Caps what the guest sends (&amp;outboundvideobitrate)" /></label>
       <label>quality
         <select id="vdoInvQuality"><option value="">default</option><option value="0">0 max</option>
           <option value="1">1 balanced</option><option value="2">2 smooth</option></select></label>
-      <label>width <input type="text" id="vdoInvWidth" inputmode="numeric" /></label>
-      <label>height <input type="text" id="vdoInvHeight" inputmode="numeric" /></label>
-      <label>fps <input type="text" id="vdoInvFps" inputmode="numeric" /></label>
-      <label>codec
-        <select id="vdoInvCodec"><option value="">default</option><option value="h264">h264</option>
-          <option value="vp8">vp8</option><option value="vp9">vp9</option><option value="av1">av1</option></select></label>
-      <label>audio bitrate <input type="text" id="vdoInvAudioBitrate" placeholder="kbps" inputmode="numeric" /></label>
-      <label><input type="checkbox" id="vdoInvStereo" /> stereo</label>
-      <label><input type="checkbox" id="vdoInvNoVideo" /> no video</label>
-      <label><input type="checkbox" id="vdoInvNoAudio" /> no audio</label>
+      <label>fps <input type="text" id="vdoInvFps" inputmode="numeric" title="Caps the guest's frame rate (&amp;maxframerate), a whole number" /></label>
+      <label>audio bitrate <input type="text" id="vdoInvAudioBitrate" placeholder="kbps" inputmode="numeric" title="Caps what the guest sends (&amp;outboundaudiobitrate)" /></label>
+      <label><input type="checkbox" id="vdoInvNoVideo" /> guest sends no video</label>
+      <label><input type="checkbox" id="vdoInvNoAudio" /> guest sends no audio</label>
       <label>capture
         <select id="vdoInvCapture"><option value="">ask</option><option value="webcam">webcam</option>
           <option value="screenshare">screenshare</option></select></label>
       <label><input type="checkbox" id="vdoInvBroadcast" /> broadcast</label>
       <label><input type="checkbox" id="vdoInvMeshcast" /> meshcast</label>
       <label><input type="checkbox" id="vdoInvAutostart" /> autostart</label>
-      <label><input type="checkbox" id="vdoInvRequireApproval" /> require approval</label>
-      <label>room cap <input type="text" id="vdoInvRoomCap" inputmode="numeric" /></label>
       <label>extra flags <input type="text" id="vdoInvExtraFlags" placeholder="&amp;flag&amp;flag=x" spellcheck="false" /></label>
     </div>
     <div class="linkrow">
@@ -393,13 +390,11 @@
     favs: $('dvoFavorites'), favName: $('dvoName'), favServer: $('dvoServerId'), favChannel: $('dvoChannelId'),
   };
   const inv = {
-    passwordMode: $('vdoInvPasswordMode'), label: $('vdoInvLabel'), push: $('vdoInvPush'),
-    videoBitrate: $('vdoInvVideoBitrate'), quality: $('vdoInvQuality'), width: $('vdoInvWidth'),
-    height: $('vdoInvHeight'), fps: $('vdoInvFps'), codec: $('vdoInvCodec'),
-    audioBitrate: $('vdoInvAudioBitrate'), stereo: $('vdoInvStereo'), noVideo: $('vdoInvNoVideo'),
+    passwordMode: $('vdoInvPasswordMode'), askName: $('vdoInvAskName'), label: $('vdoInvLabel'), push: $('vdoInvPush'),
+    videoBitrate: $('vdoInvVideoBitrate'), quality: $('vdoInvQuality'), fps: $('vdoInvFps'),
+    audioBitrate: $('vdoInvAudioBitrate'), noVideo: $('vdoInvNoVideo'),
     noAudio: $('vdoInvNoAudio'), capture: $('vdoInvCapture'), broadcast: $('vdoInvBroadcast'),
-    meshcast: $('vdoInvMeshcast'), autostart: $('vdoInvAutostart'),
-    requireApproval: $('vdoInvRequireApproval'), roomCap: $('vdoInvRoomCap'), extraFlags: $('vdoInvExtraFlags'),
+    meshcast: $('vdoInvMeshcast'), autostart: $('vdoInvAutostart'), extraFlags: $('vdoInvExtraFlags'),
   };
   const dvo = {
     accent: $('dvoAccent'), avatarPx: $('dvoAvatarPx'), streamerPx: $('dvoStreamerPx'),
@@ -414,15 +409,15 @@
   const SCHEMA_VERSION = 1;
   const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
     'directoryAutoAdd', 'directoryIgnored', 'schemaVersion', 'rev', 'writer']);
-  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId']);
+  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId', 'pushID']);
   let schemaTooNew = false;
 
   // ── State ─────────────────────────────────────────────────────────────────
   function defaultInvite() {
-    return { passwordMode: 'hash', label: '', push: '', videoBitrate: '', quality: '', width: '',
-      height: '', fps: '', codec: '', audioBitrate: '', stereo: false, noVideo: false, noAudio: false,
-      capture: '', broadcast: false, meshcast: false, autostart: false, requireApproval: false,
-      roomCap: '', extraFlags: '' };
+    // askName: the default guest link makes each guest enter a display name (a bare &label). A saved invite with no value for it
+    // reads as on, because adoptCfg merges over these defaults.
+    return { passwordMode: 'hash', askName: true, label: '', push: '', videoBitrate: '', quality: '', fps: '', audioBitrate: '',
+      noVideo: false, noAudio: false, capture: '', broadcast: false, meshcast: false, autostart: false, extraFlags: '' };
   }
   function defaultSlots() {
     const out = [];
@@ -444,10 +439,11 @@
       silent: () => { hasRoster = false; setPill(els.vdoStatus, 'director: not responding', 'error'); },
       retrying: () => setPill(els.vdoStatus, 'director: not responding, retrying', 'error'),
       unrecognised: () => setPill(els.vdoStatus, 'director: reply unrecognised - check vdo.ninja version', 'error'),
-      reply: (r) => {
+      reply: (r, raw) => {
         roster = r; // defensive: [] on any malformed shape
         hasRoster = true;
-        setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}`, 'live');
+        const unl = VdoParse.countUnlabeled(raw); // guests with a stream and no label: they cannot be bound to a slot
+        setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}${unl ? ' · ' + unl + ' unlabeled' : ''}`, 'live');
         renderSlots();
         runAutoAdd(); // new label in the room → placeholder directory entry
         renderDirectory(); // live-label picker options + live dots
@@ -530,6 +526,7 @@
           mirror: !!s.mirror,
           mode: s.mode === 'discord' ? 'discord' : 'webcam',
           discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
+          pushID: String(s.pushID ?? '').trim(), // the push ID this slot is pinned to ('' = follow the label)
         }, GRDir.extraFields(s, SLOT_KEYS)); // unknown slot fields pass through
       }
     }
@@ -887,7 +884,7 @@
       // settling; one seen and lost blanks at once). With no current roster the held resolution is preserved.
       let streamID;
       if (!s.label) streamID = '';
-      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, '', directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
+      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, String(s.pushID || ''), directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
       else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
@@ -897,7 +894,7 @@
         mirror: !!s.mirror,
         mode: s.mode === 'discord' ? 'discord' : 'webcam',
         discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
-      }, GRDir.extraFields(s, SLOT_KEYS));
+      }, s.pushID ? { pushID: String(s.pushID) } : {}, GRDir.extraFields(s, SLOT_KEYS));
     });
     return Object.assign({
       enabled: !!cfg.enabled,
@@ -937,7 +934,7 @@
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
     if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
-    return GRVdoUrl.buildDirectorUrl(DIRECTOR_BASE, cfg.room, cfg.password); // silent control-only director (no camera prompt); the password encoded the way vdo.ninja reads it
+    return GRVdoUrl.buildDirectorUrl(DIRECTOR_BASE, cfg.room, cfg.password); // control-only director: &novideo&noaudio keep it from playing the guests' video and audio (it publishes neither); the password is encoded the way vdo.ninja reads it
   }
 
   function syncDirectorFrame() {
@@ -974,6 +971,11 @@
 
   // The flags box: what the overlay ignores in the saved flags (script, style, room-identity flags), or what Save just removed.
   let flagsNote = '';
+  // The room name vdo.ninja will actually join, from what is typed (display only: cfg.room and every URL keep the room as typed).
+  function renderRoomName() {
+    const r = GRVdoUrl.vdoRoomName(els.room.value);
+    $('vdoRoomEff').textContent = r.effective ? 'vdo.ninja room: ' + r.effective + (r.warnings.length ? ' · ' + r.warnings.join(' · ') : '') : '';
+  }
   function renderFlagsWarn() {
     const pwTxt = String(cfg.password || '').trim();
     $('vdoPwWarn').textContent = pwTxt && !GRVdoUrl.effectivePassword(pwTxt) ? 'vdo.ninja reads this password as "no password", so none is sent and the room is open. Choose another password.' : '';
@@ -991,6 +993,7 @@
     renderInvite();
     rebuildLinks();
     renderFlagsWarn();
+    renderRoomName();
     renderDiscordSection();
     syncDirectorFrame();
     renderSyncStatus();
@@ -1075,7 +1078,14 @@
       id.className = 'vdo-id' + (s.streamID ? ' live' : '');
       id.textContent = s.streamID || '—';
       id.title = s.streamID || 'no stream resolved';
-      webcamWrap.append(sel, mirLabel, id);
+      // Pin: this slot follows only the guest's current push ID, so another guest who picks the same label cannot take it over.
+      const pin = document.createElement('button');
+      pin.type = 'button';
+      pin.className = 'vdo-pin';
+      pin.textContent = s.pushID ? 'unpin' : 'pin';
+      pin.title = s.pushID ? `Pinned to push ID ${s.pushID}: this slot follows only that stream (click to follow the label again)` : `Pin this slot to ${s.label || 'the guest'}'s current push ID, so another guest who picks the same label cannot take it over`;
+      pin.disabled = !s.pushID && !s.streamID;
+      webcamWrap.append(sel, mirLabel, id, pin);
       if (s.label && dupes.has(s.label)) {
         // Anyone in the room can pick any label: say that this one is shared, and which streams compete for it.
         const dup = document.createElement('span');
@@ -1768,6 +1778,7 @@
     } else if (t.classList.contains('vdo-label-sel')) {
       if (t.value === String(cur.label ?? '')) return;
       next.label = t.value;
+      next.pushID = ''; // a pin belongs to the guest it was made for
       // The stream belongs to the label it was resolved for: a different label starts empty (the next poll resolves it), so a
       // slot relabelled while the director is quiet cannot push the previous guest's stream under the new name.
       next.streamID = '';
@@ -1786,6 +1797,22 @@
   els.slots.addEventListener('click', (e) => {
     const copyBtn = e.target.closest('.vdo-src-copy');
     if (copyBtn) { copyText(copyBtn.dataset.url, copyBtn); return; }
+    const pinBtn = e.target.closest('.vdo-pin');
+    if (pinBtn) {
+      const idx = Number(pinBtn.closest('.vdo-slot-row').dataset.slot) - 1;
+      const cur = cfg.slots[idx];
+      if (!cur) return;
+      const next = Object.assign({}, cur);
+      if (cur.pushID) next.pushID = '';
+      else if (cur.streamID) next.pushID = cur.streamID;
+      else return;
+      cfg.slots[idx] = next;
+      slotsSig = '';
+      pinBtn.blur();
+      operatorAction(() => assembleAndPush(false));
+      renderSlots(true);
+      return;
+    }
     const openA = e.target.closest('.vdo-src-open');
     if (openA) setTimeout(() => openA.blur(), 0); // the link opens its tab; the panel must not keep the focus
   });
@@ -1815,6 +1842,12 @@
   function saveRoom() {
     // The flags are stored normalised ('&a&b') and without anything that could load script or style or change the room; what was
     // removed is named under the box.
+    // A room name that is only symbols becomes underscores at vdo.ninja, with no password that is a public, empty-named room: ask first.
+    const rn = GRVdoUrl.vdoRoomName(els.room.value);
+    if (rn.onlyUnderscores && !els.password.value.trim() && !confirm('The room name "' + els.room.value.trim() + '" is only underscores once vdo.ninja cleans it up, and there is no password.\n\nGuests and the director would meet in a room anyone can guess. Save it anyway?')) {
+      els.enabled.checked = cfg.enabled;
+      return;
+    }
     const sv = GRVdoUrl.sanitizeViewFlags(GRVdoUrl.normalizeFlags(els.viewFlags.value));
     const next = { room: els.room.value.trim(), password: els.password.value.trim(), viewFlags: sv.flags, enabled: els.enabled.checked };
     const ran = operatorAction(() => {
@@ -1868,55 +1901,72 @@
     const h = ensureHash(pw); // 'hash' (default)
     return h ? '&hash=' + h : '';
   }
+  // A number the guest's browser is told to use must be a whole number above zero: anything else (29.97, 1920x1080, 30fps) is left
+  // out of the link and the box is marked, so it cannot be mistaken for a setting that took effect.
+  function strictNum(el) {
+    const v = (el.value || '').trim();
+    const ok = /^\d+$/.test(v) && Number(v) > 0;
+    const bad = v !== '' && !ok;
+    el.classList.toggle('bad', bad);
+    el.setCustomValidity(bad ? 'a whole number above zero' : '');
+    return ok ? v : '';
+  }
+  // Extra flags: a leading ? & and spaces stripped, cut at a '#', each token prefixed with one '&', and anything that loads script,
+  // style or remote media (the helper's injection family) dropped. Publisher keys such as push, webcam and screenshare stay.
+  function cleanExtraFlags(text) {
+    let t = String(text ?? '');
+    const h = t.indexOf('#');
+    if (h >= 0) t = t.slice(0, h);
+    const out = [];
+    for (const tok of t.replace(/^[?&\s]+/, '').split(/[&\s]+/)) {
+      if (!tok) continue;
+      const key = tok.split('=')[0];
+      if (!/^[A-Za-z0-9_-]+$/.test(key) || GRVdoUrl.isInjectionKey(key)) continue;
+      out.push('&' + tok);
+    }
+    return out.join('');
+  }
   function inviteFromDom() {
-    const digits = (el) => (el.value || '').replace(/[^\d]/g, '');
     return {
       passwordMode: inv.passwordMode.value,
+      askName: inv.askName.checked,
       label: inv.label.value.trim(),
       push: inv.push.value.trim(),
-      videoBitrate: digits(inv.videoBitrate),
+      videoBitrate: strictNum(inv.videoBitrate),
       quality: inv.quality.value,
-      width: digits(inv.width),
-      height: digits(inv.height),
-      fps: digits(inv.fps),
-      codec: inv.codec.value,
-      audioBitrate: digits(inv.audioBitrate),
-      stereo: inv.stereo.checked,
+      fps: strictNum(inv.fps),
+      audioBitrate: strictNum(inv.audioBitrate),
       noVideo: inv.noVideo.checked,
       noAudio: inv.noAudio.checked,
       capture: inv.capture.value,
       broadcast: inv.broadcast.checked,
       meshcast: inv.meshcast.checked,
       autostart: inv.autostart.checked,
-      requireApproval: inv.requireApproval.checked,
-      roomCap: digits(inv.roomCap),
-      extraFlags: inv.extraFlags.value.trim(),
+      extraFlags: cleanExtraFlags(inv.extraFlags.value),
     };
   }
+  // The guest link. Only options that vdo.ninja applies on the guest's side are offered: frame rate, the outbound bitrates and the
+  // device flags (what the guest SENDS). A bare &label makes vdo.ninja ask each guest for a display name; a label typed here wins
+  // for a single-guest link.
   function buildInviteLink(room, password, i) {
     if (!room) return '';
     let u = 'https://vdo.ninja/?room=' + encodeURIComponent(room);
     u += passwordParam(password, i.passwordMode);
     if (i.label) u += '&label=' + encodeURIComponent(i.label);
+    else if (i.askName) u += '&label';
     if (i.push) u += '&push=' + encodeURIComponent(i.push);
-    if (i.videoBitrate) u += '&videobitrate=' + i.videoBitrate;
+    if (i.videoBitrate) u += '&outboundvideobitrate=' + i.videoBitrate;
     if (i.quality) u += '&quality=' + i.quality;
-    if (i.width) u += '&width=' + i.width;
-    if (i.height) u += '&height=' + i.height;
-    if (i.fps) u += '&fps=' + i.fps;
-    if (i.codec) u += '&codec=' + i.codec;
-    if (i.audioBitrate) u += '&audiobitrate=' + i.audioBitrate;
-    if (i.stereo) u += '&stereo';
-    if (i.noVideo) u += '&novideo';
-    if (i.noAudio) u += '&noaudio';
+    if (i.fps) u += '&maxframerate=' + i.fps;
+    if (i.audioBitrate) u += '&outboundaudiobitrate=' + i.audioBitrate;
+    if (i.noVideo) u += '&videodevice=0';
+    if (i.noAudio) u += '&audiodevice=0';
     if (i.capture === 'webcam') u += '&webcam';
     else if (i.capture === 'screenshare') u += '&screenshare';
     if (i.broadcast) u += '&broadcast';
     if (i.meshcast) u += '&meshcast';
     if (i.autostart) u += '&autostart';
-    if (i.requireApproval) u += '&requireapproval';
-    if (i.roomCap) u += '&roomcap=' + i.roomCap;
-    if (i.extraFlags) u += i.extraFlags; // already leading '&'
+    if (i.extraFlags) u += i.extraFlags; // cleaned in inviteFromDom: each token has its '&'
     return u;
   }
   function buildManageLink(room, password, i) {
@@ -1935,6 +1985,8 @@
     els.manageLink.value = manage;
     $('btnVdoInviteOpen').href = invite || '#';
     $('btnVdoManageOpen').href = manage || '#';
+    const lw = $('vdoInvLabelWarn');
+    lw.hidden = !!(i.label || i.askName);
     const needsPw = GRVdoUrl.effectivePassword(cfg.password) && (i.passwordMode === 'none' || (i.passwordMode === 'hash' && !(window.crypto && crypto.subtle)));
     const pwNote = $('vdoInvPwNote');
     pwNote.textContent = needsPw ? 'The guest is asked to type the room password: send it to them separately.' : '';
@@ -1958,6 +2010,7 @@
     for (const k of [...dirty]) if (typedText[k]() === String(cfg[k] ?? '')) dirty.delete(k);
     renderDirtyMarker();
   }
+  els.room.addEventListener('input', renderRoomName);
   for (const k of Object.keys(typedText)) {
     els[k].addEventListener('input', () => {
       if (typedText[k]() === String(cfg[k] ?? '')) dirty.delete(k); else dirty.add(k);
@@ -1967,24 +2020,19 @@
   function renderInvite() {
     const i = cfg.invite || {};
     if (document.activeElement !== inv.passwordMode) inv.passwordMode.value = i.passwordMode || 'hash';
+    setCheck(inv.askName, i.askName !== false);
     setIfNotFocused(inv.label, i.label ?? '');
     setIfNotFocused(inv.push, i.push ?? '');
     setIfNotFocused(inv.videoBitrate, i.videoBitrate ?? '');
     if (document.activeElement !== inv.quality) inv.quality.value = i.quality ?? '';
-    setIfNotFocused(inv.width, i.width ?? '');
-    setIfNotFocused(inv.height, i.height ?? '');
     setIfNotFocused(inv.fps, i.fps ?? '');
-    if (document.activeElement !== inv.codec) inv.codec.value = i.codec ?? '';
     setIfNotFocused(inv.audioBitrate, i.audioBitrate ?? '');
-    setCheck(inv.stereo, i.stereo);
     setCheck(inv.noVideo, i.noVideo);
     setCheck(inv.noAudio, i.noAudio);
     if (document.activeElement !== inv.capture) inv.capture.value = i.capture ?? '';
     setCheck(inv.broadcast, i.broadcast);
     setCheck(inv.meshcast, i.meshcast);
     setCheck(inv.autostart, i.autostart);
-    setCheck(inv.requireApproval, i.requireApproval);
-    setIfNotFocused(inv.roomCap, i.roomCap ?? '');
     setIfNotFocused(inv.extraFlags, i.extraFlags ?? '');
   }
 
@@ -2050,7 +2098,20 @@
   document.querySelectorAll('.np-src-copy').forEach((btn) => {
     btn.addEventListener('click', () => copyText(nameplateSourceUrl(btn.dataset.npSlot), btn));
   });
-  $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')));
+  // The label and push ID belong to ONE guest: after a successful Copy both are emptied, so the next link starts blank.
+  $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')).then((ok) => {
+    if (!ok) return;
+    inv.label.value = ''; inv.push.value = '';
+    invOpts.dispatchEvent(new Event('input', { bubbles: true }));
+    invOpts.dispatchEvent(new Event('change', { bubbles: true }));
+  }));
+  const randomId = (n) => { const a = new Uint8Array(n); (window.crypto || { getRandomValues: (x) => x.map(() => Math.floor(Math.random() * 256)) }).getRandomValues(a); return Array.from(a, (b) => (b % 36).toString(36)).join(''); };
+  $('btnVdoInviteNew').addEventListener('click', () => { // a unique label and a random push ID for one more guest
+    inv.label.value = 'guest-' + randomId(4);
+    inv.push.value = randomId(8);
+    invOpts.dispatchEvent(new Event('input', { bubbles: true }));
+    invOpts.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
   $('btnVdoInviteOpen').addEventListener('click', (e) => { if (!els.inviteLink.value) e.preventDefault(); });
   $('btnVdoManageOpen').addEventListener('click', (e) => { if (!els.manageLink.value) e.preventDefault(); });

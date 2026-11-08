@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory' and 'urls' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls' and 'invite' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -1004,9 +1004,9 @@ async function main() {
     for (let i = 0; i < 24 && !dirPush; i++) { dirPush = savedPayloads(await ext.api.actions()).find((p) => (p.directory || []).some((e) => e.displayName === 'Alpha Renamed')); if (!dirPush) await sleep(250); }
     check("R9d: …and through a directory edit (a row's pronouns and a social's url survive the editor)", !!keeps(dirPush), JSON.stringify(dirPush && dirPush.directory));
     await ext.api.clear();
-    await pgP.check('#vdoInvStereo'); // an invite option: the builder rebuilds the invite from its fields
+    await pgP.check('#vdoInvAutostart'); // an invite option: the builder rebuilds the invite from its fields
     let invPush = null;
-    for (let i = 0; i < 24 && !invPush; i++) { invPush = savedPayloads(await ext.api.actions()).find((p) => p.invite && p.invite.stereo === true); if (!invPush) await sleep(250); }
+    for (let i = 0; i < 24 && !invPush; i++) { invPush = savedPayloads(await ext.api.actions()).find((p) => p.invite && p.invite.autostart === true); if (!invPush) await sleep(250); }
     check('R9d: …and through an invite-option change (unknown invite fields survive the builder)',
       !!invPush && invPush.invite.futureInvite === 'x' && !!keeps(invPush), JSON.stringify(invPush && invPush.invite));
     await pgP.close();
@@ -2864,6 +2864,199 @@ async function main() {
         const st = await x.api.state();
         check('R16g: director-min pushing a config that had no viewFlags pushes the default flags (not an empty string)', !!st.vdo && st.vdo.viewFlags === VIEWFLAGS, JSON.stringify(st.vdo && st.vdo.viewFlags));
         await m.close();
+      }
+    }
+
+    // ── R17: the invite builder's options do what their labels say; a slot can be pinned; the room name is shown (GRN-82, 83, 84, 85, 188, 156, 159, 146, 189, 187) ──
+    if (!ONLY || ONLY === 'invite') {
+      console.log('\n[R17] invite: a bare &label by default, sender-side flags only, per-guest links, pins, the room name vdo.ninja will use');
+      const R17_SECTIONS = 'abcdefg'.split('');
+      for (const k of (process.env.R17_ONLY || '').split(',').filter(Boolean)) if (!R17_SECTIONS.includes(k)) throw new Error('R17_ONLY=' + k + ': the sections are ' + R17_SECTIONS.join(', '));
+      const want = (k) => !process.env.R17_ONLY || process.env.R17_ONLY.split(',').includes(k);
+      const mkSeed = (extra) => Object.assign({ enabled: true, room: 'roomname', password: 'password', viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'plaintext' }, directory: [] }, extra || {});
+      const QUIET = '?fixed=1&delay=600000';
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const seededMock = async (seed) => {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const openControl = async (x, q, seed) => {
+        const p = await newPage(browser, { width: 920, height: 1500 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r, seed.room, 8000);
+        await sleep(700);
+        return p;
+      };
+      const link = (p) => p.evaluate(() => document.getElementById('vdoInviteLink').value);
+
+      // (a) The default link makes each guest enter a display name (decision 15, GRN-82, GRN-187).
+      if (want('a')) {
+        const seed = mkSeed({ invite: { passwordMode: 'hash' } });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        await wait(p, () => /hash=/.test(document.getElementById('vdoInviteLink').value), null, 5000);
+        const manage = await p.evaluate(() => document.getElementById('vdoManageLink').value);
+        const def = await link(p);
+        check('R17a: the default invite is the hash link plus a bare &label (vdo.ninja asks each guest for a name), and the Manage link has none',
+          manage === 'https://vdo.ninja/?director=roomname&hash=99e5' && def === 'https://vdo.ninja/?room=roomname&hash=99e5&label', JSON.stringify({ manage, def }));
+        const warn0 = await p.evaluate(() => { const e = document.getElementById('vdoInvLabelWarn'); return !!e && !e.hidden && e.textContent; });
+        await p.fill('#vdoInvLabel', 'Zed');
+        const typed = await link(p);
+        await p.fill('#vdoInvLabel', '');
+        await p.uncheck('#vdoInvAskName');
+        await sleep(200);
+        const off = await link(p);
+        const warn1 = await p.evaluate(() => { const e = document.getElementById('vdoInvLabelWarn'); return !!e && !e.hidden ? e.textContent : ''; });
+        check('R17a2: a typed label wins (&label=Zed); with "ask each guest for a name" off and no label there is no &label and the page says guests cannot be bound to a slot (and not otherwise)',
+          /&label=Zed$/.test(typed) && !/label/.test(off) && /can't be bound to a slot/.test(warn1) && !warn0, JSON.stringify({ typed, off, warn0, warn1 }));
+        await p.close();
+        const y = await seededMock(mkSeed({ invite: { passwordMode: 'plaintext', askName: false } }));
+        const q = await openControl(y, QUIET, mkSeed());
+        check('R17a3: a saved invite with askName off is honoured; one with no askName at all reads as on', !/label/.test(await link(q)));
+        await q.close();
+        const z = await seededMock(mkSeed());
+        const r = await openControl(z, QUIET, mkSeed());
+        check('R17a4: …and a saved invite with no askName field asks for a name', /&label$/.test(await link(r)));
+        await r.close();
+      }
+      // (b) Sender-side flags only (decision 7 A): frame rate, outbound bitrates, device flags; the rest is gone (GRN-83, 84, 85, 189).
+      if (want('b')) {
+        const seed = mkSeed({ invite: { passwordMode: 'plaintext', width: '1280', height: '720', codec: 'h264', stereo: true, requireApproval: true, roomCap: '4' } });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        await p.fill('#vdoInvFps', '30');
+        await p.fill('#vdoInvVideoBitrate', '2500');
+        await p.fill('#vdoInvAudioBitrate', '128');
+        await p.check('#vdoInvNoVideo');
+        await p.check('#vdoInvNoAudio');
+        await sleep(300);
+        const l = await link(p);
+        check('R17b: fps → &maxframerate, the bitrates → &outboundvideobitrate / &outboundaudiobitrate, no video / no audio → &videodevice=0 / &audiodevice=0',
+          /[?&]maxframerate=30(&|$)/.test(l) && /[?&]outboundvideobitrate=2500(&|$)/.test(l) && /[?&]outboundaudiobitrate=128(&|$)/.test(l) && /[?&]videodevice=0(&|$)/.test(l) && /[?&]audiodevice=0(&|$)/.test(l)
+          && !/[?&](fps|videobitrate|audiobitrate|novideo|noaudio)=?(&|$)/.test(l), l);
+        const gone = await p.evaluate(() => ['vdoInvWidth', 'vdoInvHeight', 'vdoInvCodec', 'vdoInvStereo', 'vdoInvRequireApproval', 'vdoInvRoomCap'].filter((id) => document.getElementById(id)));
+        check('R17b2: width, height, codec, stereo, require approval and room cap are gone from the builder, and a saved invite that still holds them puts none of them in the link',
+          gone.length === 0 && !/width=|height=|codec=|stereo|requireapproval|roomcap/.test(l), JSON.stringify({ gone, l }));
+        await p.close();
+      }
+      // (c) Strict numbers and cleaned extra flags (GRN-159, GRN-146).
+      if (want('c')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const results = {};
+        for (const v of ['29.97', '1920x1080', '30fps', '0', '25']) {
+          await p.fill('#vdoInvFps', v);
+          await sleep(100);
+          results[v] = { link: /maxframerate=([^&]*)/.exec(await link(p))?.[1] || '', bad: await p.evaluate(() => document.getElementById('vdoInvFps').classList.contains('bad')) };
+        }
+        check('R17c: a frame rate must be a whole number above zero: "29.97", "1920x1080", "30fps" and "0" give no parameter and mark the box; "25" is used',
+          ['29.97', '1920x1080', '30fps', '0'].every((v) => results[v].link === '' && results[v].bad) && results['25'].link === '25' && !results['25'].bad, JSON.stringify(results));
+        await p.fill('#vdoInvFps', '');
+        await p.fill('#vdoInvExtraFlags', ' ?cleanish  &js=x &b64js=eA&webcam #tail=1');
+        await sleep(200);
+        const l = await link(p);
+        check('R17c2: extra flags are normalised (leading ?, & and spaces, a cut at #), each token gets one &, and script and style flags are dropped; the room and password stay as built',
+          /^https:\/\/vdo\.ninja\/\?room=roomname&password=password/.test(l) && /&cleanish&webcam$/.test(l) && !/js=|b64js/.test(l) && !/tail/.test(l), l);
+        await p.close();
+      }
+      // (d) Per-guest links: hints, a "new guest" button, and the fields clear after Copy (GRN-188).
+      if (want('d')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        await p.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.resolve() }, configurable: true }); });
+        const hints = await p.evaluate(() => ['vdoInvLabel', 'vdoInvPush'].map((id) => (document.getElementById(id).title || '').length > 10));
+        await p.click('#btnVdoInviteNew');
+        const filled = await p.evaluate(() => ({ label: document.getElementById('vdoInvLabel').value, push: document.getElementById('vdoInvPush').value }));
+        const l1 = await link(p);
+        await p.click('#btnVdoInviteCopy');
+        await sleep(400);
+        const after = await p.evaluate(() => ({ label: document.getElementById('vdoInvLabel').value, push: document.getElementById('vdoInvPush').value }));
+        const l2 = await link(p);
+        await p.click('#btnVdoInviteNew');
+        const second = await p.evaluate(() => ({ label: document.getElementById('vdoInvLabel').value, push: document.getElementById('vdoInvPush').value }));
+        check('R17d: the label and push boxes explain themselves; "new guest link" fills a unique label and a random push ID; Copy empties both so the next link starts blank; the next one is different',
+          hints.every(Boolean) && /^[\w-]{4,}$/.test(filled.label) && /^[\w-]{6,}$/.test(filled.push) && l1.includes('&label=' + filled.label) && l1.includes('&push=' + filled.push)
+          && after.label === '' && after.push === '' && /&label$/.test(l2) && second.label !== filled.label && second.push !== filled.push, JSON.stringify({ hints, filled, after, second, l1, l2 }));
+        await p.close();
+      }
+      // (e) The roster pill counts guests without a label (GRN-82).
+      if (want('e')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1&unlabeled=2', seed);
+        const pill = await wait(p, () => /connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000)
+          && await p.evaluate(() => document.getElementById('vdoStatus').textContent);
+        check('R17e: the dock\'s director pill says how many guests have no label ("2 guests · 2 unlabeled": the director itself is not counted)', /2 guests · 2 unlabeled/.test(pill || ''), pill);
+        await p.close();
+        const m = await newPage(browser, { width: 480, height: 120 }, mockDir(x, '?fixed=1&unlabeled=1'));
+        await m.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        const ok = await wait(m, () => /2 guest\(s\) · 1 unlabeled/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+        check('R17e2: director-min says so too', ok, await m.evaluate(() => document.getElementById('status').textContent));
+        await m.close();
+      }
+      // (f) Pin a slot to one push ID; the impostor with the same label is ignored, an unpinned slot keeps label auto-follow (GRN-188, GRN-26).
+      if (want('f')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1', seed);
+        await wait(p, () => /connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        await x.api.clear();
+        await p.click('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-pin');
+        await sleep(1200);
+        const pinned = await pushPayloads(x);
+        const txt = await p.evaluate(() => document.querySelector('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-pin').textContent);
+        check('R17f: "pin" on a slot stores its current push ID (pushID) and turns into "unpin"', pinned.length >= 1 && pinned[pinned.length - 1].slots[0].pushID === 'aaa111' && /unpin/i.test(txt), JSON.stringify({ push: pinned.length && pinned[pinned.length - 1].slots[0], txt }));
+        // ALPHA leaves and an impostor takes the label; BRAVO (unpinned) is replaced by a rejoin under a new ID
+        await x.api.clear();
+        await p.evaluate(() => {});
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'zzz999', label: 'ALPHA' }, 2: { streamID: 'bbb333', label: 'BRAVO' } }));
+        await sleep(3500);
+        const after = await pushPayloads(x);
+        const last = after[after.length - 1];
+        check('R17f2: with ALPHA\'s pushed stream gone and an impostor under the same label, the pinned slot follows nobody; the unpinned slot 2 follows its guest\'s rejoin',
+          !!last && last.slots[0].streamID === '' && last.slots[0].pushID === 'aaa111' && last.slots[1].streamID === 'bbb333', JSON.stringify(last && last.slots.slice(0, 2)));
+        await p.click('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-pin');
+        await sleep(800);
+        const un = await pushPayloads(x);
+        check('R17f3: "unpin" clears pushID, and the slot goes back to following its label', un.length && !('pushID' in un[un.length - 1].slots[0]) || (un.length && !un[un.length - 1].slots[0].pushID), JSON.stringify(un.length && un[un.length - 1].slots[0]));
+        await p.close();
+      }
+      // (g) The room name vdo.ninja will use is shown; display only (GRN-156).
+      if (want('g')) {
+        const seed = mkSeed({ password: '' });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const note = () => p.evaluate(() => document.getElementById('vdoRoomEff').textContent);
+        await p.fill('#vdoRoom', 'my room');
+        const a = await note();
+        await p.fill('#vdoRoom', 'a-b');
+        const b = await note();
+        await p.fill('#vdoRoom', '部屋');
+        const c = await note();
+        await p.fill('#vdoRoom', 'x'.repeat(40));
+        const d = await note();
+        check('R17g: the box shows the room name vdo.ninja will use: "my room" → my_room (no warning), "a-b" → a_b (warned), "部屋" → _ (warned: only underscores), 40 characters → cut to 30 (warned)',
+          /my_room/.test(a) && !/warn|differs|only|cut/i.test(a) && /a_b/.test(b) && /differs/i.test(b) && /only underscores/i.test(c) && /30/.test(d), JSON.stringify({ a, b, c, d }));
+        // saving a name that is only underscores, with no password, asks first; the links keep the typed room
+        const dlgs = [];
+        p.on('dialog', (dd) => { dlgs.push(dd.message()); dd.dismiss(); });
+        await p.fill('#vdoRoom', '部屋');
+        const before = await link(p);
+        await x.api.clear();
+        await p.click('#btnVdoSave');
+        await sleep(900);
+        const psS = await pushPayloads(x);
+        check('R17g2: Save asks for confirmation when the room name is only underscores and there is no password (declined: nothing pushed); the invite link still uses the typed room', dlgs.length === 1 && /underscore/i.test(dlgs[0]) && psS.length === 0 && /room=roomname/.test(before), JSON.stringify({ dlgs, pushes: psS.length, before }));
+        await p.close();
       }
     }
 

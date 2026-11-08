@@ -625,8 +625,8 @@ async function main() {
         && P.resolveSlot(dup, 'ALPHA', '', '') === '' && P.resolveSlot(dup, 'ALPHA', 'gone', '') === '');
       check('resolveSlot: the result does not depend on the order the director lists the guests in',
         P.resolveSlot([R('ALPHA', 'a1'), R('ALPHA', 'a9')], 'ALPHA', 'a9', '') === P.resolveSlot([R('ALPHA', 'a9'), R('ALPHA', 'a1')], 'ALPHA', 'a9', '') && P.resolveSlot([R('ALPHA', 'a1'), R('ALPHA', 'a9')], 'ALPHA', 'a9', '') === 'a9');
-      check('resolveSlot: a pinned stream that is in the room under that label wins; an empty label never binds',
-        P.resolveSlot(dup, 'ALPHA', 'a1', 'a9') === 'a9' && P.resolveSlot(dup, 'ALPHA', 'a1', 'zzz') === 'a1' && P.resolveSlot(dup, '', 'a1', '') === '');
+      check('resolveSlot: a pinned stream that is in the room under that label wins; a pin that is not in the room gives nobody (a pin follows only its stream, GRN-188); an empty label never binds',
+        P.resolveSlot(dup, 'ALPHA', 'a1', 'a9') === 'a9' && P.resolveSlot(dup, 'ALPHA', 'a1', 'zzz') === '' && P.resolveSlot(dup, '', 'a1', '') === '');
       check('duplicateLabels lists the competing streams', JSON.stringify([...P.duplicateLabels(dup)]) === JSON.stringify([['ALPHA', ['a1', 'a9']]]) && P.duplicateLabels(roster1).size === 0);
       // the settle window (GRN-25)
       const lm = (r) => new Map(r.map((g) => [g.label, g.streamID]));
@@ -637,6 +637,19 @@ async function main() {
       sess = { startedAt: 1000, seen: new Set() };
       check('resolveSlotID: a live label returns its stream and is remembered; seen then lost, it blanks AT ONCE, inside the window too',
         P.resolveSlotID('ALPHA', 'a1', lm([R('ALPHA', 'a2')]), sess, 1100, 10000) === 'a2' && P.resolveSlotID('ALPHA', 'a2', lm([]), sess, 1200, 10000) === '' && sess.seen.has('ALPHA'));
+      {
+        const RS = P.resolveStream, now0 = 100000;
+        const seenSess = () => ({ startedAt: 0, seen: new Set(['ALPHA']) });
+        const imp = [{ label: 'ALPHA', streamID: 'zzz999' }];
+        check('resolveStream: a slot pinned to a push ID follows only that stream: the pinned stream gone and an impostor under the same label → nobody; the pinned stream back → it',
+          RS(imp, 'ALPHA', 'aaa111', 'aaa111', seenSess(), now0, 10000) === '' && RS(imp.concat([{ label: 'ALPHA', streamID: 'aaa111' }]), 'ALPHA', 'zzz999', 'aaa111', seenSess(), now0, 10000) === 'aaa111');
+        check('resolveStream: with no pin the same label is followed to its rejoin (auto-follow is unchanged)', RS(imp, 'ALPHA', 'aaa111', '', seenSess(), now0, 10000) === 'zzz999');
+        check('resolveSlot: a pin that is not in the room under that label gives nobody, not the impostor; no pin keeps the old rule',
+          P.resolveSlot(imp, 'ALPHA', 'aaa111', 'aaa111') === '' && P.resolveSlot(imp, 'ALPHA', 'aaa111', '') === 'zzz999');
+        check('countUnlabeled: guests with a stream and no label are counted, the director\'s own entry (key 0) and malformed replies are not',
+          P.countUnlabeled({ guestList: { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'a', label: '' }, 2: { streamID: 'b', label: ' ' }, 3: { streamID: 'c', label: 'X' }, 4: { label: '' } } }) === 2
+          && P.countUnlabeled({ guestList: 'x' }) === 0 && P.countUnlabeled(null) === 0 && P.countUnlabeled({ guestList: {} }) === 0);
+      }
       check('resolveSlotID: an empty label is always blank, held stream or not (GRN-123)', P.resolveSlotID('', 'a1', lm([]), { startedAt: 0, seen: new Set() }, 1, 10000) === '' && P.resolveSlotID('', 'a1', lm([R('', 'x')]), { startedAt: 0, seen: new Set() }, 1, 10000) === '');
 
       // the loop, with a fake clock, iframe and ticker
@@ -1005,6 +1018,10 @@ async function main() {
       const vj = new URL(U.buildViewUrl({ room: 'r', password: '', viewFlags: 'cleanish&js=//evil&b64js=xx&password=hijack&room=other' }, 'aaa111'));
       check('buildViewUrl: flags without a leading "&" work, script and room-identity flags in them are dropped, solo is added',
         vj.searchParams.has('cleanish') && !vj.searchParams.has('js') && !vj.searchParams.has('b64js') && vj.searchParams.getAll('room').join() === 'r' && vj.searchParams.getAll('view').join() === 'aaa111' && vj.searchParams.getAll('password').length === 0 && vj.searchParams.has('solo'), vj.href);
+      const rn = (x) => U.vdoRoomName(x);
+      check('vdoRoomName: the name vdo.ninja will use (non-word runs → _, 30 characters): "my room" is my_room with no warning; "a-b" differs; CJK is only underscores; 40 characters are cut',
+        rn('my room').effective === 'my_room' && rn('my room').warnings.length === 0 && rn(' a-b ').effective === 'a_b' && rn('a-b').warnings.some((w) => /differs/.test(w))
+        && rn('部屋').onlyUnderscores && rn('部屋').warnings.some((w) => /only underscores/.test(w)) && rn('x'.repeat(40)).effective.length === 30 && rn('x'.repeat(40)).warnings.some((w) => /30/.test(w)) && rn('').warnings.length === 0 && !rn('').onlyUnderscores);
       const du = U.buildDirectorUrl('https://vdo.ninja/', 'rm', 'abc%41');
       check('buildDirectorUrl: director, room, the password twice encoded, silent flags; a base with a query gets "&"',
         du === 'https://vdo.ninja/?director=rm&password=abc%252541&cleanish&novideo&noaudio' && U.buildDirectorUrl('http://x/d.html?fixed=1', 'rm', '').startsWith('http://x/d.html?fixed=1&director=rm&cleanish'), du);

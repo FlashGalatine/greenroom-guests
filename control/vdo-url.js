@@ -93,8 +93,21 @@
     return base + sep + 'director=' + encodeURIComponent(room) + passwordQuery(password) + '&cleanish&novideo&noaudio';
   }
 
+  // The room name vdo.ninja really joins: runs of anything that is not a word character become '_', at most 30 characters. Display
+  // only: the pages keep the room as typed and build every URL from it (vdo.ninja applies the same rule on every page).
+  function vdoRoomName(room) {
+    const typed = String(room ?? '').trim();
+    const effective = typed.replace(/[\W]+/g, '_').slice(0, 30);
+    const onlyUnderscores = !!typed && /^_+$/.test(effective);
+    const warnings = [];
+    if (onlyUnderscores) warnings.push('only underscores: vdo.ninja treats this as an empty room name');
+    else if (typed && effective !== typed.replace(/ /g, '_')) warnings.push('differs from what you typed');
+    if (typed.length > 30) warnings.push('longer than 30 characters: vdo.ninja cuts it');
+    return { effective, warnings, onlyUnderscores };
+  }
+
   globalThis.GRVdoUrl = {
-    normalizeFlags, sanitizeViewFlags, isInjectionKey, ensureSolo, effectivePassword, passwordQuery, buildViewUrl, buildDirectorUrl,
+    vdoRoomName, normalizeFlags, sanitizeViewFlags, isInjectionKey, ensureSolo, effectivePassword, passwordQuery, buildViewUrl, buildDirectorUrl,
     INJECTION, IDENTITY,
   };
 })();

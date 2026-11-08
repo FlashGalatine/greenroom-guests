@@ -103,14 +103,13 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   "viewFlags": "&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish",
   "slots": [                        // always 4
     { "slot": 1, "label": "ALPHA", "streamID": "abc123", "mirror": false,
-      "mode": "webcam", "discordUserId": "" },
+      "mode": "webcam", "discordUserId": "", "pushID": "" },   // pushID optional
     …
   ],
-  "invite": { "passwordMode": "hash", "label": "", "push": "", "videoBitrate": "",
-    "quality": "", "width": "", "height": "", "fps": "", "codec": "",
-    "audioBitrate": "", "stereo": false, "noVideo": false, "noAudio": false,
-    "capture": "", "broadcast": false, "meshcast": false, "autostart": false,
-    "requireApproval": false, "roomCap": "", "extraFlags": "" },
+  "invite": { "passwordMode": "hash", "askName": true, "label": "", "push": "",
+    "videoBitrate": "", "quality": "", "fps": "", "audioBitrate": "",
+    "noVideo": false, "noAudio": false, "capture": "", "broadcast": false,
+    "meshcast": false, "autostart": false, "extraFlags": "" },
   "directory": [                    // guest directory → nameplates (optional)
     { "vdoLabel": "John-T", "discordUserId": "",
       "displayName": "John the Tyrant", "auto": false,
@@ -123,6 +122,19 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 
 - Slots bind guests by **label** (stable across rejoins); `streamID` is the
   volatile live resolution the director loop refreshes every 2.5 s.
+- **`slots[].pushID` (optional pin).** When present and non-empty, the slot follows
+  only that stream (a guest's push ID is their `streamID` in the director's
+  guest list) and ignores a different guest who picked the same label; if the
+  pinned stream is not in the room the slot is empty. Absent or `""` means "follow
+  the label". The control pages write it (the slot row's **pin** / **unpin**
+  button); the overlay ignores it (it only reads `streamID`). A pin belongs to
+  the guest it was made for, so changing the slot's label clears it.
+- **`invite`** holds only options vdo.ninja applies on the guest's side: `askName`
+  (default on: the guest link ends in a bare `&label`, so each guest is asked
+  for a display name; absent reads as on), `fps` → `&maxframerate`, the bitrates
+  → `&outboundvideobitrate` / `&outboundaudiobitrate`, `noVideo` / `noAudio` →
+  `&videodevice=0` / `&audiodevice=0`. Older fields (width, height, codec,
+  stereo, requireApproval, roomCap) are carried through but no longer used.
 - `label`, `enabled`, and `invite` exist so the persisted `vdo.state` doubles as
   the config store — the control page rehydrates from a `VDO Sync` replay and
   holds no authoritative state of its own. The guest overlay reads only

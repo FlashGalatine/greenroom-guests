@@ -35,6 +35,20 @@
     return out;
   }
 
+  // Guests that are in the room with a stream but without a label (a guest who cancelled the name prompt). The director's own entry
+  // (key '0', empty label) is not a guest.
+  function countUnlabeled(data) {
+    const gl = data && typeof data === 'object' ? data.guestList : null;
+    if (!gl || typeof gl !== 'object' || Array.isArray(gl)) return 0;
+    let n = 0;
+    for (const key of Object.keys(gl)) {
+      if (key === '0') continue;
+      const g = gl[key];
+      if (g && typeof g === 'object' && String(g.streamID ?? '').trim() && !String(g.label ?? '').trim()) n++;
+    }
+    return n;
+  }
+
   // Was this reply in a shape we understand? An empty guestList ({}) is recognised: the room really may be empty.
   function guestListOk(data) {
     if (!data || typeof data !== 'object') return false;
@@ -55,7 +69,7 @@
     if (!label) return '';
     const matches = (roster || []).filter((g) => g && g.label === label);
     if (!matches.length) return '';
-    if (pinnedID && matches.some((g) => g.streamID === pinnedID)) return pinnedID;
+    if (pinnedID) return matches.some((g) => g.streamID === pinnedID) ? pinnedID : ''; // a pinned slot follows only that stream
     if (matches.length === 1) return matches[0].streamID;
     return matches.some((g) => g.streamID === prevStreamID) ? prevStreamID : '';
   }
@@ -96,7 +110,10 @@
     const held = String(heldID || '');
     const matches = (roster || []).filter((g) => g && g.label === label);
     const settling = sess.startedAt == null || now - sess.startedAt < settleMs;
-    if (pinnedID && matches.some((g) => g.streamID === pinnedID)) { sess.seen.add(label); return pinnedID; }
+    if (pinnedID) { // a pinned slot follows only that stream: an impostor under the same label is ignored
+      if (matches.some((g) => g.streamID === pinnedID)) { sess.seen.add(label); return pinnedID; }
+      return !sess.seen.has(label) && settling && held === pinnedID ? held : '';
+    }
     if (held && matches.some((g) => g.streamID === held)) { sess.seen.add(label); return held; }
     if (!matches.length) return sess.seen.has(label) ? '' : (settling ? held : '');
     if (held && !sess.seen.has(label) && settling) return held;
@@ -104,5 +121,5 @@
     return matches.length === 1 ? matches[0].streamID : '';
   }
 
-  globalThis.VdoParse = { parseGuestList, guestListOk, resolveSlot, resolveSlotID, resolveStream, duplicateLabels, SETTLE_MS: 10000 };
+  globalThis.VdoParse = { parseGuestList, countUnlabeled, guestListOk, resolveSlot, resolveSlotID, resolveStream, duplicateLabels, SETTLE_MS: 10000 };
 })();

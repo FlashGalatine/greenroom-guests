@@ -28,6 +28,7 @@
   not seen its guests yet). ?late=<LABEL>:<ms> keeps that guest out of every reply until <ms> after page load.
   ?delay=<ms> does not answer any poll until <ms> after page load (a slow director). ?silentAfter=<ms> stops answering
   <ms> after page load (a director that goes quiet).
+  ?unlabeled=N adds N guests that have a stream but no label (a guest who cancelled the name prompt).
   ?renamed=1 answers with renamed fields (stream/name instead of streamID/label): a shape change, not an empty room.
   ?failover=1 moves this page from 127.0.0.1 to localhost on load (a different origin, as vdo.ninja's cdn-backup
   failover is), so a page must allow the second origin (window.__VDO_DIRECTOR_EXTRA_ORIGINS) to hear it.
@@ -57,6 +58,7 @@
   const ALPHA = P.get('label') || 'ALPHA'; // ?label=<text> renames ALPHA (every poll, whatever the timeline)
   const COLDSTART = Number(P.get('coldstart')) || 0;
   const RENAMED = P.get('renamed') === '1';
+  const UNLABELED = Math.max(0, Math.floor(Number(P.get('unlabeled')) || 0));
   const DELAY = Number(P.get('delay')) || 0;
   const SILENT_AFTER = Number(P.get('silentAfter')) || 0;
   const LATE = (() => { const v = P.get('late') || ''; const i = v.lastIndexOf(':'); return i > 0 ? { label: v.slice(0, i), ms: Number(v.slice(i + 1)) || 0 } : null; })();
@@ -71,6 +73,7 @@
   function rosterAt(elapsedMs) {
     const t = elapsedMs * SPEED;
     const gl = { 0: { streamID: 'dIrEcToR00', label: '' } }; // the director itself
+    for (let u = 0; u < UNLABELED; u++) gl[10 + u] = { streamID: 'unl' + u, label: '' };
     if (FIXED) {
       gl[1] = { streamID: 'aaa111', label: ALPHA };
       gl[2] = { streamID: 'bbb222', label: 'BRAVO' };

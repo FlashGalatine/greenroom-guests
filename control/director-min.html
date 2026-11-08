@@ -96,7 +96,7 @@
   const SCHEMA_VERSION = 1;
   const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
     'directoryAutoAdd', 'directoryIgnored', 'schemaVersion', 'rev', 'writer']);
-  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId']);
+  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId', 'pushID']);
   const MSG_RELOAD = 'the saved config comes from a newer Greenroom: reload this page; it pushes nothing until you do';
   let schemaTooNew = false;
 
@@ -113,10 +113,8 @@
   // The same defaults as the dock, so a config the dock never saw (or a backup without these) reads the same on both pages (GRN-131).
   const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
   function defaultInvite() {
-    return { passwordMode: 'hash', label: '', push: '', videoBitrate: '', quality: '', width: '',
-      height: '', fps: '', codec: '', audioBitrate: '', stereo: false, noVideo: false, noAudio: false,
-      capture: '', broadcast: false, meshcast: false, autostart: false, requireApproval: false,
-      roomCap: '', extraFlags: '' };
+    return { passwordMode: 'hash', askName: true, label: '', push: '', videoBitrate: '', quality: '', fps: '', audioBitrate: '',
+      noVideo: false, noAudio: false, capture: '', broadcast: false, meshcast: false, autostart: false, extraFlags: '' };
   }
   let flagsNote = ''; // flags in the saved config that the overlay ignores (script, style, room identity)
   function defaultSlots() {
@@ -139,16 +137,19 @@
       silent: () => { hasRoster = false; directorNote = 'director not responding'; show(directorNote); },
       retrying: () => { directorNote = 'director not responding, retrying'; show(directorNote); },
       unrecognised: () => { directorNote = 'reply unrecognised - check vdo.ninja version'; show(directorNote); },
-      reply: (r) => {
+      reply: (r, raw) => {
         roster = r;
         hasRoster = true;
         directorNote = '';
-        show(`room ${cfg.room} · ${roster.length} guest(s)` + flagsTail());
+        unlabeled = VdoParse.countUnlabeled(raw);
+        show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + flagsTail());
         runAutoAdd(); // new label in the room → placeholder nameplate entry
         assembleAndPush(true); // auto-follow: re-resolve every poll
       },
     },
   });
+  let unlabeled = 0; // guests in the room without a label (they cannot be bound to a slot)
+  const unlabeledTail = () => (unlabeled ? ' · ' + unlabeled + ' unlabeled' : '');
   let directorNote = ''; // a director problem (quiet, unrecognised reply) that status updates must not paint over
   let roster = [];
   let hasRoster = false;
@@ -197,6 +198,7 @@
           mirror: !!s.mirror,
           mode: s.mode === 'discord' ? 'discord' : 'webcam',
           discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
+          pushID: String(s.pushID ?? '').trim(), // the push ID this slot is pinned to ('' = follow the label)
         }, GRDir.extraFields(s, SLOT_KEYS)); // unknown slot fields pass through
       }
     }
@@ -240,7 +242,7 @@
   const flagsTail = () => (flagsNote ? ' · ' + flagsNote : ''); // a director or connection problem is never replaced by it
   function showSteady() {
     if (directorNote && frameUrl) show(directorNote + flagsTail());
-    else if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)` + flagsTail());
+    else if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + flagsTail());
     else if (cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/' + flagsTail());
     else show((cfg.enabled ? 'no room configured' : 'director disabled') + flagsTail());
   }
@@ -292,7 +294,7 @@
       // the held resolution is kept.
       let streamID;
       if (!s.label || directorOff) streamID = '';
-      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, '', directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
+      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, String(s.pushID || ''), directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
       else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
@@ -302,7 +304,7 @@
         mirror: !!s.mirror,
         mode: s.mode === 'discord' ? 'discord' : 'webcam',
         discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
-      }, GRDir.extraFields(s, SLOT_KEYS));
+      }, s.pushID ? { pushID: String(s.pushID) } : {}, GRDir.extraFields(s, SLOT_KEYS));
     });
     return Object.assign({ enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
       viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {},
