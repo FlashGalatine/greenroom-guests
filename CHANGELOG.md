@@ -9,6 +9,27 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.43] — 2026-11-08
+
+The dock and the `director-min` source no longer trust the vdo.ninja director's guest list when it is not real. A director that has just started, one that only knows some of the guests, one that has gone quiet, or one whose reply has changed shape can no longer blank a guest who is on air.
+
+### Fixed
+
+- **A cold or partial director no longer blanks guests on air.** After a reload, the director's first replies are often empty or incomplete. A slot whose guest the director has not reported yet now keeps its stream for the first 10 seconds after the director's first usable answer (a director that is slow to answer gets its full window); a guest the director reported and then lost still blanks at once. A different guest who uses the same label and is reported first does not take the slot. A `control.html` opened and closed a couple of seconds later while `director-min` runs no longer changes any stream ID.
+- **A label two guests share can no longer be taken over.** Anyone in the room can choose any label. A slot whose label is used by several guests keeps the stream it already had while that stream is still there, and is empty when it is not (it never jumps to a joiner). The slot shows "2 streams!", with the competing streams in its tooltip.
+- **A reply with a changed shape is not "an empty room".** If the director's answer has no usable `streamID` entries or its `guestList` is not an object, the pill says "director: reply unrecognised - check vdo.ninja version", nothing is pushed, and the resolved slots stay as they were.
+- **A silent director is noticed and retried.** After about three polls without an answer the pill says "director: not responding" (and the last resolved stream IDs are kept, never blanked); after about 25 seconds the frame is reloaded, then again after 30, 60 and 120 seconds, and at once when the network comes back. Saving the room while the director is quiet looks again straight away, without counting as a retry. A slot relabelled while the director is quiet starts empty instead of keeping the previous guest's stream. "Connecting…" gains a hint after 15 seconds (check the room, the password and that vdo.ninja is reachable).
+- **The poll no longer stops in a hidden page.** It is driven by a Web Worker, so a dock tab in the background keeps polling every 2.5 seconds.
+- **Only the director can answer.** A reply is accepted only from the director frame itself, from vdo.ninja or its `cdn-backup` failover origin, and the poll is posted to the frame's real origin.
+- **A page that is not a secure context does not start a director that vdo.ninja would refuse.** The pill and the banner say to open it via `http://127.0.0.1:<port>/`.
+- An empty label never carries a stream ID, in either page.
+
+### Added
+
+- One shared director loop (`control/director-loop.js`) and the roster rules in `control/vdo-parse.js` are used by both pages, with unit checks for the state machine and the resolver. Test support: the mock director can start cold (`?coldstart=N`), report a guest late (`?late=LABEL:ms`), change its reply shape (`?renamed=1`) and answer from a second origin (`?failover=1`); `verify:render` has a new roster section (R13).
+
+**Deploy:** copy the `control/` folder, reload the dock and refresh the `director-min` source. Nothing to re-paste, nothing to restart. `verify` 241/241, `verify:render` 205/205.
+
 ## [1.0.40] — 2026-11-08
 
 The backup tool (`npm run backup`, `npm run backup:restore`) now restores only a snapshot it has checked, to the Streamer.bot you meant, and only when you say `--yes`. Nothing to copy into Streamer.bot, nothing to restart or refresh: pull or download, and read the new restore flags below.
@@ -246,6 +267,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.43]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.40...v1.0.43
 [1.0.40]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.37...v1.0.40
 [1.0.37]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.34...v1.0.37
 [1.0.34]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.29...v1.0.34
