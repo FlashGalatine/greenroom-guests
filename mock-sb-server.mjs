@@ -50,8 +50,10 @@
 //       SB_AUTH=close|serve     with SB_HELLO=auth: close a client that sends any request, or serve
 //                               requests anyway (Authentication on, Enforce off); default: refuse them
 //       SB_SYNC_DROP=1          the first VDO Sync is acked but its replay is never broadcast
+//       SB_PUSH=error|drop      VDO Push is acked status:'error' and not run, or acked ok but stores and broadcasts nothing
+//       SB_MISSING=<a,b>        the named actions do not exist: acked status:'error' (so does any name outside the five)
 //       The four mode options above can also be changed while running:
-//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve   (hello=mock = the default)
+//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve&push=ok|error|drop&missing=<names>   (hello=mock = the default)
 //       GET /mock/dropall       close every WebSocket client (they reconnect)
 //       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
 //       SB_DROP=1               accept each connection, greet it, answer no request, and close it ~100 ms later
@@ -112,7 +114,11 @@ const modes = {
   doaction: process.env.SB_DOACTION === 'error' ? 'error' : 'ok',
   hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : (process.env.SB_HELLO === 'none' ? 'none' : 'mock')),
   auth: process.env.SB_AUTH === 'close' ? 'close' : (process.env.SB_AUTH === 'serve' ? 'serve' : 'refuse'),
+  push: process.env.SB_PUSH === 'error' || process.env.SB_PUSH === 'drop' ? process.env.SB_PUSH : 'ok', // VDO Push: ok | error (acked status:'error', not run) | drop (acked ok, stores and broadcasts nothing)
+  missing: process.env.SB_MISSING || '', // comma-separated action names that do not exist: acked status:'error'
 };
+// The actions the real install has (an action that is not one of these, or is listed in `missing`, is answered 'not found').
+const KNOWN_ACTIONS = new Set(['VDO Push', 'Discord Voice Push', 'VDO Sync', 'Discord Voice Command', 'Discord Bridge Start']);
 const SUBSCRIBE_DELAY_MS = Number(process.env.SB_SUBSCRIBE_DELAY_MS) || 0;
 let syncDropsLeft = process.env.SB_SYNC_DROP === '1' ? 1 : 0;
 const DATA_STRING = process.env.SB_DATA === 'string';
@@ -557,9 +563,13 @@ function onMessage(ws, raw) {
       const args = m.args && typeof m.args === 'object' && !Array.isArray(m.args) ? m.args : {};
       logAction(name, args);
       if (modes.doaction === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: action not found' })); return; }
+      const missing = String(modes.missing || '').split(',').map((x) => x.trim()).filter(Boolean);
+      if (!KNOWN_ACTIONS.has(name) || missing.includes(name)) { ws.send(JSON.stringify({ status: 'error', id: m.id, error: `mock: action not found: ${name}` })); return; }
+      if (name === 'VDO Push' && modes.push === 'error') { ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: VDO Push refused' })); return; }
       ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
 
       if (name === 'VDO Push') {
+        if (modes.push === 'drop') { console.log('[mock] VDO Push → acked and dropped (push=drop)'); return; }
         push(name, args);
         console.log('[mock] VDO Push → handled');
         return;
@@ -585,7 +595,7 @@ function onMessage(ws, raw) {
         console.log(`[mock] Discord Voice Command → ${command}${value ? ' ' + value.slice(0, 60) : ''}`);
         return;
       }
-      console.log(`[mock] DoAction for unknown action "${name}" — acked, no effect`);
+      console.log(`[mock] DoAction for "${name}" — a known action the mock does not implement: acked, no effect`);
       return;
     }
   }

@@ -124,11 +124,18 @@ to keep a file copy:
   SB (so it persists like an edit — it *replaces* the current config).
 - **CLI** (your real Streamer.bot must be running; it needs Node 22.12+ and a one-time `npm install --omit=dev` in this folder, which installs `ws`. The development mock is not a place to keep a backup):
   ```
-  npm run backup                       # → backups/vdo-state-<timestamp>.json
+  npm run backup                                   # → backups/vdo-state-<timestamp>.json
   npm run backup:list
-  npm run backup:restore -- <file>     # push a snapshot back into SB
+  npm run backup:restore -- backups/<file>         # check the snapshot, show current vs new; changes nothing
+  npm run backup:restore -- backups/<file> --yes   # …and really replace the saved config
   ```
-  `SB_WS_URL` / `SB_WS_PORT` (or `--url`) point it at a non-default SB.
+  `restore` checks the file the way the control page checks an import (a Greenroom snapshot, a text room,
+  slots and a directory, Discord IDs in quotes, nothing from a newer Greenroom), saves the current config to
+  `backups/pre-restore-<time>.json`, pushes the snapshot, and says whether Streamer.bot confirmed it. `--force`
+  accepts a raw `vdo.state` payload with no `kind` (and `save` over an existing file). A snapshot saved as UTF-16
+  by Notepad or PowerShell is read too.
+  Put flags after a `--` (npm swallows a bare `--url`; the tool refuses to run when it sees that):
+  `npm run backup -- --url ws://127.0.0.1:8081/`. `SB_WS_URL` / `SB_WS_PORT` also point it at a non-default SB.
 
 Snapshots contain the **room password**, so `backups/` is gitignored — treat the
 files as secret. The Discord bot's favorites/settings are already file-based in
