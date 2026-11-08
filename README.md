@@ -156,6 +156,13 @@ npm run verify:render  # 44 real-browser checks: guest slot URL assembly + the
                        # a 20-user 100 ms burst, control page hydrate/edit/USE, and
                        # the directory UI (collapsed rows, search, auto-populate,
                        # rename-clears-auto, remove-stays-removed)
+npm run verify:cs      # compiles the three state actions as shipped (the C# compiler
+                       # that comes with .NET Framework 4, against mscorlib only) and
+                       # runs them against a stub of Streamer.bot: every frame, the
+                       # broadcast-before-cache order, date-shaped guest labels.
+                       # Skips itself when no C# compiler is found. Set
+                       # GREENROOM_NEWTONSOFT_DLL to Streamer.bot's Newtonsoft.Json.dll
+                       # to re-parse each frame the way Streamer.bot does.
 npm start            # mock Streamer.bot (:7474/:8080) for hands-on dev
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live)
 ```

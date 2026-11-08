@@ -23,9 +23,11 @@ Streamer.bot is the entire bus — there is no other server.
 // accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off"
 // (Greenroom does not authenticate). It clears on the next healthy connection.
 
-// DoAction — ack {id, status:'ok'} means the action STARTED, not that it
-// succeeded. A C# compile error still acks ok and broadcasts nothing; that is
-// why the actions carry error broadcasts (see below).
+// DoAction — an ack {id, status:'ok'} means only that the action STARTED, not that it
+// succeeded. An invalid argument or a runtime exception inside a running action is
+// reported by an error broadcast (see "Error broadcasts" below). An action whose C#
+// failed to COMPILE is silent: it acks ok and broadcasts nothing (the symptom is a
+// blank or stale overlay), so always click Compile and confirm it succeeds.
 { "request": "DoAction", "id": "2", "action": { "name": "VDO Push" }, "args": { "payload": "{...}" } }
 ```
 
@@ -35,9 +37,20 @@ Streamer.bot is the entire bus — there is no other server.
 {
   "timeStamp": "…",
   "event": { "source": "General", "type": "Custom" },
-  "data": { "type": "vdoninja:update", "vdoninja": { /* payload */ } }
+  "data": { "type": "vdoninja:update", "vdoninjaJson": "{\"enabled\":true,\"room\":\"myroom\", …}" }
 }
 ```
+
+The state travels as an **escaped string field** — `vdoninjaJson` for `vdoninja:update`,
+`discordVoiceJson` for `discord:voice:update` — holding the producer's JSON text
+byte for byte. Streamer.bot parses everything it broadcasts with Newtonsoft (default
+date handling) before it sends it, so a state nested as an object would have every
+date-shaped string in it re-formatted (a guest label like `2024-02-03T04:05:06.000Z`
+comes back as `…06Z`, which no slot matches), and one outside the DateTime range would
+make the whole broadcast throw. A string field is not parsed, so the text arrives
+unchanged and the pages `JSON.parse` it themselves. The pages still also read the old
+nested fields (`vdoninja`, `discordVoice`), which an actions paste from before the
+string fields sends.
 
 `WebsocketBroadcastJson` nests `data` as an **object** (plain `WebsocketBroadcast`
 would put a JSON **string** there — the transport shim tolerates both). Overlays
@@ -47,19 +60,26 @@ re-emit every `data` with a `.type` as a window `svc:message` CustomEvent.
 
 | Action | Caller | args | Behavior |
 |---|---|---|---|
-| `VDO Push` | control pages | `payload` | `SetGlobalVar("vdo.state", payload, **true**)` → broadcast `{"type":"vdoninja:update","vdoninja":<payload>}` |
-| `Discord Voice Push` | bridge sidecar | `payload` | `SetGlobalVar("discord.state", payload, **false**)` → broadcast `{"type":"discord:voice:update","discordVoice":<payload>}` |
-| `VDO Sync` | every page on connect | `reason` | read both globals (same persistence flags) → re-broadcast each non-empty, vdo first |
+| `VDO Push` | control pages | `payload` | broadcast `{"type":"vdoninja:update","vdoninjaJson":"<payload, escaped>"}`, **then** `SetGlobalVar("vdo.state", payload, **true**)` |
+| `Discord Voice Push` | bridge sidecar | `payload` | broadcast `{"type":"discord:voice:update","discordVoiceJson":"<payload, escaped>"}`, **then** `SetGlobalVar("discord.state", payload, **false**)` |
+| `VDO Sync` | every page on connect | `reason` | read both globals (same persistence flags) → replay each non-empty one the same way, each replay in its own `try` (no order is promised). An empty `vdo.state` broadcasts `{"type":"vdo:sync:empty"}`; an empty `discord.state` is skipped |
 | `Discord Voice Command` | control page | `command`, `value` | broadcast `{"type":"discord:voice:command","command":…,"value":…}` |
 | `Discord Bridge Start` *(optional)* | SB startup trigger | — | `Process.Start` the sidecar hidden |
 
-The C# **never parses JSON**. Push payloads are pre-serialized by the producers
-and concatenated raw into the wrapper; the only C#-built JSON is the tiny command
-broadcast and the error shapes.
+The C# **never re-serializes JSON**. Push payloads are pre-serialized by the producers
+and only escaped into the string field; the only other C#-built JSON is the tiny
+command broadcast and the error shapes. The broadcast comes **before** the cache
+write, so a broadcast that fails (an exception in `WebsocketBroadcastJson`) never
+leaves a saved state behind that no client has seen.
+
+`{"type":"vdo:sync:empty"}` tells a page that `VDO Sync` ran and nothing is saved yet
+(a fresh install), so it can stop waiting for a reply instead of guessing; the control
+pages read it as "synced, with no config adopted".
 
 **Persistence flags are semantic.** `vdo.state` is persisted (`true`) — the dock
-config must survive SB restarts; a stale resolved streamID may replay for ≤2.5 s
-until the director's next resolution corrects it, which beats a blank slot.
+config must survive SB restarts; a replayed config keeps the streamIDs it was saved
+with until a director page re-resolves them (every 2.5 s while one is running), which
+beats a blank slot.
 `discord.state` is non-persisted (`false`) — stale speaking/presence state must
 NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 
@@ -187,9 +207,14 @@ are logged and ignored (the mock bridge adds a test-only `mock-burst on|off`).
 
 ## Error broadcasts
 
-Failures are visible, not silent: `{"type":"vdo:error","message":…}` from
-`VDO Push`/`VDO Sync`, `{"type":"discord:voice:error","message":…}` from the
-Discord actions. The control page surfaces them in its status pill.
+Invalid arguments and runtime exceptions are visible, not silent:
+`{"type":"vdo:error","message":…}` from `VDO Push`/`VDO Sync`,
+`{"type":"discord:voice:error","message":…}` from the Discord actions
+(`VDO Sync` reports a failed Discord replay as `discord:voice:error`). The control
+page surfaces them in its status pill. An error broadcast can only come from an action
+that compiled: one that failed to compile is silent (see `DoAction` above), and
+`Discord Bridge Start` broadcasts nothing at all, it only logs, so look in Streamer.bot's
+log if the bridge does not come up.
 
 ## Security posture
 

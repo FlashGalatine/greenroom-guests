@@ -40,8 +40,11 @@ bot token file.
 For each: **Actions → Add** with the EXACT name below (names are load-bearing —
 the pages call `DoAction { name }`), then add sub-action **Core → C# → Execute
 C# Code**, paste the whole file from `actions/`, and click **Compile** — it must
-report success. *A compile error still acks DoAction with ok and broadcasts
-nothing; the symptom is a blank/stale overlay.*
+report success. *An ok ack only means the action started. An action that failed
+to compile is silent (it acks ok and broadcasts nothing; the symptom is a blank or
+stale overlay), so always click Compile and confirm it succeeds. An invalid
+argument or a runtime exception inside a compiled action is reported by an error
+broadcast, which the control page shows.*
 
 | Action name | File | Notes |
 |---|---|---|
@@ -68,6 +71,25 @@ stale state back on the pages. Serialise the three:
 
 The queue orders the actions; Greenroom's pages do not yet reject a stale
 broadcast, so this queue is the only protection against that race today.
+
+**Updating the three state actions: do it in this order.** The current `VDO Push`,
+`VDO Sync` and `Discord Voice Push` broadcast the state as an escaped string field
+(`vdoninjaJson`, `discordVoiceJson`) instead of a nested object, so a guest or Discord
+name that looks like a timestamp can no longer be rewritten, or stop the broadcast,
+inside Streamer.bot. The pages read both shapes from 1.0.24 (control pages) and 1.0.29
+(overlays), which is why the order matters:
+
+1. Run `npm run backup` while the **old actions are still in place** (it reads both
+   shapes).
+2. Copy the `control/` and `overlay/` folders over the old ones, then restart OBS
+   (or refresh every Greenroom browser source and reload the dock), so every page
+   loads code that understands the new frames.
+3. **Only then** re-paste `VDO Push`, `VDO Sync` and `Discord Voice Push` into
+   Streamer.bot and click **Compile** on each. No bridge restart is needed.
+
+If the actions are re-pasted before the pages are updated, a guest-slot source still
+on code older than 1.0.29 shows a blank cam when the new frames arrive, and a dock or
+`director-min` source older than 1.0.24 can overwrite `vdo.state` with its defaults.
 
 **Protect your saved config.** The room, slots and guest directory live only in
 Streamer.bot's persisted `vdo.state`.

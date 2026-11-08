@@ -236,6 +236,29 @@ const DISCORD_PAYLOAD = {
   current: { serverId: '259501535484968970', channelId: '1197596470245871696' },
 };
 
+// The C# actions explain themselves in long comments that quote the very strings these checks look for, so a
+// check on the raw text could pass on a comment alone. This removes // and /* */ comments (string and char
+// literals are skipped over, so a comment marker inside one survives) before any grep runs.
+function stripCsComments(src) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i], n = src[i + 1];
+    if (c === '"' || c === "'") { // a string or char literal: copy it whole
+      let j = i + 1;
+      while (j < src.length && src[j] !== c && src[j] !== '\n') { if (src[j] === '\\') j++; j++; }
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && n === '*') { const e = src.indexOf('*/', i + 2); i = e < 0 ? src.length : e + 2; out += ' '; continue; }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 async function main() {
   console.log('Greenroom — Streamer.bot seam verification\n');
   let mock;
@@ -736,17 +759,33 @@ async function main() {
     check('namespaced aliases serve too (/greenroom-control/, /greenroom-overlay/ — the real-SB map names)',
       nsCtrl.status === 200 && nsOv.status === 200);
 
-    // C# ↔ mock parity greps: the .cs files must carry the exact contract strings
-    // the mock (and the producers) rely on. A drift here is a live-only bug.
-    const cs = async (f) => readFile(resolve(__dirname, 'actions', f), 'utf8');
+    // C# ↔ mock parity greps: the .cs files must carry the exact contract strings the mock (and the
+    // producers) rely on. A drift here is a live-only bug. Each file is checked with its comments removed,
+    // so a comment that quotes a string cannot satisfy a check.
+    const cs = async (f) => stripCsComments(await readFile(resolve(__dirname, 'actions', f), 'utf8'));
+    const before = (src, first, second) => src.includes(first) && src.includes(second) && src.indexOf(first) < src.indexOf(second);
+    check('stripCsComments: removes // and /* */ comments but keeps a comment marker inside a string literal',
+      (() => { const t = stripCsComments('a // x\nb /* y */ c "//z" \'/\' d'); return !/[xy]/.test(t.replace(/"\/\/z"/, '')) && t.includes('"//z"') && t.includes('b') && t.includes('c') && t.includes('d'); })());
     const vdoPush = await cs('vdo-push.cs');
     check('vdo-push.cs: persisted SetGlobalVar("vdo.state", payload, true)', vdoPush.includes('SetGlobalVar("vdo.state", payload, true)'));
-    check('vdo-push.cs: raw-concat wrapper {"type":"vdoninja:update","vdoninja":...}', vdoPush.includes('\\"vdoninja\\":" + payload'));
+    check('vdo-push.cs: the state goes out as an escaped string field {"type":"vdoninja:update","vdoninjaJson":JsonStr(payload)}, never raw-concatenated as an object',
+      vdoPush.includes('\\"vdoninjaJson\\":" + JsonStr(payload)') && !vdoPush.includes('\\"vdoninja\\":"'));
+    check('vdo-push.cs: WebsocketBroadcastJson comes BEFORE SetGlobalVar (a failed broadcast never persists a state)',
+      before(vdoPush, 'WebsocketBroadcastJson("{\\"type\\":\\"vdoninja:update\\"', 'SetGlobalVar("vdo.state"'));
     const dPush = await cs('discord-voice-push.cs');
     check('discord-voice-push.cs: NON-persisted SetGlobalVar("discord.state", payload, false)', dPush.includes('SetGlobalVar("discord.state", payload, false)'));
+    check('discord-voice-push.cs: the state goes out as an escaped string field {"type":"discord:voice:update","discordVoiceJson":JsonStr(payload)}',
+      dPush.includes('\\"discordVoiceJson\\":" + JsonStr(payload)') && !dPush.includes('\\"discordVoice\\":"'));
+    check('discord-voice-push.cs: WebsocketBroadcastJson comes BEFORE SetGlobalVar',
+      before(dPush, 'WebsocketBroadcastJson("{\\"type\\":\\"discord:voice:update\\"', 'SetGlobalVar("discord.state"'));
     const sync = await cs('vdo-sync.cs');
     check('vdo-sync.cs: reads mirror the writers\' persistence flags',
       sync.includes('GetGlobalVar<string>("vdo.state", true)') && sync.includes('GetGlobalVar<string>("discord.state", false)'));
+    check('vdo-sync.cs: both replays are string fields (vdoninjaJson, discordVoiceJson), and an empty vdo.state broadcasts vdo:sync:empty',
+      sync.includes('\\"vdoninjaJson\\":" + JsonStr(vdo)') && sync.includes('\\"discordVoiceJson\\":" + JsonStr(discord)')
+      && sync.includes('{\\"type\\":\\"vdo:sync:empty\\"}') && !sync.includes('\\"vdoninja\\":"') && !sync.includes('\\"discordVoice\\":"'));
+    check('vdo-sync.cs: the two replays are separate try blocks (one failure never stops the other)',
+      (sync.match(/\btry\b/g) || []).length >= 2 && sync.includes('Report("vdo:error", ex)') && sync.includes('Report("discord:voice:error", ex)'));
     const cmd = await cs('discord-voice-command.cs');
     check('discord-voice-command.cs: broadcasts discord:voice:command', cmd.includes('discord:voice:command'));
     const launcher = await cs('discord-bridge-start.cs');

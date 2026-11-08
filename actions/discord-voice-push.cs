@@ -3,17 +3,25 @@
 // Called by the Discord bridge sidecar (sidecar/discord-bridge.mjs) with one
 // argument, `payload`: the ENTIRE discordVoice state pre-serialized as a JSON object
 // string (channelId/connected/hostInChannel/users/settings/rpc/favorites/current).
-// This C# NEVER parses it — cache + wrap + broadcast only.
+// The state is broadcast as an escaped STRING field,
+// {"type":"discord:voice:update","discordVoiceJson":"…"}, never as a nested object:
+// Streamer.bot parses a broadcast with Newtonsoft before it sends it, and a Discord
+// display name must not pass through that parser or be re-formatted by it. The pages
+// parse the string themselves. The payload is stored unchanged.
 //
 // HOW TO USE (docs/STREAMERBOT-SETUP.md has the full walkthrough):
 //   1. Streamer.bot -> Actions -> add an action named EXACTLY "Discord Voice Push"
 //      (the name matters: the sidecar does DoAction { name: "Discord Voice Push" }).
 //   2. Add a sub-action: Core -> C# -> Execute C# Code. Paste EVERYTHING below and
 //      click COMPILE — it must report success.
+//   3. Put this action, "VDO Push" and "VDO Sync" in ONE dedicated BLOCKING action
+//      queue, e.g. 'Greenroom State' (setup doc, section 2; never the Default queue),
+//      so a Sync replay cannot interleave with a push.
 //
 // State: ONE NON-persisted global, `discord.state` (persisted=false — speaking/
 // presence state is live data; a stale roster must NOT replay after an SB restart.
-// The sidecar re-pushes current state as soon as it reconnects).
+// The sidecar re-pushes current state as soon as it reconnects). The broadcast comes
+// BEFORE the cache write: a broadcast that fails never leaves a state behind.
 //
 // This action fires at up to ~10/s during speaking bursts (the sidecar coalesces at
 // 100 ms) — it stays deliberately tiny: no logging on the hot path.
@@ -41,8 +49,8 @@ public class CPHInline
                 return Fail("Discord Voice Push payload must be a JSON object string");
             }
 
+            CPH.WebsocketBroadcastJson("{\"type\":\"discord:voice:update\",\"discordVoiceJson\":" + JsonStr(payload) + "}");
             CPH.SetGlobalVar("discord.state", payload, false); // false = non-persisted store
-            CPH.WebsocketBroadcastJson("{\"type\":\"discord:voice:update\",\"discordVoice\":" + payload + "}");
             return true;
         }
         catch (Exception ex)

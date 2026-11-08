@@ -14,6 +14,7 @@
     "backup:list": "node backup.mjs list",
     "verify": "node verify.mjs",
     "verify:render": "node verify-render.mjs",
+    "verify:cs": "node verify-cs.mjs",
     "shots": "node tools/shots.mjs"
   },
   "dependencies": {
