@@ -9,6 +9,26 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.40] — 2026-11-08
+
+The backup tool (`npm run backup`, `npm run backup:restore`) now restores only a snapshot it has checked, to the Streamer.bot you meant, and only when you say `--yes`. Nothing to copy into Streamer.bot, nothing to restart or refresh: pull or download, and read the new restore flags below.
+
+### Fixed
+
+- **A restore can no longer overwrite your saved config by accident.** `restore` checks the file the way the dock's Import does (a Greenroom snapshot, a text room, a slot list and a directory list, every slot an object, Discord IDs written in quotes, nothing from a newer Greenroom), passes the directory through the dock's own rules, shows the **current** and the **new** config side by side, and changes nothing unless you add `--yes`. With `--yes` it first saves the current config to `backups/pre-restore-<time>.json`.
+- **An unreadable current config is never replaced by surprise.** If `VDO Sync` cannot show what is saved now (it answered with an error, or not at all), no copy of it can be made first, so `restore` refuses without `--force` and says why. If npm takes your `--yes` for itself (flags must come after a `--`), the dry run says so and shows the exact `npm run backup:restore -- <file> --yes` form.
+- **A restore tells you whether it worked.** The tool listens for the answer before it pushes, treats a refused push, a push that Streamer.bot did not save, or one that was never rebroadcast as a failure (exit 2, with Streamer.bot's own words; when an old action may have saved the file before failing to broadcast it, it says "not confirmed", not "not restored"), and no longer prints "will repaint" when it does not know. A snapshot with a syntax error is reported without echoing any of it (it holds your room password).
+- **Nothing is silently aimed at the wrong Streamer.bot.** npm swallows a bare `--url` for itself, so the tool never saw it and used the default; it now refuses to run when it sees that, and names the working form (`npm run backup -- --url ws://127.0.0.1:8081/`). The target is printed before it connects. Unknown flags, a missing `--url` value, extra file names and a file name with no command are errors (exit 2), and `--help` prints the usage.
+- **Saves are safe.** A snapshot is written to a temporary file, flushed, then renamed; an explicit file that already exists is refused unless `--force`; the time in the default name has milliseconds; and the tool reminds you the file holds the room password. A refused `Subscribe` or a missing `VDO Sync` action now stops `save` with the reason instead of "nothing saved yet".
+- **Files from Windows tools load.** A snapshot saved as UTF-16 (Notepad, PowerShell) is read; a relative path is resolved from where npm was run, and a bare name is also looked up in `backups/`; `list` shows `backups/<name>`.
+
+### Added
+
+- `--yes` and `--force`, and the snapshot folder can be moved with `GREENROOM_BACKUP_DIR` (the tests use it). The README gives the new commands, Node 22.12 or newer, and the one-time `npm install --omit=dev`.
+- Test support: the mock Streamer.bot can answer `VDO Push` with an error or accept it and store nothing (`SB_PUSH=error|drop`), declare actions missing (`SB_MISSING`), and answers any unknown action with an error, as the real one does.
+
+**Deploy:** none beyond updating the folder. Backups taken with an older tool still restore (add `--yes`). `verify` 203/203, `verify:render` 192/192.
+
 ## [1.0.37] — 2026-11-08
 
 Developer tooling only: nothing to copy, re-paste, restart or refresh. The repo's own scripts can no longer write into a running Streamer.bot.
@@ -226,6 +246,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.40]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.37...v1.0.40
 [1.0.37]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.34...v1.0.37
 [1.0.34]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.29...v1.0.34
 [1.0.29]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.24...v1.0.29
