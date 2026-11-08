@@ -162,7 +162,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    if (ONLY && ONLY !== 'conn') throw new Error(`RENDER_ONLY=${ONLY}: the only supported value is 'conn' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11).
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn' and 'labels' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -639,7 +640,8 @@ async function main() {
     slowMin.prod.close();
 
     // R7c: a fresh install (empty cache, nothing ever replies). Save asks once, then pushes.
-    const fresh = await startExtra({});
+    // (SB_EMPTY_MARKER=0: the action paste is an OLDER one, which never says that vdo.state is empty.)
+    const fresh = await startExtra({ SB_EMPTY_MARKER: '0' });
     const dlgC = [];
     const pgC = await newPage(browser, { width: 920, height: 1300 }, true);
     pgC.on('dialog', (d) => { dlgC.push(d.message()); d.accept(); });
@@ -662,8 +664,8 @@ async function main() {
     await pgC.close();
     fresh.prod.close();
 
-    // R7d: the empty-cache marker (a later action release broadcasts it) is read as "synced".
-    const marker = await startExtra({ SB_EMPTY_MARKER: '1' });
+    // R7d: the empty-cache marker (the actions broadcast it, and the mock does by default) is read as "synced".
+    const marker = await startExtra({});
     const dlgD = [];
     const pgD = await newPage(browser, { width: 920, height: 1300 });
     pgD.on('dialog', (d) => { dlgD.push(d.message()); d.accept(); });
@@ -715,8 +717,8 @@ async function main() {
 
     // ── R8: the reader half of the wire change (GRN-108) and the date-shaped guard ──
     console.log('\n[R8] frames: string-field state is read, unusable frames are dropped, errors name the entry');
-    // R8a: state arriving as vdoninjaJson (an escaped string), as the actions will send it.
-    const wire = await startExtra({ SB_WIRE: 'json' });
+    // R8a: state arriving as vdoninjaJson (an escaped string), as the actions send it.
+    const wire = await startExtra({});
     wire.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
     await sleep(300);
     const pgW = await newPage(browser, { width: 920, height: 1300 });
@@ -751,6 +753,39 @@ async function main() {
     check('R8a: the mock really sends the string shape (vdoninjaJson is a string, no vdoninja object)',
       !!rawFrame && typeof rawFrame.vdoninjaJson === 'string' && !('vdoninja' in rawFrame) && JSON.parse(rawFrame.vdoninjaJson).room === 'seededroom', JSON.stringify(rawFrame));
     await pgW.close(); await pgWm.close(); wire.prod.close();
+
+    // R8d: the same pages against the OLD wire (a nested vdoninja object, as an actions paste from before
+    // the string fields sends it). An update reaches the pages before the actions are re-pasted, so this
+    // has to keep working; the mock's object mode also reproduces Streamer.bot's date rewrite.
+    const objW = await startExtra({ SB_WIRE: 'object' });
+    objW.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_SAVED) });
+    await sleep(300);
+    const pgObjC = await newPage(browser, { width: 920, height: 1300 });
+    await pgObjC.goto(`${objW.api.base}/control/control.html?sbport=${objW.ws}`, { waitUntil: 'load' });
+    check('R8d: control.html adopts a vdoninja:update that carries a nested vdoninja object (the old wire), and counts as synced',
+      await wait(pgObjC, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000)
+        && await wait(pgObjC, () => { const e = document.getElementById('syncStatus'); return !!e && e.hidden; }, null, 3000),
+      await pgObjC.evaluate(() => document.getElementById('vdoRoom')?.value));
+    const pgObjM = await newPage(browser, { width: 480, height: 120 });
+    await pgObjM.goto(`${objW.api.base}/control/director-min.html?sbport=${objW.ws}`, { waitUntil: 'load' });
+    check('R8d: director-min adopts it too', await wait(pgObjM, () => /director disabled/.test(document.getElementById('status')?.textContent || ''), null, 8000),
+      await pgObjM.evaluate(() => document.getElementById('status')?.textContent));
+    const objRaw = await new Promise((res) => {
+      const w = new WebSocket(`ws://127.0.0.1:${objW.ws}/`);
+      const timer = setTimeout(() => { try { w.close(); } catch {} res(null); }, 6000);
+      w.on('open', () => {
+        w.send(JSON.stringify({ request: 'Subscribe', id: 'raw2', events: { general: ['Custom'] } }));
+        setTimeout(() => objW.prod.doAction('VDO Sync', { reason: 'raw-check' }), 300);
+      });
+      w.on('message', (raw) => {
+        let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+        if (m.event && m.event.type === 'Custom' && m.data && m.data.type === 'vdoninja:update') { clearTimeout(timer); try { w.close(); } catch {} res(m.data); }
+      });
+    });
+    check('R8d: the mock really sends the old shape (a vdoninja object, no vdoninjaJson), and the pages pushed nothing of their own',
+      !!objRaw && typeof objRaw.vdoninja === 'object' && !('vdoninjaJson' in objRaw) && objRaw.vdoninja.room === 'seededroom'
+      && pushesOf(await objW.api.actions()).length === 1, JSON.stringify(objRaw).slice(0, 120));
+    await pgObjC.close(); await pgObjM.close(); objW.prod.close();
 
     // R8b: frames with no usable state never mark a page synced and never cause a push.
     await fresh.api.restart(true); // an empty vdo.state, no marker: nothing will ever answer the Sync
@@ -1085,8 +1120,8 @@ async function main() {
       await nA.close();
 
       // R10b: state frames as escaped string fields, unusable frames, and a null slot entry
-      // (GRN-186, GRN-185). SB_WIRE=json delivers vdoninjaJson / discordVoiceJson.
-      const wireS = await startExtra({ SB_WIRE: 'json' });
+      // (GRN-186, GRN-185). The mock's default wire delivers vdoninjaJson / discordVoiceJson.
+      const wireS = await startExtra({});
       await seedBoth(wireS);
       const gB = await newPage(browser, { width: 640, height: 360 });
       await gB.goto(guestUrl(wireS), { waitUntil: 'load' });
@@ -1114,6 +1149,21 @@ async function main() {
         await rB.evaluate(() => document.querySelectorAll('#roster .member').length === 3
           && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland'));
       await gB.close(); await rB.close(); await nB.close();
+
+      // The same overlays against the OLD wire (a nested vdoninja / discordVoice object, as an actions paste
+      // from before the string fields sends it): updating the overlay folder first must not blank anything.
+      const wireO = await startExtra({ SB_WIRE: 'object' });
+      await seedBoth(wireO);
+      const gO = await newPage(browser, { width: 640, height: 360 });
+      await gO.goto(guestUrl(wireO), { waitUntil: 'load' });
+      check('R10b: the guest overlay still renders a nested-object frame (the old wire): frame + nameplate', await wait(gO, guestPainted, null, 6000),
+        await gO.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
+      const rO = await newPage(browser, { width: 900, height: 200 });
+      await rO.goto(`${wireO.api.base}/overlay/discord-roster.html?layout=row&sbport=${wireO.ws}`, { waitUntil: 'load' });
+      check('R10b: the roster still renders the old wire (members and the directory name)',
+        await wait(rO, () => document.querySelectorAll('#roster .member').length === 3
+          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
+      await gO.close(); await rO.close();
       const plain = await startExtra({});
       await seedBoth(plain, { ...SEED_CONN, slots: [null, slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)] });
       const gN = await newPage(browser, { width: 640, height: 360 });
@@ -1302,7 +1352,8 @@ async function main() {
       // A refused DoAction is a current fault, not a permanent one. It clears by either of two routes, each
       // tested alone: (a) a later request succeeds, (b) the saved config arrives another way.
       // (a) Unseeded, nothing ever syncs the pages: only an ok reply to their own VDO Sync retry can clear it.
-      const flipA = await startExtra({ SB_DOACTION: 'error' });
+      // (No empty marker either, as from an older actions paste: a marker would sync the pages.)
+      const flipA = await startExtra({ SB_DOACTION: 'error', SB_EMPTY_MARKER: '0' });
       const cFa = await newPage(browser, { width: 920, height: 900 });
       const dFa = await newPage(browser, { width: 480, height: 120 });
       await Promise.all([cFa.goto(`${flipA.api.base}/control/control.html?sbport=${flipA.ws}`), dFa.goto(`${flipA.api.base}/control/director-min.html?sbport=${flipA.ws}`)]);
@@ -1478,6 +1529,69 @@ async function main() {
       check('R10g: with data as a JSON string the guest overlay renders', await wait(gS, guestPainted, null, 6000));
       check('R10g: …and control.html hydrates', await wait(cS, () => document.getElementById('vdoRoom')?.value === 'connroom', null, 6000));
       await gS.close(); await cS.close();
+    }
+
+    // ── R11: guest labels that look like timestamps (GRN-60, GRN-65) ───────────────────────
+    // Streamer.bot parses a nested object it broadcasts and re-formats a date-shaped string in it, or throws on
+    // one outside the DateTime range. The old actions nested the state, so a guest whose display name looked
+    // like a timestamp changed the label every page matched on (a blank cam, or a loop of pushes) or stopped
+    // the broadcast. The string fields keep the label byte-identical. Each label runs through the guest
+    // overlay, control.html and director-min.html together, against a director that reports that label.
+    if (!ONLY || ONLY === 'labels') {
+      console.log('\n[R11] labels: a guest label that looks like a timestamp, through the real pages');
+      const hostOffset = -new Date(2024, 1, 3).getTimezoneOffset(); // so the offset label is not already in host-local time
+      const LIMIT_YEAR = 9999, LIMIT_MS = 253402300799999; // the last year and millisecond a DateTime holds
+      const LABELS = [
+        ['an ISO time with fractional zeros', '2024-02-03T04:05:06.000Z'],
+        ['an ISO time with an offset', '2024-02-03T04:05:06' + (hostOffset === 120 ? '-11:00' : '+02:00')],
+        ['a /Date(ms)/ value', '/Date(1700000000000)/'],
+        ['a /Date(ms)/ value past the DateTime limit', `/Date(${LIMIT_MS + 1})/`],
+        ['an end-of-day time past the DateTime limit', `${LIMIT_YEAR}-12-31T24:00:00`],
+      ];
+      const labelSeed = (label) => ({ enabled: true, room: 'labelroom', password: 'pw1', viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' },
+        directory: [{ vdoLabel: label, discordUserId: '', displayName: 'Guest', socials: [] }] });
+      const observeLabel = async (wire, label) => {
+        const x = await startExtra(wire === 'object' ? { SB_WIRE: 'object' } : {});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(labelSeed(label)) });
+        await sleep(300);
+        await x.api.clear();
+        const dir = `${x.api.base}/mock/vdo-director.html?fixed=1&label=${encodeURIComponent(label)}`;
+        const guest = await newPage(browser, { width: 640, height: 360 });
+        const ctl = await newPage(browser, { width: 920, height: 1300 }, dir);
+        const min = await newPage(browser, { width: 480, height: 120 }, dir);
+        const errors = [];
+        for (const p of [guest, ctl, min]) p.on('pageerror', (e) => errors.push(String((e && e.message) || e)));
+        await Promise.all([
+          guest.goto(`${x.api.base}/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}`),
+          ctl.goto(`${x.api.base}/control/control.html?sbport=${x.ws}`),
+          min.goto(`${x.api.base}/control/director-min.html?sbport=${x.ws}`),
+        ]);
+        await sleep(6000);
+        const early = pushesOf(await x.api.actions()).length;
+        await sleep(5000); // two more director polls
+        const pushes = pushesOf(await x.api.actions());
+        const state = await x.api.state();
+        const seen = {
+          painted: await guest.evaluate(() => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111')),
+          cachedLabel: state.vdo && state.vdo.slots && state.vdo.slots[0] && state.vdo.slots[0].label,
+          pushes: pushes.length, late: pushes.length - early,
+          pill: await ctl.evaluate(() => document.getElementById('sbStatus')?.textContent || ''),
+          minStatus: await min.evaluate(() => document.getElementById('status')?.textContent || ''),
+          errors,
+        };
+        await guest.close(); await ctl.close(); await min.close(); x.prod.close(); x.proc.kill();
+        if (process.env.RENDER_VERBOSE) console.log(`    [${wire}] ${JSON.stringify(seen)}`);
+        return seen;
+      };
+      for (const [what, label] of LABELS) {
+        const good = await observeLabel('string', label);
+        check(`R11 ${what}: with string fields the cam resolves, the cached label is byte-identical, nothing is pushed in the last 5 s and no error shows`,
+          good.painted && good.cachedLabel === label && good.late === 0 && !/error/i.test(good.pill + ' ' + good.minStatus) && good.errors.length === 0, JSON.stringify(good));
+        const bad = await observeLabel('object', label);
+        check(`R11 ${what}: the old object format is red (the cam stays blank, and either the saved label was rewritten or an SB action error shows)`,
+          !bad.painted && (bad.cachedLabel !== label || /error/i.test(bad.pill)), JSON.stringify(bad));
+      }
     }
 
     console.log('  screenshots → roster-check.png, control-check.png, nameplate-check.png');

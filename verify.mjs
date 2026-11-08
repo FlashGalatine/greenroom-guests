@@ -9,8 +9,10 @@
 //       directory intact), the persisted-cache replay to a late joiner via
 //       VDO Sync, /mock/state parses.
 //   [3] Discord Voice Push — settings/rpc/favorites/current intact; VDO Sync replays
-//       BOTH caches vdo-first; after /mock/restart (SB restart analog) VDO Sync
-//       replays ONLY the persisted vdoninja blob.
+//       BOTH caches (either order); after /mock/restart (SB restart analog) VDO Sync
+//       replays ONLY the persisted vdoninja blob. An empty vdo.state is answered with
+//       {"type":"vdo:sync:empty"}. The state travels as escaped string fields; a second
+//       mock in SB_WIRE=object mode pins the OLD shape and Streamer.bot's date rewrite.
 //   [4] command bus — mock-discord-bridge.mjs consumes discord:voice:command
 //       broadcasts and echoes state changes back through the REAL bus path.
 //   [5] defensive parser — control/vdo-parse.js never throws on malformed guestLists.
@@ -21,6 +23,7 @@
 // It does NOT render pixels; verify-render.mjs does that in a real browser.
 
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { readFile, rm } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,6 +72,16 @@ function startChild(script, readyText, extraEnv = {}) {
 }
 
 const startMock = () => startChild('mock-sb-server.mjs', '[mock] WS    ws://');
+
+// An extra mock on OS-assigned free ports (so it never collides with a Streamer.bot or another tool).
+function freePort() {
+  return new Promise((res) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+}
+async function startMockWith(env) {
+  const wsPort = await freePort(), httpPort = await freePort();
+  const child = await startChild('mock-sb-server.mjs', '[mock] WS    ws://', { SB_HTTP_PORT: String(httpPort), SB_WS_PORT: String(wsPort), ...env });
+  return { child, wsPort, httpPort, url: `ws://127.0.0.1:${wsPort}/`, base: `http://127.0.0.1:${httpPort}` };
+}
 
 // Run a short-lived node script to completion; resolves { code, out }.
 function runNode(args, extraEnv = {}) {
@@ -150,9 +163,9 @@ async function runShim() {
 
 // A raw producer/consumer client (what the control page and the sidecar are to SB):
 // subscribes, exposes an inbox of unwrapped General.Custom data + an inbox of acks.
-function rawClient() {
+function rawClient(url = WS_URL) {
   return new Promise((res, rej) => {
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(url);
     const events = makeInbox();
     const acks = makeInbox();
     let id = 0;
@@ -244,10 +257,13 @@ async function main() {
     probe.doAction('VDO Sync', { reason: 'probe' });
     const daAck = await probe.acks.next(3000, (m) => String(m.id).startsWith('req'), 'DoAction ack');
     check('DoAction ack {id, status:ok}', daAck.status === 'ok');
-    check('empty caches → sync replays nothing', await rejects(probe.events.next(700, () => true, 'unexpected event')));
+    const empty1 = await probe.events.next(2000, byType('vdo:sync:empty'), 'the empty marker');
+    check('empty caches → sync says so with exactly {"type":"vdo:sync:empty"} (a fresh install is told, not left waiting), and sends nothing else',
+      JSON.stringify(empty1) === '{"type":"vdo:sync:empty"}' && await rejects(probe.events.next(700, () => true, 'unexpected event')), JSON.stringify(empty1));
 
     const shimA = await runShim();
-    check('shim: silence on empty caches (no svc:message)', await rejects(shimA.inbox.next(900, () => true, 'unexpected svc:message')));
+    const emptyShim = await shimA.inbox.next(2000, byType('vdo:sync:empty'), 'the shim saw the marker');
+    check('shim: an empty install hears the marker and no state frame', !!emptyShim && await rejects(shimA.inbox.next(900, () => true, 'unexpected svc:message')));
     const log1 = await (await fetch(`${BASE}/mock/actions`)).json();
     const syncCalls = log1.actions.filter((a) => a.name === 'VDO Sync');
     check('shim fired DoAction "VDO Sync" on connect (reason overlay-connect)',
@@ -259,6 +275,11 @@ async function main() {
     producer.doAction('VDO Push', { payload: JSON.stringify(VDO_PAYLOAD) });
     const v1 = await shimA.inbox.next(4000, byType('vdoninja:update'), 'vdoninja:update');
     check('shim received vdoninja:update', !!v1.vdoninja, JSON.stringify(v1).slice(0, 120));
+    // The wire itself: the state is ONE escaped string field, byte-identical to the pushed text,
+    // and no nested object (a nested object is re-parsed by Streamer.bot and can be re-formatted).
+    const w1 = await probe.events.next(2000, byType('vdoninja:update'), 'raw vdoninja:update');
+    check('wire: vdoninja:update carries vdoninjaJson, a string byte-identical to the push, and no nested vdoninja object',
+      typeof w1.vdoninjaJson === 'string' && w1.vdoninjaJson === JSON.stringify(VDO_PAYLOAD) && !('vdoninja' in w1), JSON.stringify(w1).slice(0, 160));
     check('room/password/viewFlags carried', v1.vdoninja.room === 'testroom' && v1.vdoninja.password === 'pw1' && v1.vdoninja.viewFlags.includes('&solo'));
     check('slot 1 label+streamID intact (superset field `label`)', v1.vdoninja.slots[0].label === 'ALPHA' && v1.vdoninja.slots[0].streamID === 'aaa111');
     check('slot 3 discord mode + discordUserId intact', v1.vdoninja.slots[2].mode === 'discord' && v1.vdoninja.slots[2].discordUserId === '110457699291906048');
@@ -285,6 +306,9 @@ async function main() {
     producer.doAction('Discord Voice Push', { payload: JSON.stringify(DISCORD_PAYLOAD) });
     const d1 = await shimA.inbox.next(4000, byType('discord:voice:update'), 'discord:voice:update');
     check('shim received discord:voice:update', !!d1.discordVoice);
+    const wd1 = await probe.events.next(2000, byType('discord:voice:update'), 'raw discord:voice:update');
+    check('wire: discord:voice:update carries discordVoiceJson, a string byte-identical to the push, and no nested discordVoice object',
+      typeof wd1.discordVoiceJson === 'string' && wd1.discordVoiceJson === JSON.stringify(DISCORD_PAYLOAD) && !('discordVoice' in wd1), JSON.stringify(wd1).slice(0, 160));
     check('users map intact (2 users, mute flag)', Object.keys(d1.discordVoice.users).length === 2 && d1.discordVoice.users['200000000000000001'].mute === true);
     check('settings block carried (roster overlay input)', d1.discordVoice.settings && d1.discordVoice.settings.accent === 'cyan' && d1.discordVoice.settings.hideWhenAbsent === true);
     check('rpc block carried (control-page status source)', d1.discordVoice.rpc && d1.discordVoice.rpc.hasToken === true);
@@ -293,8 +317,8 @@ async function main() {
     const shimC = await runShim();
     await shimC.inbox.next(4000, byType('vdoninja:update'), 'replay vdoninja:update');
     await shimC.inbox.next(4000, byType('discord:voice:update'), 'replay discord:voice:update');
-    check('late joiner: VDO Sync replays BOTH caches, vdo first',
-      shimC.types[0] === 'vdoninja:update' && shimC.types[1] === 'discord:voice:update', shimC.types.join(', '));
+    check('late joiner: VDO Sync replays BOTH caches (the order is not promised: each replay is its own try)',
+      shimC.types.length === 2 && shimC.types.includes('vdoninja:update') && shimC.types.includes('discord:voice:update'), shimC.types.join(', '));
 
     await fetch(`${BASE}/mock/restart`);
     const shimD = await runShim();
@@ -302,6 +326,98 @@ async function main() {
     check('after SB restart analog: persisted vdo.state still replays', v3.vdoninja.room === 'testroom');
     check('after SB restart analog: non-persisted discord.state does NOT replay',
       await rejects(shimD.inbox.next(700, byType('discord:voice:update'), 'stale discord replay')));
+
+    // ── 3b. Wire modes: the string-field default, and the OLD object format ─────
+    // Streamer.bot parses a broadcast with Newtonsoft before it sends it. A date-shaped string inside
+    // a nested object is re-formatted (benign) or, out of the DateTime range, makes the broadcast
+    // throw. The state therefore travels as an escaped string field. The object mode of the mock
+    // reproduces what the OLD actions did, so the pages' compatibility with them stays under test.
+    console.log('\n[3b] wire modes: string fields by default; SB_WIRE=object pins the old format and its date rewrite');
+    const REWRITE_LABEL = '2024-02-03T04:05:06.000Z';
+    const OUT_OF_RANGE = `/Date(${253402300799999 + 1})/`; // one millisecond past 9999-12-31, built from the limit
+    const labelled = (label) => JSON.stringify({ ...VDO_PAYLOAD, slots: [{ ...VDO_PAYLOAD.slots[0], label }, ...VDO_PAYLOAD.slots.slice(1)] });
+    const stateOf = async (m) => (await (await fetch(`${m.base}/mock/state`)).json());
+    {
+      const strMock = await startMockWith({});
+      const strP = await rawClient(strMock.url), strC = await rawClient(strMock.url);
+      try {
+        for (const [what, label] of [['a date-shaped label Streamer.bot would re-format', REWRITE_LABEL], ['a label outside the DateTime range', OUT_OF_RANGE]]) {
+          const payload = labelled(label);
+          strP.events.drain();
+          strC.doAction('VDO Push', { payload });
+          const f = await strP.events.next(2000, (d) => d.type === 'vdoninja:update' || d.type === 'vdo:error', 'push result');
+          check(`string mode: ${what} is broadcast byte-identical, with no error, and cached unchanged`,
+            f.type === 'vdoninja:update' && f.vdoninjaJson === payload && JSON.stringify((await stateOf(strMock)).vdo) === JSON.stringify(JSON.parse(payload)), JSON.stringify(f).slice(0, 160));
+        }
+        strP.events.drain();
+        strC.doAction('VDO Sync', {});
+        const rep = await strP.events.next(2000, byType('vdoninja:update'), 'sync replay');
+        check('string mode: the Sync replay of that cached state is byte-identical too', rep.vdoninjaJson === labelled(OUT_OF_RANGE));
+        strP.events.drain();
+        const cached = JSON.stringify((await stateOf(strMock)).vdo);
+        for (const [args, re] of [[{}, /without a 'payload'/], [{ payload: 'nope' }, /must be a JSON object string/], [{ payload: '   ' }, /must be a JSON object string/]]) {
+          strC.doAction('VDO Push', args);
+          const e = await strP.events.next(2000, byType('vdo:error'), 'argument error');
+          check(`VDO Push ${JSON.stringify(args)}: a vdo:error frame, and the cached state is untouched`,
+            re.test(e.message) && JSON.stringify((await stateOf(strMock)).vdo) === cached, JSON.stringify(e));
+        }
+        strC.doAction('Discord Voice Push', { payload: '[1]' });
+        const de = await strP.events.next(2000, byType('discord:voice:error'), 'discord argument error');
+        check('Discord Voice Push with a non-object payload: a discord:voice:error frame, nothing cached', /must be a JSON object string/.test(de.message) && (await stateOf(strMock)).discord === null);
+      } finally { strP.close(); strC.close(); strMock.child.kill(); }
+
+      const objMock = await startMockWith({ SB_WIRE: 'object' });
+      const objP = await rawClient(objMock.url), objC = await rawClient(objMock.url);
+      try {
+        objC.doAction('VDO Push', { payload: JSON.stringify(VDO_PAYLOAD) });
+        const o1 = await objP.events.next(2000, byType('vdoninja:update'), 'object-mode update');
+        check('object mode: the state is a nested vdoninja object, and there is no vdoninjaJson field',
+          o1.vdoninja && o1.vdoninja.room === 'testroom' && !('vdoninjaJson' in o1) && JSON.stringify(o1.vdoninja.slots) === JSON.stringify(VDO_PAYLOAD.slots), JSON.stringify(o1).slice(0, 120));
+
+        // Backup against an older actions paste (the deploy order runs it BEFORE the actions are updated).
+        const bkFile = resolve(__dirname, '.verify-backup-object.json');
+        await rm(bkFile, { force: true });
+        const bkSave = await runNode(['backup.mjs', 'save', bkFile], { SB_WS_PORT: String(objMock.wsPort) });
+        let bk = null; try { bk = JSON.parse(await readFile(bkFile, 'utf8')); } catch { /* left null */ }
+        check('backup save works against the old object format (room + directory intact)',
+          bkSave.code === 0 && !!bk && bk.vdoninja && bk.vdoninja.room === 'testroom' && bk.vdoninja.directory.length === 2, bkSave.out.trim().slice(0, 200));
+        objC.doAction('VDO Push', { payload: JSON.stringify({ ...VDO_PAYLOAD, room: 'CHANGED' }) });
+        await objP.events.next(2000, (d) => d.type === 'vdoninja:update' && d.vdoninja.room === 'CHANGED', 'object-mode change');
+        const bkRestore = await runNode(['backup.mjs', 'restore', bkFile], { SB_WS_PORT: String(objMock.wsPort) });
+        check('backup restore works against the old object format (the snapshot is back in the cache)',
+          bkRestore.code === 0 && /restored/.test(bkRestore.out) && (await stateOf(objMock)).vdo.room === 'testroom', bkRestore.out.trim().slice(0, 200));
+        await rm(bkFile, { force: true });
+
+        objP.events.drain();
+        objC.doAction('VDO Push', { payload: labelled(REWRITE_LABEL) });
+        const o2 = await objP.events.next(2000, byType('vdoninja:update'), 'rewritten label');
+        check('object mode: a date-shaped label is re-formatted on the way out (…06.000Z → …06Z), while the cache keeps the original',
+          o2.vdoninja.slots[0].label === '2024-02-03T04:05:06Z' && (await stateOf(objMock)).vdo.slots[0].label === REWRITE_LABEL, o2.vdoninja.slots[0].label);
+        objC.doAction('VDO Push', { payload: labelled('/Date(1700000000000)/') });
+        const o3 = await objP.events.next(2000, byType('vdoninja:update'), 'ms-date label');
+        check('object mode: a /Date(ms)/ label turns into ISO text', o3.vdoninja.slots[0].label === '2023-11-14T22:13:20Z', o3.vdoninja.slots[0].label);
+
+        objC.doAction('Discord Voice Push', { payload: JSON.stringify(DISCORD_PAYLOAD) });
+        await objP.events.next(2000, byType('discord:voice:update'), 'object-mode discord update');
+        objP.events.drain();
+        objC.doAction('VDO Push', { payload: labelled(OUT_OF_RANGE) });
+        const o4 = await objP.events.next(2000, (d) => d.type === 'vdo:error' || d.type === 'vdoninja:update', 'out-of-range push result');
+        check('object mode: a label outside the DateTime range makes the broadcast throw: a vdo:error frame, and no update',
+          o4.type === 'vdo:error' && await rejects(objP.events.next(500, byType('vdoninja:update'), 'a stray update')), JSON.stringify(o4).slice(0, 160));
+        check('object mode: …and the old action had already cached it (cache before broadcast), so the bad state stayed behind',
+          (await stateOf(objMock)).vdo.slots[0].label === OUT_OF_RANGE);
+        objP.events.drain();
+        objC.doAction('VDO Sync', {});
+        const o5 = await objP.events.next(2000, (d) => d.type === 'vdo:error' || d.type === 'vdoninja:update', 'sync result');
+        check('object mode: the Sync of that cache fails the same way, and the Discord replay never goes out (ONE try around both)',
+          o5.type === 'vdo:error' && await rejects(objP.events.next(600, byType('discord:voice:update'), 'a discord replay')), JSON.stringify(o5).slice(0, 160));
+        await fetch(`${objMock.base}/mock/restart?vdo=1`);
+        objP.events.drain();
+        objC.doAction('VDO Sync', {});
+        check('object mode: an empty vdo.state is answered with silence (the old action never sent the marker)',
+          await rejects(objP.events.next(700, () => true, 'unexpected event')));
+      } finally { objP.close(); objC.close(); objMock.child.kill(); }
+    }
 
     // ── 4. Command bus: the token-less mock bridge over the REAL bus path ───────
     console.log('\n[4] command bus: control-page commands round-trip through the mock bridge');
@@ -778,6 +894,7 @@ async function main() {
     await rm(resolve(__dirname, '.verify-bridge-config.json'), { force: true });
     await rm(resolve(__dirname, '.verify-bridge-tokens.json'), { force: true });
     await rm(resolve(__dirname, '.verify-backup.json'), { force: true });
+    await rm(resolve(__dirname, '.verify-backup-object.json'), { force: true });
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);

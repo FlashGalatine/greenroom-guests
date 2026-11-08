@@ -12,6 +12,7 @@ backups/
 .verify-bridge-config.json
 .verify-bridge-tokens.json
 .verify-backup.json
+.verify-backup-object.json
 
 # verify-render screenshots (docs/ screenshots ARE committed)
 roster-check.png

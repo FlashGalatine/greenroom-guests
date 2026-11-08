@@ -41,6 +41,16 @@ function tsName() {
     + `T${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}.json`;
 }
 
+// The vdo.state object inside a `vdoninja:update` frame, or null. Both wire shapes are read:
+// the current escaped string field `vdoninjaJson`, and the nested `vdoninja` object an older
+// "VDO Push" / "VDO Sync" paste still broadcasts (this tool is run BEFORE the actions are updated).
+function stateOf(d) {
+  if (!d || d.type !== 'vdoninja:update') return null;
+  let v = d.vdoninja;
+  if (typeof d.vdoninjaJson === 'string') { try { v = JSON.parse(d.vdoninjaJson); } catch { return null; } }
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+}
+
 // One-line summary of a vdoninja payload for operator feedback.
 function summarize(v) {
   const slots = Array.isArray(v.slots) ? v.slots.filter((s) => s && (s.label || s.streamID || s.discordUserId)).length : 0;
@@ -103,11 +113,14 @@ async function save(file) {
     sb.doAction('VDO Sync', { reason: 'backup' });
     let data;
     try {
-      data = await sb.waitCustom((d) => d.type === 'vdoninja:update' && d.vdoninja && typeof d.vdoninja === 'object', REPLY_MS, 'vdoninja:update replay');
+      data = await sb.waitCustom((d) => stateOf(d) || (d && (d.type === 'vdo:sync:empty' || d.type === 'vdo:error')), REPLY_MS, 'vdoninja:update replay');
     } catch {
-      die('Streamer.bot returned no vdo.state — nothing to back up yet. Open the control page and set a room / add a guest first (it pushes on the first edit).');
+      die('Streamer.bot sent no vdo.state back. Either nothing is saved yet (open the control page and set a room or add a guest first; it pushes on the first edit), '
+        + 'or the "VDO Sync" action is not answering (check that it exists and that its C# compiled).');
     }
-    const payload = data.vdoninja;
+    if (data.type === 'vdo:sync:empty') die('Streamer.bot has no vdo.state saved yet — nothing to back up. Open the control page and set a room or add a guest first (it pushes on the first edit).');
+    if (data.type === 'vdo:error') die(`the "VDO Sync" action reported an error: ${data.message || '(no message)'}`);
+    const payload = stateOf(data);
     const envelope = { kind: 'greenroom-vdo-backup', savedAt: new Date().toISOString(), vdoninja: payload };
     await mkdir(dirname(out), { recursive: true });
     await writeFile(out, JSON.stringify(envelope, null, 2) + '\n', 'utf-8');
@@ -132,12 +145,16 @@ async function restore(file) {
     const id = sb.doAction('VDO Push', { payload: JSON.stringify(payload) });
     await sb.waitAck(id, REPLY_MS, 'VDO Push ack').catch(() => die('Streamer.bot did not ack the push.'));
     // Confirm SB actually stored + rebroadcast it (ack alone only means "started").
+    let seen = null;
     try {
-      await sb.waitCustom((d) => d.type === 'vdoninja:update' && d.vdoninja && typeof d.vdoninja === 'object', REPLY_MS, 'rebroadcast');
-      console.log(`restored ${abs(file)}`);
-      console.log(`  → VDO Push: SB vdo.state updated + rebroadcast (${summarize(payload)})`);
+      seen = await sb.waitCustom((d) => stateOf(d) || (d && d.type === 'vdo:error'), REPLY_MS, 'rebroadcast');
     } catch {
       console.log(`sent ${abs(file)} (VDO Push acked), but no rebroadcast was observed — check the "VDO Push" action compiled in SB.`);
+    }
+    if (seen && seen.type === 'vdo:error') die(`the "VDO Push" action reported an error: ${seen.message || '(no message)'}`);
+    if (seen) {
+      console.log(`restored ${abs(file)}`);
+      console.log(`  → VDO Push: SB vdo.state updated + rebroadcast (${summarize(payload)})`);
     }
     console.log('  Open control pages/overlays will repaint; new sources hydrate via VDO Sync.');
   } finally { sb.close(); }

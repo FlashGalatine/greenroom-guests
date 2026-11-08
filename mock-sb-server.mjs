@@ -23,12 +23,20 @@
 //     Test options (environment variables, all off by default):
 //       SYNC_DELAY_MS=<n>       VDO Sync broadcasts its replay n ms after the request
 //                               (a slow first sync). The caches are read at request time.
-//       SB_WIRE=json            broadcast the state as ESCAPED STRING fields,
-//                               {type:'vdoninja:update', vdoninjaJson:'<json>'} and
-//                               {type:'discord:voice:update', discordVoiceJson:'<json>'},
-//                               the shape actions switch to in a later release
-//       SB_EMPTY_MARKER=1       VDO Sync with an empty vdo.state broadcasts
-//                               {type:'vdo:sync:empty'} (a later action release sends it)
+//       SB_WIRE=object          the OLD action behaviour, kept so the pages' compatibility with an
+//                               older actions paste stays under test. The state is broadcast as nested
+//                               OBJECTS ({type:'vdoninja:update', vdoninja:{…}} and
+//                               {type:'discord:voice:update', discordVoice:{…}}), cached BEFORE the
+//                               broadcast, and run through an emulation of Streamer.bot's own JSON
+//                               parse (Newtonsoft, default date handling): a date-shaped string is
+//                               rewritten (ISO text normalised, an offset moved to the host's local
+//                               time, /Date(ms)/ turned into ISO text) and one outside the DateTime
+//                               range makes the broadcast throw, which the old actions answered with
+//                               vdo:error / discord:voice:error. A Sync there has ONE try (vdo first).
+//                               The default, and SB_WIRE=json, is the current behaviour below.
+//       SB_EMPTY_MARKER=0|1     VDO Sync with an empty vdo.state broadcasts {type:'vdo:sync:empty'}.
+//                               On by default; off in SB_WIRE=object mode, where the old action
+//                               never sent it (set it explicitly to override either default).
 //       SB_FILE_DELAY=<file>:<ms>[,<file>:<ms>]
 //                               serve a file (by name, e.g. nameplate-shared.js) that many
 //                               ms late, so a script lands after the page has connected
@@ -48,16 +56,22 @@
 //
 //   • WebSocket Server on :8080 — speaks SB's envelope and implements the FIVE
 //     Greenroom action semantics (mirroring the C# in actions/):
-//       VDO Push              cache args.payload as vdo.state (persisted analog);
-//                             broadcast {type:'vdoninja:update', vdoninja:<payload>}
-//       Discord Voice Push    cache as discord.state (non-persisted analog);
-//                             broadcast {type:'discord:voice:update', discordVoice:<payload>}
-//       VDO Sync              re-broadcast both non-empty caches, vdo first
+//       VDO Push              broadcast {type:'vdoninja:update', vdoninjaJson:'<payload>'}, THEN
+//                             cache args.payload as vdo.state (persisted analog)
+//       Discord Voice Push    broadcast {type:'discord:voice:update', discordVoiceJson:'<payload>'},
+//                             then cache as discord.state (non-persisted analog)
+//       VDO Sync              replay both caches the same way (each replay is its own try, and the
+//                             order is not promised); an empty vdo.state broadcasts
+//                             {type:'vdo:sync:empty'}; an empty discord.state is skipped
 //       Discord Voice Command broadcast {type:'discord:voice:command', command, value}
 //                             (value stays a STRING, exactly like the C#)
+//     A missing or non-object payload is answered with a vdo:error / discord:voice:error frame
+//     and nothing is cached, as in the C#.
 //     On `Subscribe` it enforces the real-SB lowercase `general` source key — a
 //     wrong-case subscribe is acked but receives nothing, exactly like real SB.
-//     DoAction is ALWAYS acked {status:'ok'} — ok means started, not succeeded.
+//     DoAction is ALWAYS acked {status:'ok'} — ok means the action STARTED, not that it
+//     succeeded. An invalid argument or an exception inside a running action is reported by the
+//     error frame above; an action that failed to COMPILE broadcasts nothing at all.
 //
 // This is a REFERENCE/TEST harness. The real thing is Streamer.bot itself (see
 // docs/STREAMERBOT-SETUP.md) with the same wire shapes.
@@ -75,8 +89,8 @@ const OVERLAY_DIR = resolve(__dirname, 'overlay');
 const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7474; // SB HTTP Server default
 const WS_PORT = Number(process.env.SB_WS_PORT) || 8080; // SB WebSocket Server default
 const SYNC_DELAY_MS = Number(process.env.SYNC_DELAY_MS) || 0;
-const WIRE_JSON = process.env.SB_WIRE === 'json';
-const EMPTY_MARKER = process.env.SB_EMPTY_MARKER === '1';
+const WIRE_OBJECT = process.env.SB_WIRE === 'object'; // the old action behaviour (see the header)
+const EMPTY_MARKER = process.env.SB_EMPTY_MARKER ? process.env.SB_EMPTY_MARKER === '1' : !WIRE_OBJECT;
 // Mutable at run time (GET /mock/mode), so a test can flip a behaviour without respawning the mock.
 const modes = {
   subscribe: process.env.SB_SUBSCRIBE || 'ok',
@@ -124,26 +138,131 @@ function customEvent(data) {
   });
 }
 
-function parsePayload(name, raw) {
-  if (typeof raw !== 'string' || !raw.trim()) {
-    console.log(`[mock] ${name}: missing/empty payload arg — ignored`);
-    return null;
-  }
-  try { return JSON.parse(raw); } catch {
-    console.log(`[mock] ${name}: payload is not valid JSON — cached but NOT broadcast (real SB would emit an unparseable frame)`);
-    return null;
-  }
+// ── Streamer.bot's own JSON parse, as the OLD actions met it (SB_WIRE=object only) ──────────────
+// WebsocketBroadcastJson parses its argument with Newtonsoft's JObject.Parse (default date handling)
+// and writes it back out. These are the effects checked against the real library; keys are never
+// touched, only string VALUES, at any depth:
+//   2024-02-03T04:05:06.000Z      -> 2024-02-03T04:05:06Z        (fraction trimmed; none when zero)
+//   2024-02-03T04:05:06+02:00     -> the host's local time with its own offset (…-05:00 on a UTC-5 host)
+//   2024-02-03T04:05:06           -> unchanged (no zone)          2024-02-30T…, hour 25, a 60th second
+//   /Date(1700000000000)/         -> 2023-11-14T22:13:20Z                           -> not a date, unchanged
+//   a date outside 0001-01-01 … 9999-12-31 (a 24:00:00 that rolls past the end, a /Date(ms)/ out of
+//   range) makes the whole parse THROW, so the broadcast never happens.
+const NJ_MIN_MS = -62135596800000;
+const NJ_MAX_MS = 253402300799999;
+const NJ_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
+const NJ_MS = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/;
+const p2 = (n) => String(n).padStart(2, '0');
+const njFrac = (digits) => { const t = (digits || '').replace(/0+$/, ''); return t ? '.' + t : ''; };
+const njUnrepresentable = () => new RangeError('The added or subtracted value results in an un-representable DateTime.');
+
+function njClock(d, get, digits) { // the date and time of day, from one family of Date getters
+  const g = (n) => d[get + n]();
+  return `${String(g('FullYear')).padStart(4, '0')}-${p2(g('Month') + 1)}-${p2(g('Date'))}T${p2(g('Hours'))}:${p2(g('Minutes'))}:${p2(g('Seconds'))}${njFrac(digits)}`;
+}
+function njLocal(ms, digits) { // an instant, as local time with the local offset (DateTimeKind.Local)
+  const d = new Date(ms);
+  // .NET applies today's zone rules to ancient dates; a JS Date would use the zone's 19th-century local mean time.
+  const off = -(d.getUTCFullYear() < 1900 ? new Date(Date.UTC(2000, d.getUTCMonth(), d.getUTCDate())) : d).getTimezoneOffset();
+  const tail = (off < 0 ? '-' : '+') + p2(Math.floor(Math.abs(off) / 60)) + ':' + p2(Math.abs(off) % 60);
+  const local = ms + off * 60000; // a local time past either end of the DateTime range is clamped, not refused
+  if (local < NJ_MIN_MS) return '0001-01-01T00:00:00' + tail;
+  if (local > NJ_MAX_MS) return '9999-12-31T23:59:59.9999999' + tail;
+  return njClock(new Date(local), 'getUTC', digits) + tail; // the local wall clock, read through the UTC getters
 }
 
-function wrapVdo(parsed) {
-  return customEvent(WIRE_JSON
-    ? { type: 'vdoninja:update', vdoninjaJson: JSON.stringify(parsed) }
-    : { type: 'vdoninja:update', vdoninja: parsed });
+function njString(s) {
+  let m = NJ_MS.exec(s);
+  if (m) {
+    const ms = Number(m[1]);
+    if (ms < NJ_MIN_MS || ms > NJ_MAX_MS) throw njUnrepresentable();
+    const digits = String(new Date(ms).getUTCMilliseconds()).padStart(3, '0');
+    if (/[+-]\d{4}\)\/$/.test(s)) return njLocal(ms, digits); // an offset marks the value Local
+    return njClock(new Date(ms), 'getUTC', digits) + 'Z';
+  }
+  m = NJ_ISO.exec(s);
+  if (!m) return s;
+  const [y, mo, da, h, mi, se] = m.slice(1, 7).map(Number);
+  const digits = m[7] || '';
+  const endOfDay = h === 24 && mi === 0 && se === 0 && /^0*$/.test(digits);
+  if (y < 1 || mo < 1 || mo > 12 || mi > 59 || se > 59 || !(h <= 23 || endOfDay)) return s;
+  const wall = new Date(0);
+  wall.setUTCFullYear(y, mo - 1, da);
+  if (wall.getUTCMonth() !== mo - 1 || wall.getUTCDate() !== da) return s; // not a calendar day
+  wall.setUTCHours(h, mi, se, 0);                                          // 24:00:00 rolls into the next day
+  const wallMs = wall.getTime();
+  if (wallMs > NJ_MAX_MS) throw njUnrepresentable();
+  const zone = m[8];
+  if (!zone) return njClock(wall, 'getUTC', digits);
+  if (zone === 'Z' || zone === 'z') return njClock(wall, 'getUTC', digits) + 'Z';
+  const z = /^([+-])(\d{2}):?(\d{2})?$/.exec(zone);
+  const offMin = (z[1] === '-' ? -1 : 1) * (Number(z[2]) * 60 + Number(z[3] || 0));
+  return njLocal(wallMs - offMin * 60000, digits);
 }
-function wrapDiscord(parsed) {
-  return customEvent(WIRE_JSON
-    ? { type: 'discord:voice:update', discordVoiceJson: JSON.stringify(parsed) }
-    : { type: 'discord:voice:update', discordVoice: parsed });
+function njWalk(v) {
+  if (typeof v === 'string') return njString(v);
+  if (Array.isArray(v)) return v.map(njWalk);
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[k] = njWalk(v[k]); return o; }
+  return v;
+}
+
+// What one of the old actions broadcast: its payload text pasted straight into the frame, then
+// parsed by Streamer.bot (a throw here is the broadcast failing).
+function oldFrameData(type, field, payload) {
+  let frame;
+  try { frame = JSON.parse(`{"type":"${type}","${field}":${payload}}`); } catch (e) { throw new Error('Unexpected character encountered while parsing the broadcast: ' + e.message); }
+  return njWalk(frame);
+}
+
+// The two pushed states. `update` is the frame type; the state travels in `jsonField` (an escaped
+// string) or, in SB_WIRE=object mode, in `field` (a nested object).
+const KINDS = {
+  'VDO Push':           { key: 'vdo',     update: 'vdoninja:update',      field: 'vdoninja',     jsonField: 'vdoninjaJson',     err: 'vdo:error' },
+  'Discord Voice Push': { key: 'discord', update: 'discord:voice:update', field: 'discordVoice', jsonField: 'discordVoiceJson', err: 'discord:voice:error' },
+};
+function updateData(kind, payload) {
+  return WIRE_OBJECT ? oldFrameData(kind.update, kind.field, payload) : { type: kind.update, [kind.jsonField]: payload };
+}
+function emitError(kind, message) { broadcastRaw(customEvent({ type: kind.err, message })); }
+
+// A push action. Returns nothing; it caches and broadcasts the way the C# of the matching mode does.
+function push(name, args) {
+  const kind = KINDS[name];
+  let payload = args.payload;
+  if (typeof payload !== 'string' || !payload) { console.log(`[mock] ${name}: no payload argument`); emitError(kind, `${name} called without a 'payload' argument`); return; }
+  payload = payload.trim();
+  if (!payload.startsWith('{') || !payload.endsWith('}')) { console.log(`[mock] ${name}: payload is not a JSON object string`); emitError(kind, `${name} payload must be a JSON object string`); return; }
+  if (WIRE_OBJECT) {
+    caches[kind.key] = payload; // the old actions cached first…
+    try { broadcastRaw(customEvent(updateData(kind, payload))); } // …so a broadcast that threw left the state behind
+    catch (e) { console.log(`[mock] ${name}: broadcast failed (${e.message}) — cached anyway (old action)`); emitError(kind, e.message); }
+    return;
+  }
+  broadcastRaw(customEvent(updateData(kind, payload))); // broadcast first, then cache
+  caches[kind.key] = payload;
+}
+
+// The VDO Sync replay for a snapshot of the two caches. Returns how many blobs went out.
+function syncReplay(snap) {
+  let sent = 0;
+  if (WIRE_OBJECT) {
+    // The old action: one try around both replays, vdo first; any failure was reported as vdo:error.
+    try {
+      if (snap.vdo) { broadcastRaw(customEvent(updateData(KINDS['VDO Push'], snap.vdo))); sent++; }
+      else if (EMPTY_MARKER) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
+      if (snap.discord) { broadcastRaw(customEvent(updateData(KINDS['Discord Voice Push'], snap.discord))); sent++; }
+    } catch (e) { console.log(`[mock] VDO Sync: ${e.message}`); emitError(KINDS['VDO Push'], e.message); }
+    return sent;
+  }
+  // Each replay is its own try, so one that fails never stops the other.
+  for (const [name, text, marker] of [['VDO Push', snap.vdo, EMPTY_MARKER], ['Discord Voice Push', snap.discord, false]]) {
+    const kind = KINDS[name];
+    try {
+      if (text) { broadcastRaw(customEvent(updateData(kind, text))); sent++; }
+      else if (marker) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
+    } catch (e) { console.log(`[mock] VDO Sync: ${e.message}`); emitError(kind, e.message); }
+  }
+  return sent;
 }
 
 // ── HTTP server (SB HTTP Server mimic) ───────────────────────────────────────
@@ -339,9 +458,9 @@ wss.on('connection', (ws) => {
     }
 
     if (m.request === 'DoAction') {
-      // Always ack ok — like real SB, ok means the action STARTED, not that it
-      // succeeded. (A C# compile failure in real SB also acks ok and broadcasts
-      // nothing; that is why the actions carry error broadcasts.)
+      // Always ack ok — like real SB, ok means the action STARTED, not that it succeeded.
+      // An invalid argument or an exception in a running action is reported by an error
+      // broadcast; an action that failed to COMPILE broadcasts nothing at all.
       const name = (m.action && m.action.name) || '';
       const args = m.args || {};
       logAction(name, args);
@@ -349,15 +468,12 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({ id: m.id, status: 'ok' }));
 
       if (name === 'VDO Push') {
-        const parsed = parsePayload(name, args.payload);
-        if (typeof args.payload === 'string' && args.payload.trim()) caches.vdo = args.payload;
-        if (parsed) { broadcastRaw(wrapVdo(parsed)); console.log('[mock] VDO Push → cached (persisted analog) + broadcast'); }
+        push(name, args);
+        console.log('[mock] VDO Push → handled');
         return;
       }
       if (name === 'Discord Voice Push') {
-        const parsed = parsePayload(name, args.payload);
-        if (typeof args.payload === 'string' && args.payload.trim()) caches.discord = args.payload;
-        if (parsed) broadcastRaw(wrapDiscord(parsed)); // high-frequency: no per-push log
+        push(name, args); // high-frequency: no per-push log
         return;
       }
       if (name === 'VDO Sync') {
@@ -365,13 +481,7 @@ wss.on('connection', (ws) => {
         // Read at request time, broadcast SYNC_DELAY_MS later (the real action reads,
         // then broadcasts; a delay models a slow first sync).
         const snap = { vdo: caches.vdo, discord: caches.discord };
-        const replay = () => {
-          let sent = 0;
-          if (snap.vdo) { const p = parsePayload(name, snap.vdo); if (p) { broadcastRaw(wrapVdo(p)); sent++; } }
-          else if (EMPTY_MARKER) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
-          if (snap.discord) { const p = parsePayload(name, snap.discord); if (p) { broadcastRaw(wrapDiscord(p)); sent++; } }
-          console.log(`[mock] VDO Sync → replayed ${sent} cached blob(s)`);
-        };
+        const replay = () => console.log(`[mock] VDO Sync → replayed ${syncReplay(snap)} cached blob(s)`);
         if (SYNC_DELAY_MS > 0) setTimeout(replay, SYNC_DELAY_MS); else replay();
         return;
       }
