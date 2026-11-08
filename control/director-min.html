@@ -260,12 +260,16 @@
 
   function assemblePayload() {
     const nowMs = Date.now();
+    // The director-off rule (GRN-48): a disabled config, or one with no room, has no live streams, whatever this page's own
+    // director last saw. Without it, adopting another page's blank disable push would re-resolve the live IDs into cfg.slots
+    // (the director is still running at that moment), and the next push (an auto-add) would put the cams back on air.
+    const directorOff = !cfg.enabled || !cfg.room;
     const slots = cfg.slots.map((s, i) => {
       // Same rule as control.html: an empty label never carries a stream; with a current roster the shared resolver decides
       // (sticky for a shared label, held while the director settles, blank at once for a guest seen and lost); with none,
       // the held resolution is kept.
       let streamID;
-      if (!s.label) streamID = '';
+      if (!s.label || directorOff) streamID = '';
       else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, '', directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
       else streamID = String(s.streamID || '');
       s.streamID = streamID;
@@ -438,14 +442,20 @@
         if (!v) return; // no usable state in the frame: drop it, never mark the page synced
         const sig = JSON.stringify(v);
         if (sig === lastPushedSig) { markSynced(); showSteady(); return; } // our own echo
+        const firstSync = !synced;
         if (!adoptCfg(v)) return; // not config-shaped: drop it
         markSynced();
+        // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
+        // disable. The first page to read it blanks it, once (GRN-48).
+        const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
         lastPushedSig = JSON.stringify(assemblePayload());
+        if (heal) lastPushedSig = sig; // the adopted state, IDs and all: the blank copy differs from it, so it goes out (once)
         syncDirectorFrame();
         // syncDirectorFrame says nothing when the frame URL did not change, so a late
         // reply for a disabled config would leave 'has not answered' on screen.
         showSteady();
-        if (runAutoAdd()) assembleAndPush(false); // late arrivals in a replayed room
+        const added = runAutoAdd(); // late arrivals in a replayed room
+        if (heal || added) assembleAndPush(false);
       } else if (d.type === 'vdo:sync:empty') {
         // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.
         markSynced();
@@ -499,9 +509,12 @@
     const url = directorUrl();
     if (!url && cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/');
     if (url === frameUrl) return;
+    const hadFrame = !!frameUrl;
     frameUrl = url;
     if (url) {
       roster = []; hasRoster = false; directorNote = ''; // nothing from a previous room, password or load is current for this one
+      // A stream belongs to the room it was resolved in: moving to another room (or password) starts empty (GRN-122).
+      if (hadFrame) cfg.slots.forEach((s) => { s.streamID = ''; });
       directorLoop.start(url); // points the frame at the room, starts the poll, begins a fresh settle session
     } else {
       directorLoop.stop();

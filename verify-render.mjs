@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels' and 'roster' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster' and 'gestures' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -1879,6 +1879,297 @@ async function main() {
         check('R13m: director-min also reports an unrecognised reply (once, no doubled prefix) and, on an insecure page, why it has no director (not "no room configured")',
           saidR && !/director: director/.test(txtR) && /secure page/i.test(txtI) && !/no room configured/.test(txtI), JSON.stringify({ txtR, txtI }));
         await minI.close();
+      }
+    }
+
+    // ── R14: slot and room gestures change only what the operator touched (GRN-90, 199, 87, 01, 48, 122, 36, 145, 03, 103) ──
+    if (!ONLY || ONLY === 'gestures') {
+      console.log('\n[R14] gestures: one push per gesture, a slot edit touches one slot, typed fields survive, Copy restores');
+      const SEED_G = { enabled: true, room: 'gestroom', password: 'pw1', viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'hash' }, directory: [] };
+      const want = (k) => !process.env.R14_ONLY || process.env.R14_ONLY.split(',').includes(k); // R14_ONLY=c,g runs just those sections
+      const QUIET = '?fixed=1&delay=600000'; // a director that never answers: no roster-driven pushes disturb the counts
+      const LIVE = '?fixed=1';
+      const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const frameOf = (page) => page.frames().find((f) => /vdo-director/.test(f.url()));
+      const idsOf = (p) => p.slots.map((s) => s.streamID);
+      const allBlank = (p) => p.slots.every((s) => s.streamID === '');
+      const summ = (ps) => JSON.stringify(ps.map((q) => ({ enabled: q.enabled, room: q.room, ids: idsOf(q) })));
+      const seededMock = async (seed) => {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const openControl = async (x, q, seed) => {
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r && document.querySelectorAll('#vdoSlots .vdo-slot-row').length === 4, seed.room, 8000);
+        await sleep(800);
+        return p;
+      };
+      const openMin = async (x, q) => {
+        const p = await newPage(browser, { width: 480, height: 120 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(1200);
+        return p;
+      };
+      const dialogsOk = (p) => p.on('dialog', (d) => d.accept());
+      const foreign = (x, patch) => x.api.broadcast({ type: 'vdoninja:update', vdoninja: Object.assign({}, SEED_G, patch) });
+      // A reply as the director's frame would deliver it (source = the frame's window, origin = the mock's).
+      const injectReply = (page, data) => page.evaluate((d) => {
+        const f = document.getElementById('vdoDirector');
+        window.dispatchEvent(new MessageEvent('message', { data: d, origin: location.origin, source: f.contentWindow }));
+      }, data);
+      const nextCib = (page) => frameOf(page).evaluate(() => new Promise((res) => {
+        window.addEventListener('message', function h(e) { if (e.data && e.data.getGuestList) { window.removeEventListener('message', h); res(e.data.cib); } });
+      }));
+
+      // (a) The director gestures send ONE push each (GRN-01, GRN-03): disable, re-enable, a slot edit.
+      if (want('a')) {
+        const x = await seededMock(SEED_G);
+        const p = await openControl(x, QUIET, SEED_G);
+        await x.api.clear();
+        await p.uncheck('#vdoEnabled');
+        await sleep(1500);
+        let ps = await pushPayloads(x);
+        check('R14a: unticking "director enabled" sends exactly ONE push, enabled:false with every stream ID blank (the old order sent the live IDs first)',
+          ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        await x.api.clear();
+        await p.check('#vdoEnabled');
+        await sleep(1500);
+        ps = await pushPayloads(x);
+        const reEnabled = ps[0];
+        check('R14b: ticking it again sends exactly one push (enabled, the same room)', ps.length === 1 && reEnabled.enabled === true && reEnabled.room === 'gestroom', summ(ps));
+        await x.api.clear();
+        await p.check('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-mirror-cb');
+        await sleep(1500);
+        ps = await pushPayloads(x);
+        check('R14c: a slot edit (Mirror on slot 1) sends exactly one push and changes only slot 1',
+          ps.length === 1 && ps[0].slots[0].mirror === true && JSON.stringify(ps[0].slots.slice(1)) === JSON.stringify(reEnabled.slots.slice(1)), summ(ps));
+        await p.close();
+      }
+      // (b) Clearing the room, and moving to another room, send one push whose stream IDs are empty (GRN-01, GRN-122).
+      if (want('b')) {
+        const x = await seededMock(SEED_G);
+        const p = await openControl(x, QUIET, SEED_G);
+        await x.api.clear();
+        await p.fill('#vdoRoom', '');
+        await p.click('#btnVdoSave');
+        await sleep(1500);
+        let ps = await pushPayloads(x);
+        check('R14d: clearing the room and saving sends exactly ONE push: room empty, every stream ID blank', ps.length === 1 && ps[0].room === '' && allBlank(ps[0]), summ(ps));
+        await p.close();
+        const y = await seededMock(SEED_G);
+        const q = await openControl(y, QUIET, SEED_G);
+        const cib1 = await nextCib(q);
+        await y.api.clear();
+        await q.fill('#vdoRoom', 'otherroom');
+        await q.click('#btnVdoSave');
+        await sleep(1500);
+        ps = await pushPayloads(y);
+        check('R14e: moving to another room and saving sends exactly one push, and its stream IDs are empty (they belong to the old room)',
+          ps.length === 1 && ps[0].room === 'otherroom' && allBlank(ps[0]), summ(ps));
+        const cib2 = await nextCib(q);
+        check('R14f: the poll tag changes with the frame (a reply tagged for the previous load is dropped)',
+          /^sb-vdo:\d+$/.test(cib1) && /^sb-vdo:\d+$/.test(cib2) && cib1 !== cib2, JSON.stringify({ cib1, cib2 }));
+        await y.api.clear();
+        const withGuest = (label, id) => ({ 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: id, label } });
+        const heardLabel = (ps, label) => ps.some((q) => q.directory.some((e) => e.vdoLabel === label));
+        await injectReply(q, { guestList: withGuest('ZULU', 'zzz999'), cib: cib1 });
+        await sleep(900);
+        const stale = await pushPayloads(y);
+        check('R14g: a reply carrying the previous load\'s tag changes nothing', stale.length === 0, summ(stale));
+        // a reply with no tag is still accepted while the frame is set; one with the current tag is too
+        await injectReply(q, { guestList: withGuest('CHARLIE', 'ccc333'), cib: cib2 });
+        await sleep(900);
+        const okCur = await pushPayloads(y);
+        check('R14h: …but a reply with the current tag is read (the new guest is auto-added to the directory)', heardLabel(okCur, 'CHARLIE'), summ(okCur));
+        await y.api.clear();
+        await injectReply(q, { guestList: withGuest('DELTA', 'ddd444') });
+        await sleep(900);
+        const okNone = await pushPayloads(y);
+        check('R14i: …and so is a reply with no tag at all', heardLabel(okNone, 'DELTA'), summ(okNone));
+        await q.close();
+        // an import that changes the room also carries empty IDs on its first push
+        const z = await seededMock(SEED_G);
+        const r = await openControl(z, QUIET, SEED_G);
+        dialogsOk(r);
+        await z.api.clear();
+        await r.setInputFiles('#cfgImportFile', { name: 'room.json', mimeType: 'application/json',
+          buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, SEED_G, { room: 'importroom', slots: [slot(1, { label: 'ALPHA', streamID: 'old111' }), slot(2), slot(3), slot(4)] }) })) });
+        await sleep(1500);
+        ps = await pushPayloads(z);
+        check('R14j: importing a backup that names another room sends one push, with no stream ID carried over from the file', ps.length === 1 && ps[0].room === 'importroom' && allBlank(ps[0]), summ(ps));
+        await r.close();
+      }
+      // (c) Another writer changes the slots while the operator is typing in the panel: the edit changes only that field (GRN-90, GRN-87).
+      if (want('c')) {
+        const seedC = Object.assign({}, SEED_G, { slots: [SEED_G.slots[0], SEED_G.slots[1], slot(3, { mode: 'discord' }), slot(4)] }); // slot 3 is a Discord slot: its ID field is on screen
+        const x = await seededMock(seedC);
+        const p = await openControl(x, QUIET, seedC);
+        await p.focus('#vdoSlots .vdo-slot-row[data-slot="3"] input.vdo-discord-id');
+        await p.keyboard.type('123456789012345678');
+        await foreign(x, { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'CHARLIE', streamID: 'ccc333' }), slot(3, { mode: 'discord' }), slot(4, { label: 'DELTA' })] });
+        await sleep(900);
+        await x.api.clear();
+        await p.keyboard.press('Tab'); // leaves the field: commits the Discord ID
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        check('R14k: a foreign change to slots 2 and 4 made while the operator types a Discord ID in slot 3 survives that edit (it patches slot 3 only)',
+          ps.length === 1 && last.slots[1].label === 'CHARLIE' && last.slots[1].streamID === 'ccc333' && last.slots[3].label === 'DELTA' && last.slots[2].discordUserId === '123456789012345678',
+          JSON.stringify({ n: ps.length, slots: last && last.slots }));
+        const shown = await p.evaluate(() => document.querySelector('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel')?.value);
+        check('R14l: …and once the field is left the panel shows the foreign change (the deferred render runs)', shown === 'CHARLIE', String(shown));
+        await p.close();
+      }
+      // (d) The panel is not frozen while a select has focus (GRN-87); a committed select does not keep focus (GRN-199).
+      if (want('d')) {
+        const x = await seededMock(SEED_G);
+        const p = await openControl(x, LIVE, SEED_G);
+        await wait(p, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        await p.focus('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-label-sel');
+        await frameOf(p).evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'ccc333', label: 'CHARLIE' } }));
+        const got = await wait(p, () => [...document.querySelectorAll('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-label-sel option')].some((o) => o.value === 'CHARLIE'), null, 9000);
+        check('R14m: with focus on a slot\'s label select, a guest who joins the room appears in the panel (the render is deferred only while a Discord ID is typed)', got);
+        await p.focus('#vdoSlots .vdo-slot-row[data-slot="4"] .vdo-label-sel');
+        await p.selectOption('#vdoSlots .vdo-slot-row[data-slot="4"] .vdo-label-sel', 'BRAVO');
+        await sleep(300);
+        const afterLabel = await p.evaluate(() => (document.activeElement && document.activeElement.tagName) || '');
+        await p.focus('#vdoSlots .vdo-slot-row[data-slot="4"] .vdo-mode-sel');
+        await p.selectOption('#vdoSlots .vdo-slot-row[data-slot="4"] .vdo-mode-sel', 'discord');
+        await sleep(300);
+        const afterMode = await p.evaluate(() => (document.activeElement && document.activeElement.tagName) || '');
+        check('R14n: after a label or mode pick is committed the select is blurred (a stray key cannot swap the on-air guest)', afterLabel !== 'SELECT' && afterMode !== 'SELECT', JSON.stringify({ afterLabel, afterMode }));
+        await p.close();
+      }
+      // (e) Copy: a double click returns to its label; a failed copy says so (GRN-103).
+      if (want('e')) {
+        const x = await seededMock(SEED_G);
+        const p = await openControl(x, QUIET, SEED_G);
+        await p.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.resolve() }, configurable: true }); });
+        const copy1 = '#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-src-copy';
+        await p.click(copy1);
+        await sleep(150);
+        await p.click(copy1);
+        await sleep(200);
+        const during = await p.textContent(copy1);
+        await sleep(2000);
+        const after = await p.textContent(copy1);
+        const blurred = await p.evaluate(() => !(document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('vdo-src-copy')));
+        check('R14o: a double-clicked slot Copy says "Copied", returns to "Copy", and does not keep focus', during === 'Copied' && after === 'Copy' && blurred, JSON.stringify({ during, after, blurred }));
+        await p.evaluate(() => {
+          Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) }, configurable: true });
+          document.execCommand = () => false;
+        });
+        await p.click('#btnVdoInviteCopy');
+        await sleep(300);
+        const failTxt = await p.textContent('#btnVdoInviteCopy');
+        const selected = await p.evaluate(() => { const t = document.getElementById('vdoInviteLink'); return t.selectionEnd - t.selectionStart === t.value.length && t.value.length > 0; });
+        await sleep(3200);
+        const failAfter = await p.textContent('#btnVdoInviteCopy');
+        check('R14p: when the browser refuses the copy the button says so (not "Copied"), the link stays selected for Ctrl+C, and the label returns',
+          /Copy failed/.test(failTxt) && selected && failAfter === 'Copy', JSON.stringify({ failTxt, selected, failAfter }));
+        await p.close();
+      }
+      // (f) Typed Room / Password edits survive a foreign update, and the links follow the saved values (GRN-36, GRN-145).
+      if (want('f')) {
+        const x = await seededMock(SEED_G);
+        const p = await openControl(x, QUIET, SEED_G);
+        await p.fill('#vdoRoom', 'typedroom');
+        await p.focus('#vdoPassword');
+        await foreign(x, { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3, { label: 'ZULU' }), slot(4)] });
+        await sleep(900);
+        const st = await p.evaluate(() => {
+          const vis = (id) => { const e = document.getElementById(id); return !!e && !e.hidden && getComputedStyle(e).display !== 'none'; };
+          return { room: document.getElementById('vdoRoom').value, badge: vis('vdoUnsaved'), noteI: vis('vdoInviteNote'), noteM: vis('vdoManageNote'),
+            invite: document.getElementById('vdoInviteLink').value, manage: document.getElementById('vdoManageLink').value,
+            slot3: document.querySelector('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-label-sel')?.value };
+        });
+        check('R14q: a Room typed but not saved survives another page\'s push (which is adopted), and an "unsaved" badge shows', st.room === 'typedroom' && st.badge && st.slot3 === 'ZULU', JSON.stringify(st));
+        check('R14r: the invite and manage links keep the SAVED room while it is unsaved, and both rows say "unsaved: press Save"',
+          /room=gestroom/.test(st.invite) && !/typedroom/.test(st.invite) && /director=gestroom/.test(st.manage) && !/typedroom/.test(st.manage) && st.noteI && st.noteM, JSON.stringify(st));
+        await x.api.clear();
+        await p.click('#btnVdoSave');
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const after = await p.evaluate(() => {
+          const e = document.getElementById('vdoUnsaved');
+          return { badge: !!e && !e.hidden && getComputedStyle(e).display !== 'none', invite: document.getElementById('vdoInviteLink').value };
+        });
+        check('R14s: Save pushes the typed room, clears the badge, and the links now carry it',
+          ps.length === 1 && ps[0].room === 'typedroom' && ps[0].slots[2].label === 'ZULU' && !after.badge && /room=typedroom/.test(after.invite), JSON.stringify({ ps: summ(ps), after }));
+        await p.close();
+        // an adoption that makes the field equal to the saved value clears the marker; an import overwrites typed text
+        const y = await seededMock(SEED_G);
+        const q = await openControl(y, QUIET, SEED_G);
+        dialogsOk(q);
+        const badgeOn = () => q.evaluate(() => { const e = document.getElementById('vdoUnsaved'); return !!e && !e.hidden && getComputedStyle(e).display !== 'none'; });
+        await q.fill('#vdoRoom', 'sameroom');
+        await q.focus('#vdoPassword');
+        const badge1 = await badgeOn();
+        await foreign(y, { room: 'sameroom' });
+        await sleep(900);
+        const badge2 = await badgeOn();
+        await q.fill('#vdoRoom', 'typed-again');
+        await q.focus('#vdoPassword');
+        await q.setInputFiles('#cfgImportFile', { name: 'imp.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, SEED_G, { room: 'imported' }) })) });
+        await sleep(1200);
+        const roomAfterImport = await q.inputValue('#vdoRoom');
+        check('R14t: when another page\'s push makes the field equal to the typed text the marker clears, and an Import overwrites typed text', badge1 && !badge2 && roomAfterImport === 'imported', JSON.stringify({ badge1, badge2, roomAfterImport }));
+        await q.close();
+      }
+      // (g) A disabled config never carries live IDs, also from director-min after control.html closes (GRN-01, GRN-48).
+      if (want('g')) {
+        const x = await seededMock(SEED_G);
+        const min = await openMin(x, LIVE);
+        await wait(min, () => /2 guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+        const ctl = await openControl(x, LIVE, SEED_G);
+        await wait(ctl, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        await x.api.clear();
+        await ctl.uncheck('#vdoEnabled');
+        await sleep(1500);
+        const dis = await pushPayloads(x);
+        // a late director reply after the disable changes nothing, in either page
+        await injectReply(ctl, { guestList: { 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } } });
+        await injectReply(min, { guestList: { 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } } });
+        await sleep(900);
+        const late = await pushPayloads(x);
+        check('R14u: a director reply that arrives after the disable pushes nothing (control.html and director-min both ignore it)', late.length === dis.length, summ(late));
+        await ctl.close();
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        await sleep(2500);
+        const st = await x.api.state();
+        const psAll = await pushPayloads(x);
+        check('R14v: with control.html and director-min open, disable, close control.html, then a Discord voice user joins: director-min pushes the new entries and vdo.state stays blank',
+          !!st.vdo && st.vdo.enabled === false && allBlank(st.vdo) && psAll.some((q) => q.directory.some((e) => e.discordUserId === '200000000000000001')), JSON.stringify({ enabled: st.vdo && st.vdo.enabled, ids: st.vdo && idsOf(st.vdo), pushes: psAll.length, dirs: psAll.map((q) => q.directory.length) }));
+        await min.close();
+      }
+      // (h) A disabled state that still holds stream IDs is healed once, on hydration, by whichever page reads it first (GRN-48).
+      if (want('h')) {
+        const SEED_OFF = Object.assign({}, SEED_G, { enabled: false });
+        const x = await seededMock(SEED_OFF);
+        const p = await openControl(x, LIVE, SEED_OFF);
+        await sleep(1500);
+        let ps = await pushPayloads(x);
+        check('R14w: control.html reading a saved enabled:false state that still holds stream IDs pushes ONE blank copy', ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        await p.close();
+        const y = await seededMock(SEED_OFF);
+        const m = await openMin(y, LIVE);
+        await sleep(1500);
+        ps = await pushPayloads(y);
+        check('R14x: director-min does the same', ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        const z = await seededMock(Object.assign({}, SEED_G, { directoryAutoAdd: false }));
+        const m2 = await openMin(z, LIVE);
+        await wait(m2, () => /2 guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+        await sleep(1500);
+        ps = await pushPayloads(z);
+        check('R14y: …and an enabled state with a room is left alone (no push at all while the roster matches)', ps.length === 0, summ(ps));
+        await m.close(); await m2.close();
       }
     }
 

@@ -31,6 +31,11 @@
 
     let url = '', ticker = null, srcSetAt = 0, lastReplyAt = 0, answered = false, retryN = 0, nextRetryAt = 0, hinted = false, wasSilent = false, started = false;
     let sess = freshSession();
+    // The frame's generation (GRN-48): it moves on every time the frame is pointed at a room (a new room, or a reload of the same
+    // one). The poll carries '<page tag>:<generation>', the director echoes it, and a reply tagged for another generation is
+    // dropped: it was asked of a document that is no longer the frame's. A reply with no tag is still read.
+    let gen = 0;
+    const tag = () => (o.cib || 'sb-vdo') + ':' + gen;
     // startedAt stays null until the first RECOGNISED reply of this load: a director that is slow to answer still gets its whole
     // settle window, and an unrecognised reply does not start it.
     function freshSession() { return { startedAt: null, seen: new Set() }; }
@@ -53,7 +58,7 @@
 
     function post() {
       try {
-        if (url && o.iframe && o.iframe.contentWindow) o.iframe.contentWindow.postMessage({ getGuestList: true, cib: o.cib || 'sb-vdo' }, '*');
+        if (url && o.iframe && o.iframe.contentWindow) o.iframe.contentWindow.postMessage({ getGuestList: true, cib: tag() }, '*');
       } catch (_) { /* iframe not ready yet */ }
     }
 
@@ -76,6 +81,7 @@
         nextRetryAt = now() + backoffMs[Math.min(retryN - 1, backoffMs.length - 1)];
       }
       sess = freshSession(); // a reloaded director's first (empty or partial) reply must not blank what was seen before
+      gen++;
       srcSetAt = now();
       answered = false; // nothing has answered since the frame was pointed at the room again
       loaded = !hasLoadEvents;
@@ -93,6 +99,7 @@
       if (!loaded && now() - srcSetAt < 5000) return;
       const d = e.data;
       if (!d || typeof d !== 'object' || !('guestList' in d)) return;
+      if (typeof d.cib === 'string' && d.cib !== tag()) return; // asked of an earlier load of the frame
       lastReplyAt = now(); answered = true;
       retryN = 0; nextRetryAt = 0; wasSilent = false;
       if (!VdoParse.guestListOk(d)) { if (hooks.unrecognised) hooks.unrecognised(d); return; }
@@ -102,7 +109,7 @@
 
     function start(u) {
       stop(true);
-      url = u; srcSetAt = now(); lastReplyAt = 0; answered = false; retryN = 0; nextRetryAt = 0; hinted = false; wasSilent = false;
+      url = u; gen++; srcSetAt = now(); lastReplyAt = 0; answered = false; retryN = 0; nextRetryAt = 0; hinted = false; wasSilent = false;
       sess = freshSession();
       loaded = !hasLoadEvents;
       o.iframe.src = u;

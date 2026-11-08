@@ -70,6 +70,8 @@
   .pill.error { color: var(--red); border-color: var(--red); }
   .warn { color: var(--amber); font-size: 12px; }
   .hint { color: var(--dim); font-size: 12px; }
+  button.primary.attn { box-shadow: 0 0 0 2px var(--amber); }
+  .vdo-unsaved-note { color: var(--amber); font-size: 12px; }
 
   /* Slots */
   .vdo-slot-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
@@ -169,6 +171,7 @@
       <label>Password <input type="password" id="vdoPassword" size="14" /></label>
       <label><input type="checkbox" id="vdoEnabled" /> director enabled</label>
       <button id="btnVdoSave" class="primary">Save</button>
+      <span id="vdoUnsaved" class="pill warn" hidden>unsaved changes</span>
     </div>
     <div class="row">
       <label style="flex:1; display:flex; gap:6px; align-items:center;">viewFlags
@@ -261,6 +264,7 @@
     <div class="linkrow">
       <textarea id="vdoInviteLink" readonly rows="2" placeholder="guest invite link"></textarea>
       <span class="btns">
+        <span id="vdoInviteNote" class="vdo-unsaved-note" hidden>unsaved: press Save</span>
         <button id="btnVdoInviteCopy">Copy</button>
         <a id="btnVdoInviteOpen" class="btn-open" href="#" target="_blank" rel="noreferrer">Open</a>
       </span>
@@ -268,6 +272,7 @@
     <div class="linkrow">
       <textarea id="vdoManageLink" readonly rows="2" placeholder="director / manage link"></textarea>
       <span class="btns">
+        <span id="vdoManageNote" class="vdo-unsaved-note" hidden>unsaved: press Save</span>
         <button id="btnVdoManageCopy">Copy</button>
         <a id="btnVdoManageOpen" class="btn-open" href="#" target="_blank" rel="noreferrer">Open</a>
       </span>
@@ -377,6 +382,7 @@
     dirSearch: $('dirSearch'), dirLiveOnly: $('dirLiveOnly'), dirAutoAdd: $('dirAutoAdd'),
     dirCount: $('dirCount'), dirClearAuto: $('btnDirClearAuto'), dirResetIgnored: $('btnDirResetIgnored'),
     inviteLink: $('vdoInviteLink'), manageLink: $('vdoManageLink'),
+    unsaved: $('vdoUnsaved'), save: $('btnVdoSave'), inviteNote: $('vdoInviteNote'), manageNote: $('vdoManageNote'),
     favs: $('dvoFavorites'), favName: $('dvoName'), favServer: $('dvoServerId'), favChannel: $('dvoChannelId'),
   };
   const inv = {
@@ -465,6 +471,10 @@
   let dirSig = '';
   let favsSig = '';
   let frameUrl = '';
+  // Room, Password and viewFlags text typed but not saved yet (GRN-36). A render never overwrites a field in this set, a foreign
+  // update that makes the saved value equal the text drops it (recomputeDirty), and only Save and Import clear it.
+  const dirty = new Set();
+  let slotsDeferred = false; // a slots render held back because a Discord ID is being typed; it runs when the field is left
   const dirOpen = new Set(); // expanded directory rows, by array index (view state only)
 
   // Directory sanitizers, the socials-textarea grammar, and the auto-populate
@@ -794,12 +804,21 @@
       gotConfig = true; syncedByMarker = false; // a real config reached this page
       if (firstSync) releaseFocusForAdoption();
       markSynced();
+      // The first saved config to arrive replaces the form: what was typed before it was never saved against it (a declined Save,
+      // text typed during the hydrate window). Later, typed text that now equals the saved value is no longer unsaved.
+      if (firstSync) dirty.clear(); else recomputeDirty();
+      // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
+      // disable. The first page to read it blanks it, once (GRN-48).
+      const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
       // equal what we just adopted.
       lastPushedSig = JSON.stringify(assemblePayload());
       renderAll();
+      if (heal) { cfg.slots.forEach((s) => { s.streamID = ''; }); hasRoster = false; renderSlots(true); }
       // A replayed room may already hold guests we've never seen named.
-      if (runAutoAdd()) { renderDirectory(); assembleAndPush(false); }
+      const added = runAutoAdd();
+      if (added) renderDirectory();
+      if (heal || added) assembleAndPush(false);
     } else if (d.type === 'vdo:sync:empty') {
       // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
       if (!synced) syncedByMarker = true;
@@ -908,21 +927,22 @@
     // An insecure page never starts the director: say so even though the (blank) URL did not change.
     if (!url && cfg.enabled && cfg.room && !window.isSecureContext) setPill(els.vdoStatus, 'director: needs a secure page (open via 127.0.0.1)', 'error');
     if (url === frameUrl) return;
+    const hadFrame = !!frameUrl;
     frameUrl = url;
     if (url) {
       roster = []; hasRoster = false; // nothing from a previous room, password or load is current for this one
+      // A stream belongs to the room it was resolved in: moving from one room to another (or to another password) starts empty,
+      // so the first push after the move never carries the old room's IDs (GRN-122).
+      if (hadFrame) { cfg.slots.forEach((s) => { s.streamID = ''; }); renderSlots(true); }
       directorLoop.start(url); // points the frame at the room, starts the poll, and begins a fresh settle session
     } else {
       directorLoop.stop(); // the frame goes to about:blank
       roster = [];
+      cfg.slots.forEach((s) => { s.streamID = ''; }); // nothing is live any more (blank every slot's overlay)
+      hasRoster = false;
       setPill(els.vdoStatus, cfg.enabled && cfg.room && !window.isSecureContext ? 'director: needs a secure page (open via 127.0.0.1)' : 'director: idle', cfg.enabled && cfg.room && !window.isSecureContext ? 'error' : '');
       renderSlots();
-      // Blank every slot's overlay (mirrors the old panel's disable behavior).
-      if (hydrated) {
-        cfg.slots.forEach((s) => { s.streamID = ''; });
-        hasRoster = false;
-        assembleAndPush(false);
-      }
+      if (hydrated) assembleAndPush(false);
     }
   }
 
@@ -935,9 +955,9 @@
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
   function renderAll() {
-    setIfNotFocused(els.room, cfg.room);
-    setIfNotFocused(els.password, cfg.password);
-    setIfNotFocused(els.viewFlags, cfg.viewFlags);
+    if (!dirty.has('room')) setIfNotFocused(els.room, cfg.room);
+    if (!dirty.has('password')) setIfNotFocused(els.password, cfg.password);
+    if (!dirty.has('viewFlags')) setIfNotFocused(els.viewFlags, cfg.viewFlags);
     setCheck(els.enabled, cfg.enabled);
     setCheck(els.dirAutoAdd, cfg.directoryAutoAdd);
     renderSlots(true);
@@ -961,8 +981,18 @@
     const dupes = VdoParse.duplicateLabels(roster); // labels more than one live stream is using
     const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig(), dupes: [...dupes] });
     if (!force && sig === slotsSig && els.slots.childElementCount) return;
-    if (els.slots.contains(document.activeElement)) return; // operator mid-edit
+    // Only a Discord ID being typed holds the redraw back (it would eat the text); the redraw runs when the field is left (GRN-87).
+    // Selects and buttons never freeze the panel: a guest who joins must show up in the pickers.
+    const ae = document.activeElement;
+    if (ae && ae.classList && ae.classList.contains('vdo-discord-id') && els.slots.contains(ae)) { slotsDeferred = true; return; }
+    slotsDeferred = false;
     slotsSig = sig;
+    let keep = null; // the control that has focus is found again after the redraw
+    if (ae && ae !== document.body && els.slots.contains(ae)) {
+      const r = ae.closest('.vdo-slot-row');
+      const cls = [...ae.classList].find((c) => /^vdo-/.test(c));
+      if (r && cls) keep = { slot: r.dataset.slot, cls };
+    }
 
     const users = Object.entries((discord && discord.users) || {});
     els.slots.innerHTML = '';
@@ -1073,7 +1103,21 @@
       row.append(name, modeSel, webcamWrap, discordWrap, srcWrap);
       els.slots.appendChild(row);
     }
+    if (keep) {
+      const again = els.slots.querySelector('.vdo-slot-row[data-slot="' + keep.slot + '"] .' + keep.cls);
+      if (again && typeof again.focus === 'function') again.focus();
+    }
   }
+  // Leaving a Discord ID field runs the redraw that was held back. A short delay lets the click that took the focus finish first.
+  const SLOTS_FLUSH_MS = 150;
+  let slotsFlushTimer = null;
+  els.slots.addEventListener('focusout', (e) => {
+    if (!slotsDeferred) return;
+    const to = e.relatedTarget;
+    if (to && to.classList && to.classList.contains('vdo-discord-id') && els.slots.contains(to)) return; // from one ID field to the next
+    clearTimeout(slotsFlushTimer);
+    slotsFlushTimer = setTimeout(() => { if (slotsDeferred) renderSlots(true); }, SLOTS_FLUSH_MS);
+  });
 
   // ── Guest directory section ───────────────────────────────────────────────
   // Rows are collapsed summaries — live dot · display name · match keys — that
@@ -1438,48 +1482,52 @@
     operatorAction(() => assembleAndPush(false));
   });
 
-  // Read every slot straight from the DOM so two quick changes both land.
-  function slotsFromDom() {
-    const out = [];
-    for (let i = 1; i <= SLOT_COUNT; i++) {
-      const row = els.slots.querySelector(`.vdo-slot-row[data-slot="${i}"]`);
-      const sel = row && row.querySelector('select.vdo-label-sel');
-      const mir = row && row.querySelector('input.vdo-mirror-cb');
-      const modeSel = row && row.querySelector('select.vdo-mode-sel');
-      const discIn = row && row.querySelector('input.vdo-discord-id');
-      const prev = cfg.slots[i - 1] || {};
-      out.push(Object.assign({
-        label: sel ? sel.value : String(prev.label ?? ''),
-        // The stream belongs to the label it was resolved for: a different label starts empty (the next poll resolves it), so
-        // a slot relabelled while the director is quiet cannot push the previous guest's stream under the new name.
-        streamID: (sel ? sel.value : String(prev.label ?? '')) === String(prev.label ?? '') ? String(prev.streamID ?? '') : '',
-        mirror: mir ? mir.checked : !!prev.mirror,
-        mode: modeSel ? modeSel.value : (prev.mode ?? 'webcam'),
-        discordUserId: discIn ? discIn.value.replace(/\D/g, '') : String(prev.discordUserId ?? ''),
-      }, GRDir.extraFields(prev, SLOT_KEYS)));
-    }
-    return out;
-  }
-
+  // A change in the slots panel patches the ONE field that fired, on a copy of that one slot in cfg. It never re-reads the other
+  // slots from the screen: while a Discord ID is typed the panel is not redrawn, so the screen can be behind what another page just
+  // saved, and a whole-panel read would write that stale text back (GRN-90).
   els.slots.addEventListener('change', (e) => {
-    const row = e.target.closest('.vdo-slot-row');
+    const t = e.target;
+    const row = t.closest('.vdo-slot-row');
     if (!row) return;
-    if (e.target.classList.contains('vdo-discord-pick') && e.target.value) {
+    const idx = Number(row.dataset.slot) - 1;
+    const cur = cfg.slots[idx];
+    if (!cur) return;
+    const next = Object.assign({}, cur);
+    if (t.classList.contains('vdo-discord-pick')) {
+      const picked = t.value;
+      t.value = '';
+      if (!picked) return;
       const idInput = row.querySelector('input.vdo-discord-id');
-      if (idInput) idInput.value = e.target.value;
-      e.target.value = '';
+      if (idInput) idInput.value = picked;
+      next.discordUserId = picked.replace(/\D/g, '');
+    } else if (t.classList.contains('vdo-discord-id')) {
+      next.discordUserId = t.value.replace(/\D/g, '');
+    } else if (t.classList.contains('vdo-mode-sel')) {
+      next.mode = t.value === 'discord' ? 'discord' : 'webcam';
+      row.dataset.mode = next.mode;
+    } else if (t.classList.contains('vdo-label-sel')) {
+      if (t.value === String(cur.label ?? '')) return;
+      next.label = t.value;
+      // The stream belongs to the label it was resolved for: a different label starts empty (the next poll resolves it), so a
+      // slot relabelled while the director is quiet cannot push the previous guest's stream under the new name.
+      next.streamID = '';
+    } else if (t.classList.contains('vdo-mirror-cb')) {
+      next.mirror = t.checked;
+    } else {
+      return;
     }
-    if (e.target.classList.contains('vdo-mode-sel')) {
-      row.dataset.mode = e.target.value;
-    }
-    cfg.slots = slotsFromDom();
+    cfg.slots[idx] = next;
     slotsSig = ''; // slot ids/labels may need a rebuild on the next render
     operatorAction(() => assembleAndPush(false)); // update overlays now, don't wait for the next poll
+    // A committed pick must not stay focused: a stray key or wheel turn would swap or blank the on-air guest (GRN-199).
+    if (t.classList.contains('vdo-label-sel') || t.classList.contains('vdo-mode-sel')) t.blur();
   });
 
   els.slots.addEventListener('click', (e) => {
     const copyBtn = e.target.closest('.vdo-src-copy');
-    if (copyBtn) copyText(copyBtn.dataset.url, copyBtn);
+    if (copyBtn) { copyText(copyBtn.dataset.url, copyBtn); return; }
+    const openA = e.target.closest('.vdo-src-open');
+    if (openA) setTimeout(() => openA.blur(), 0); // the link opens its tab; the panel must not keep the focus
   });
 
   function saveRoom() {
@@ -1487,14 +1535,17 @@
     cfg.password = els.password.value;
     cfg.viewFlags = els.viewFlags.value.trim();
     cfg.enabled = els.enabled.checked;
-    // Save always pushes, even when nothing changed (GRN-192); syncDirectorFrame can
-    // push a blanking update when the director is switched off, so it runs inside the
-    // same (possibly confirmed) action.
+    // Save always pushes, even when nothing changed (GRN-192). The director is switched first: switching it off, clearing the room or
+    // moving to another room blanks the stream IDs and pushes that (syncDirectorFrame), so Save sends ONE push and it never carries
+    // the old room's live IDs. A push syncDirectorFrame already made is the Save's push; otherwise Save forces its own.
     operatorAction(() => {
-      reportPush(assembleAndPush(false, true));
+      dirty.clear(); // the typed text is saved now (inside the action: a declined confirm leaves it marked)
       rebuildLinks();
       const before = frameUrl;
+      const sigBefore = lastPushedSig;
       syncDirectorFrame();
+      const pushedByFrame = lastPushedSig !== sigBefore;
+      reportPush(assembleAndPush(false, !pushedByFrame) || pushedByFrame);
       if (frameUrl && frameUrl === before) directorLoop.nudge(); // same URL, and nothing has answered yet: try the frame again
     });
   }
@@ -1579,9 +1630,11 @@
     if (!room) return '';
     return 'https://vdo.ninja/?director=' + encodeURIComponent(room) + passwordParam(password, i.passwordMode);
   }
+  // The links are built from the SAVED room and password (cfg), never the half-typed text: a link copied mid-edit would name a
+  // room the director is not in. While either field holds unsaved text the rows say so (GRN-145).
   function rebuildLinks() {
-    const room = els.room.value.trim();
-    const password = els.password.value;
+    const room = String(cfg.room || '').trim();
+    const password = String(cfg.password || '');
     const i = inviteFromDom();
     const invite = buildInviteLink(room, password, i);
     const manage = buildManageLink(room, password, i);
@@ -1589,6 +1642,30 @@
     els.manageLink.value = manage;
     $('btnVdoInviteOpen').href = invite || '#';
     $('btnVdoManageOpen').href = manage || '#';
+    renderDirtyMarker();
+  }
+  const typedText = {
+    room: () => els.room.value.trim(),
+    password: () => els.password.value,
+    viewFlags: () => els.viewFlags.value.trim(),
+  };
+  function renderDirtyMarker() {
+    els.unsaved.hidden = dirty.size === 0;
+    els.save.classList.toggle('attn', dirty.size > 0);
+    const linksStale = dirty.has('room') || dirty.has('password'); // viewFlags is not part of either link
+    els.inviteNote.hidden = !linksStale;
+    els.manageNote.hidden = !linksStale;
+  }
+  // After an adoption: a field whose text now equals the saved value is no longer unsaved. The set is never emptied here.
+  function recomputeDirty() {
+    for (const k of [...dirty]) if (typedText[k]() === String(cfg[k] ?? '')) dirty.delete(k);
+    renderDirtyMarker();
+  }
+  for (const k of Object.keys(typedText)) {
+    els[k].addEventListener('input', () => {
+      if (typedText[k]() === String(cfg[k] ?? '')) dirty.delete(k); else dirty.add(k);
+      renderDirtyMarker();
+    });
   }
   function renderInvite() {
     const i = cfg.invite || {};
@@ -1615,7 +1692,6 @@
   }
 
   const invOpts = document.querySelector('.vdo-invite-opts');
-  [els.room, els.password].forEach((el) => el.addEventListener('input', rebuildLinks));
   invOpts.addEventListener('input', rebuildLinks);
   invOpts.addEventListener('change', () => {
     // Merge over the current invite: the builder only knows its own fields, and a newer
@@ -1624,29 +1700,32 @@
     operatorAction(() => assembleAndPush(false));
     rebuildLinks();
   });
-  async function copyToClipboard(textarea, btn) {
-    if (!textarea.value) return;
-    try { await navigator.clipboard.writeText(textarea.value); }
-    catch { textarea.select(); document.execCommand('copy'); textarea.blur(); }
-    const orig = btn.textContent;
-    btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = orig; }, 1200);
+  // One copy helper. The button's own label is saved once (a second click while it still says "Copied" must not save "Copied" as
+  // the label), one timer per button restores it, "Copied" is shown only when the copy happened, and the button never keeps focus.
+  // With a textarea, a refused copy leaves its text selected for Ctrl+C.
+  const copyTimers = new WeakMap();
+  function flashCopy(btn, ok, hasText) {
+    if (btn.dataset.label === undefined) btn.dataset.label = btn.textContent;
+    btn.textContent = ok ? 'Copied' : (hasText ? 'Copy failed — select & Ctrl+C' : 'Copy failed — use Open');
+    clearTimeout(copyTimers.get(btn));
+    copyTimers.set(btn, setTimeout(() => { btn.textContent = btn.dataset.label; }, ok ? 1200 : 3000));
   }
-  async function copyText(text, btn) {
-    if (!text) return;
-    try { await navigator.clipboard.writeText(text); }
-    catch {
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); } catch {}
-      document.body.removeChild(ta);
+  async function copyText(text, btn, textarea) {
+    if (!text) return false;
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { /* fall back to the old copy command below */ }
+    if (!ok) {
+      const ta = textarea || document.createElement('textarea');
+      if (!textarea) { ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); }
+      try { ta.select(); ok = document.execCommand('copy') === true; } catch { ok = false; }
+      if (!textarea) document.body.removeChild(ta);
+      if (ok && textarea) textarea.blur();
     }
-    const orig = btn.textContent;
-    btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = orig; }, 1200);
+    flashCopy(btn, ok, !!textarea);
+    btn.blur(); // (a refused copy has already moved the focus to the selected textarea)
+    return ok;
   }
-
+  const copyToClipboard = (textarea, btn) => copyText(textarea.value, btn, textarea);
   // The OBS Browser Source URL for a guest slot, derived from where THIS control
   // page is served: same origin, the sibling overlay map (…-control → …-overlay,
   // or the mock's short control → overlay), and the same ?sbport the control page
@@ -1873,6 +1952,7 @@
     const dirDropped = (Array.isArray(payload.directory) ? payload.directory.length : 0) - dirKept;
     operatorAction(() => {
       adoptCfg(payload);
+      dirty.clear(); // an import replaces what was typed
       hydrated = true;
       gotConfig = true; syncedByMarker = false; // this page now holds a real config
       dirOpen.clear(); // a different directory → the expanded-row indices are meaningless

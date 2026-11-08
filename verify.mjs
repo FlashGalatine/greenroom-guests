@@ -674,6 +674,19 @@ async function main() {
       check('a reply with renamed fields or a non-object guestList is reported as unrecognised, never as a roster', L.calls.join() === 'connecting,reply:1,unrecognised,unrecognised', L.calls.join());
       L.loop.tick();
       check('the poll is posted with targetOrigin \'*\' (the body holds no secret), so a failover origin still receives it', L.posts.length === 1 && L.posts[0][1] === '*' && L.posts[0][0].getGuestList === true);
+      // the poll's tag names the frame's generation (GRN-48): a reply tagged for an earlier load is dropped, an untagged one is not
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r1'); L.loop.tick();
+      const tag1 = L.posts[0] && L.posts[0][0].cib;
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r2'); L.loop.tick();
+      const tag2 = L.posts[1] && L.posts[1][0].cib;
+      check('the poll tag is "<page tag>:<generation>" and moves on when the frame is pointed at another room', tag1 === 'sb-vdo:1' && tag2 === 'sb-vdo:2', JSON.stringify({ tag1, tag2 }));
+      L.loop.onMessage(ev('http://127.0.0.1:7475', Object.assign({ cib: tag1 }, good)));
+      check('a reply tagged for the previous generation is dropped', L.calls.join() === 'connecting,connecting', L.calls.join());
+      L.loop.onMessage(ev('http://127.0.0.1:7475', Object.assign({ cib: tag2 }, good))); L.loop.onMessage(ev('http://127.0.0.1:7475', good));
+      check('…while one tagged for this generation, and one with no tag at all, are read', L.calls.join() === 'connecting,connecting,reply:1,reply:1', L.calls.join());
+      L.advance(30000); L.loop.tick(); L.flush(); L.loop.tick();
+      check('a reload of the same room is a new generation too (a late reply from the old document is dropped)', L.posts[L.posts.length - 1][0].cib === 'sb-vdo:3', JSON.stringify(L.posts.map((p) => p[0].cib)));
 
       // liveness (GRN-95, GRN-183): silence is named, then the frame is reloaded with backoff, resetting the settle session
       L = mkLoop();
