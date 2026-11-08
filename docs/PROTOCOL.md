@@ -66,11 +66,20 @@ re-emit every `data` with a `.type` as a window `svc:message` CustomEvent.
 | `Discord Voice Command` | control page | `command`, `value` | broadcast `{"type":"discord:voice:command","command":…,"value":…}` |
 | `Discord Bridge Start` *(optional)* | SB startup trigger | — | `Process.Start` the sidecar hidden |
 
-The C# **never re-serializes JSON**. Push payloads are pre-serialized by the producers
-and only escaped into the string field; the only other C#-built JSON is the tiny
-command broadcast and the error shapes. The broadcast comes **before** the cache
-write, so a broadcast that fails (an exception in `WebsocketBroadcastJson`) never
-leaves a saved state behind that no client has seen.
+The C# **validates JSON but never re-serializes it**. Push payloads are pre-serialized
+by the producers and only escaped into the string field. Before anything is
+broadcast or cached, `VDO Push` and `Discord Voice Push` check the payload with a
+strict, dependency-free RFC 8259 validator: it must be **one JSON object** with
+nothing after it, no object may repeat a key (compared after decoding escapes), and
+containers nest at most 32 deep. Anything else is refused with an error broadcast
+(`payload rejected, NOT cached: <reason>`), so damaged text, such as a half-built
+`{…},"type":"x"}`, never reaches the cache. `VDO Sync` applies the same check to each
+cached blob before replaying it; an invalid one is reported (`cached state is not
+valid JSON - Import a backup or re-save`), not replayed, and **kept** (the action
+never unsets a global). The only other C#-built JSON is the tiny command broadcast
+and the error shapes. The broadcast comes **before** the cache write, so a broadcast
+that fails (an exception in `WebsocketBroadcastJson`) never leaves a saved state
+behind that no client has seen.
 
 `{"type":"vdo:sync:empty"}` tells a page that `VDO Sync` ran and nothing is saved yet
 (a fresh install), so it can stop waiting for a reply instead of guessing; the control

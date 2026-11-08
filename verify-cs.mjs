@@ -201,6 +201,39 @@ async function main() {
       }
     }
 
+    // ── 5. the strict validator (GRN-07) ───────────────────────────────────────────
+    console.log('\n[5] strict JSON-object validator in the push actions');
+    const SPLICES = ['{not json}', '{"enabled":true,"room":"evil"},"type":"x"}', '{"enabled":true,"room":"evil"},"type":"x","pad":{}', '{"a":1,"a":2}', '{"a":1,"\\u0061":2}', '[1,2]', '"x"'];
+    for (const [action, name, cache, errType] of [['vdo-push', 'VDO Push', 'vdo.state', 'vdo:error'], ['discord-voice-push', 'Discord Voice Push', 'discord.state', 'discord:voice:error']]) {
+      for (const bad of SPLICES) {
+        r = await run(action, { args: { payload: bad }, vars: [[action === 'vdo-push', cache, action === 'vdo-push' ? VDO_TXT : DISC_TXT]] });
+        const prior = action === 'vdo-push' ? VDO_TXT : DISC_TXT;
+        check(`${name}: rejects ${bad.length > 44 ? bad.slice(0, 44) + '…' : bad}: not cached (the earlier state stays), an error frame, no update frame`,
+          r.result === false && r.vars[cache] === prior && r.json.some((j) => j && j.type === errType && /rejected, NOT cached/.test(j.message || ''))
+          && !r.json.some((j) => j && /update$/.test(j.type || '')), JSON.stringify(r.frames).slice(0, 200));
+      }
+    }
+    const rows = fuzzRows();
+    const file = join(tmp, 'fuzz.tsv');
+    writeFileSync(file, rows.map((x) => x.exp + '\t' + b64(x.s)).join('\n') + '\n');
+    await cmd('FUZZ ' + file, (l) => /^FUZZED|^ERR/.test(l));
+    const got = readFileSync(file + '.result', 'utf8');
+    const mism = [];
+    rows.forEach((x, i) => { if (got[i] !== x.exp) mism.push({ i, exp: x.exp, got: got[i], s: x.s.slice(0, 80) }); });
+    check(`the validator agrees with JSON.parse (+ top-level object, no duplicate keys, depth 32) on ${rows.length} fuzz cases`, mism.length === 0,
+      `${mism.length} mismatches, first: ${JSON.stringify(mism[0])}`);
+    for (const label of ['\u0000', '\u001f', '\\u12G4']) {
+      // sanity of the harness itself: a payload with a raw control character is invalid JSON
+      r = await run('vdo-push', { args: { payload: `{"a":"x${label}y"}` } });
+      check(`rejects a raw/invalid string escape (${JSON.stringify(label)})`, r.result === false && !('vdo.state' in r.vars));
+    }
+    r = await run('vdo-sync', { vars: [[true, 'vdo.state', SPLICES[1]], [false, 'discord.state', DISC_TXT]] });
+    check('Sync with a corrupt cached vdo.state: vdo:error ("cached state is not valid JSON"), the cache is KEPT, the Discord replay still goes out',
+      r.json.some((j) => j && j.type === 'vdo:error' && /not valid JSON/.test(j.message || '')) && r.vars['vdo.state'] === SPLICES[1] && r.json.some((j) => j && j.type === 'discord:voice:update'), JSON.stringify(r.frames).slice(0, 220));
+    r = await run('vdo-sync', { vars: [[true, 'vdo.state', VDO_TXT], [false, 'discord.state', SPLICES[0]]] });
+    check('Sync with a corrupt cached discord.state: discord:voice:error, the cache is KEPT, the vdo replay still goes out',
+      r.json.some((j) => j && j.type === 'discord:voice:error' && /not valid JSON/.test(j.message || '')) && r.vars['discord.state'] === SPLICES[0] && r.json.some((j) => j && j.type === 'vdoninja:update')
+      && !r.trace.some((t) => /^Unset:/.test(t)), JSON.stringify(r.frames).slice(0, 220));
   } finally {
     try { child && child.kill(); } catch {}
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}

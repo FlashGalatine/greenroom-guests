@@ -18,6 +18,8 @@
 //                                  ?vdo=1 clears vdo.state too (a wiped or fresh SB)
 //       POST /mock/broadcast    -> broadcast the JSON body, as-is, as a General.Custom
 //                                  `data` object (malformed-frame tests)
+//       POST /mock/setcache     -> set the two caches to the raw strings in the JSON body
+//                                  {vdo?, discord?} (null clears one): a corrupt saved state
 //       /                       -> a landing page for quick manual testing
 //
 //     Test options (environment variables, all off by default):
@@ -65,8 +67,11 @@
 //                             {type:'vdo:sync:empty'}; an empty discord.state is skipped
 //       Discord Voice Command broadcast {type:'discord:voice:command', command, value}
 //                             (value stays a STRING, exactly like the C#)
-//     A missing or non-object payload is answered with a vdo:error / discord:voice:error frame
-//     and nothing is cached, as in the C#.
+//     A payload that is not ONE valid JSON object (no repeated key, nesting <= 32) is answered
+//     with a vdo:error / discord:voice:error frame "payload rejected, NOT cached: …" and nothing
+//     is cached, as in the C#; so is a missing payload. A cached state that is not valid JSON
+//     (inject one with POST /mock/setcache) is reported by VDO Sync as "cached state is not valid
+//     JSON - Import a backup or re-save", skipped, and KEPT; the other replay still runs.
 //     On `Subscribe` it enforces the real-SB lowercase `general` source key — a
 //     wrong-case subscribe is acked but receives nothing, exactly like real SB.
 //     DoAction is ALWAYS acked {status:'ok'} — ok means the action STARTED, not that it
@@ -81,6 +86,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { objectError } from './tools/json-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONTROL_DIR = resolve(__dirname, 'control');
@@ -231,13 +237,15 @@ function push(name, args) {
   let payload = args.payload;
   if (typeof payload !== 'string' || !payload) { console.log(`[mock] ${name}: no payload argument`); emitError(kind, `${name} called without a 'payload' argument`); return; }
   payload = payload.trim();
-  if (!payload.startsWith('{') || !payload.endsWith('}')) { console.log(`[mock] ${name}: payload is not a JSON object string`); emitError(kind, `${name} payload must be a JSON object string`); return; }
   if (WIRE_OBJECT) {
+    if (!payload.startsWith('{') || !payload.endsWith('}')) { console.log(`[mock] ${name}: payload is not a JSON object string`); emitError(kind, `${name} payload must be a JSON object string`); return; }
     caches[kind.key] = payload; // the old actions cached first…
     try { broadcastRaw(customEvent(updateData(kind, payload))); } // …so a broadcast that threw left the state behind
     catch (e) { console.log(`[mock] ${name}: broadcast failed (${e.message}) — cached anyway (old action)`); emitError(kind, e.message); }
     return;
   }
+  const why = objectError(payload); // the strict check: one JSON object, no repeated key, nesting <= 32
+  if (why) { console.log(`[mock] ${name}: payload rejected, NOT cached (${why})`); emitError(kind, `payload rejected, NOT cached: ${why}`); return; }
   broadcastRaw(customEvent(updateData(kind, payload))); // broadcast first, then cache
   caches[kind.key] = payload;
 }
@@ -258,7 +266,8 @@ function syncReplay(snap) {
   for (const [name, text, marker] of [['VDO Push', snap.vdo, EMPTY_MARKER], ['Discord Voice Push', snap.discord, false]]) {
     const kind = KINDS[name];
     try {
-      if (text) { broadcastRaw(customEvent(updateData(kind, text))); sent++; }
+      if (text && objectError(text)) { console.log(`[mock] VDO Sync: the cached ${kind.key} state is not valid JSON — reported, kept, not replayed`); emitError(kind, 'cached state is not valid JSON - Import a backup or re-save'); }
+      else if (text) { broadcastRaw(customEvent(updateData(kind, text))); sent++; }
       else if (marker) { broadcastRaw(customEvent({ type: 'vdo:sync:empty' })); sent++; }
     } catch (e) { console.log(`[mock] VDO Sync: ${e.message}`); emitError(kind, e.message); }
   }
@@ -375,6 +384,19 @@ const http = createServer(async (req, res) => {
       let data;
       try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('body is not JSON'); return; }
       broadcastRaw(customEvent(data));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+  if (path === '/mock/setcache' && req.method === 'POST') {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let d;
+      try { d = JSON.parse(body); } catch { res.writeHead(400); res.end('body is not JSON'); return; }
+      for (const k of ['vdo', 'discord']) if (k in d) caches[k] = typeof d[k] === 'string' ? d[k] : null;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });

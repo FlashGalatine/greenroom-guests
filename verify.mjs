@@ -378,7 +378,7 @@ async function main() {
         check('string mode: the Sync replay of that cached state is byte-identical too', rep.vdoninjaJson === labelled(OUT_OF_RANGE));
         strP.events.drain();
         const cached = JSON.stringify((await stateOf(strMock)).vdo);
-        for (const [args, re] of [[{}, /without a 'payload'/], [{ payload: 'nope' }, /must be a JSON object string/], [{ payload: '   ' }, /must be a JSON object string/]]) {
+        for (const [args, re] of [[{}, /without a 'payload'/], [{ payload: 'nope' }, /rejected, NOT cached/], [{ payload: '   ' }, /rejected, NOT cached/]]) {
           strC.doAction('VDO Push', args);
           const e = await strP.events.next(2000, byType('vdo:error'), 'argument error');
           check(`VDO Push ${JSON.stringify(args)}: a vdo:error frame, and the cached state is untouched`,
@@ -386,7 +386,42 @@ async function main() {
         }
         strC.doAction('Discord Voice Push', { payload: '[1]' });
         const de = await strP.events.next(2000, byType('discord:voice:error'), 'discord argument error');
-        check('Discord Voice Push with a non-object payload: a discord:voice:error frame, nothing cached', /must be a JSON object string/.test(de.message) && (await stateOf(strMock)).discord === null);
+        check('Discord Voice Push with a non-object payload: a discord:voice:error frame, nothing cached', /rejected, NOT cached/.test(de.message) && (await stateOf(strMock)).discord === null);
+        // GRN-07: a payload that is not ONE valid JSON object is refused before it is cached, whatever shape the damage has.
+        const SPLICES = ['{not json}', '{"enabled":true,"room":"evil"},"type":"x"}', '{"enabled":true,"room":"evil"},"type":"x","pad":{}',
+          '{"a":1,"a":2}', '{"a":1,"\\u0061":2}', '{"a":1}{"b":2}', '[1,2]', '"x"'];
+        const goodCache = JSON.stringify((await stateOf(strMock)).vdo);
+        const refused = [];
+        for (const bad of SPLICES) {
+          strP.events.drain();
+          strC.doAction('VDO Push', { payload: bad });
+          const e = await strP.events.next(2000, (d) => d.type === 'vdo:error' || d.type === 'vdoninja:update', 'verdict');
+          if (!(e.type === 'vdo:error' && /rejected, NOT cached/.test(e.message) && JSON.stringify((await stateOf(strMock)).vdo) === goodCache)) refused.push(bad);
+        }
+        check(`string mode: VDO Push refuses all ${SPLICES.length} damaged payloads (garbage, both splices, a repeated key, an escaped repeat, two objects, an array, a string): an error frame, the earlier state kept`,
+          refused.length === 0, JSON.stringify(refused));
+        strP.events.drain();
+        strC.doAction('Discord Voice Push', { payload: SPLICES[1] });
+        const dsp = await strP.events.next(2000, (d) => d.type === 'discord:voice:error' || d.type === 'discord:voice:update', 'discord verdict');
+        check('string mode: Discord Voice Push refuses a splice too', dsp.type === 'discord:voice:error' && /rejected, NOT cached/.test(dsp.message) && (await stateOf(strMock)).discord === null);
+        // …and a cached state that is not valid JSON (a corrupt persisted global) is reported, skipped and kept by VDO Sync,
+        // while the other replay still goes out.
+        const setCache = (body) => fetch(`${strMock.base}/mock/setcache`, { method: 'POST', body: JSON.stringify(body) }).then((r) => r.arrayBuffer());
+        await setCache({ vdo: SPLICES[1], discord: JSON.stringify(DISCORD_PAYLOAD) });
+        strP.events.drain();
+        strC.doAction('VDO Sync', {});
+        const sErr = await strP.events.next(2000, byType('vdo:error'), 'corrupt vdo cache error');
+        const sDis = await strP.events.next(2000, byType('discord:voice:update'), 'the discord replay');
+        check('string mode: Sync with a corrupt cached vdo.state reports "not valid JSON", replays nothing for it, KEEPS it, and the Discord replay still goes out',
+          /not valid JSON/.test(sErr.message) && sDis.discordVoiceJson === JSON.stringify(DISCORD_PAYLOAD) && (await stateOf(strMock)).vdo.unparseable === SPLICES[1]
+          && await rejects(strP.events.next(500, byType('vdoninja:update'), 'a stray vdo replay')));
+        await setCache({ vdo: JSON.stringify(VDO_PAYLOAD), discord: SPLICES[0] });
+        strP.events.drain();
+        strC.doAction('VDO Sync', {});
+        const sErr2 = await strP.events.next(2000, byType('discord:voice:error'), 'corrupt discord cache error');
+        const sVdo = await strP.events.next(2000, byType('vdoninja:update'), 'the vdo replay');
+        check('string mode: Sync with a corrupt cached discord.state reports it, KEEPS it, and the vdo replay still goes out',
+          /not valid JSON/.test(sErr2.message) && sVdo.vdoninjaJson === JSON.stringify(VDO_PAYLOAD) && (await stateOf(strMock)).discord.unparseable === SPLICES[0]);
       } finally { strP.close(); strC.close(); strMock.child.kill(); }
 
       const objMock = await startMockWith({ SB_WIRE: 'object' });
@@ -772,6 +807,8 @@ async function main() {
       vdoPush.includes('\\"vdoninjaJson\\":" + JsonStr(payload)') && !vdoPush.includes('\\"vdoninja\\":"'));
     check('vdo-push.cs: WebsocketBroadcastJson comes BEFORE SetGlobalVar (a failed broadcast never persists a state)',
       before(vdoPush, 'WebsocketBroadcastJson("{\\"type\\":\\"vdoninja:update\\"', 'SetGlobalVar("vdo.state"'));
+    check('vdo-push.cs: the payload is validated (ObjectError) before anything is broadcast or cached; a refusal says NOT cached',
+      before(vdoPush, 'string why = ObjectError(payload);', 'WebsocketBroadcastJson(') && vdoPush.includes('payload rejected, NOT cached: '));
     const dPush = await cs('discord-voice-push.cs');
     check('discord-voice-push.cs: NON-persisted SetGlobalVar("discord.state", payload, false)', dPush.includes('SetGlobalVar("discord.state", payload, false)'));
     check('discord-voice-push.cs: the state goes out as an escaped string field {"type":"discord:voice:update","discordVoiceJson":JsonStr(payload)}',
@@ -786,6 +823,17 @@ async function main() {
       && sync.includes('{\\"type\\":\\"vdo:sync:empty\\"}') && !sync.includes('\\"vdoninja\\":"') && !sync.includes('\\"discordVoice\\":"'));
     check('vdo-sync.cs: the two replays are separate try blocks (one failure never stops the other)',
       (sync.match(/\btry\b/g) || []).length >= 2 && sync.includes('Report("vdo:error", ex)') && sync.includes('Report("discord:voice:error", ex)'));
+    check('discord-voice-push.cs: the payload is validated (ObjectError) before anything is broadcast or cached; a refusal says NOT cached',
+      before(dPush, 'string why = ObjectError(payload);', 'WebsocketBroadcastJson(') && dPush.includes('payload rejected, NOT cached: '));
+    check('vdo-sync.cs: each cached blob is validated before it is replayed; an invalid one is reported and kept, never unset',
+      sync.includes('ObjectError(vdo)') && sync.includes('ObjectError(discord)') && sync.includes('cached state is not valid JSON - Import a backup or re-save') && !/Unset(Global)?Var/.test(sync));
+    {
+      // One validator, three copies (each action is pasted on its own): they must be the same text.
+      const VAL_BEGIN = '// ── Strict JSON check (RFC 8259), mscorlib only', VAL_END = '// ── end of the strict JSON check';
+      const valOf = async (f) => { const t = (await readFile(resolve(__dirname, 'actions', f), 'utf8')).replace(/\r\n/g, '\n'); const a = t.indexOf(VAL_BEGIN), b = t.indexOf(VAL_END); return a >= 0 && b > a ? t.slice(a, b) : null; };
+      const vals = [await valOf('vdo-push.cs'), await valOf('discord-voice-push.cs'), await valOf('vdo-sync.cs')];
+      check('TRIPWIRE: the strict JSON validator is present and identical in vdo-push.cs, discord-voice-push.cs and vdo-sync.cs', vals.every(Boolean) && vals[0] === vals[1] && vals[1] === vals[2], vals.map((v) => v && v.length).join(' / '));
+    }
     const cmd = await cs('discord-voice-command.cs');
     check('discord-voice-command.cs: broadcasts discord:voice:command', cmd.includes('discord:voice:command'));
     const launcher = await cs('discord-bridge-start.cs');
