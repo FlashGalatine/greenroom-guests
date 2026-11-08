@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.55] — 2026-11-08
+
+The invite builder now produces links whose options do what their labels say, each guest is asked for a name by default, and a slot can be pinned to one guest.
+
+### Fixed
+
+- **The default guest link makes each guest enter a display name.** It ends in a bare `&label`, so vdo.ninja asks every guest who opens it for a name, and they appear in the roster, the slot pickers, auto-add and the guest count. A new option, **ask each guest for a name**, is on by default (and on for a saved config that has no value for it); a label typed in the builder still wins for a single-guest link. The "No label: guests from this link can't be bound to a slot" warning now shows only when that option is off and the label is blank. A guest who cancels the prompt joins without a label, and the director pill now counts them ("2 guests · 1 unlabeled"; `director-min`'s status does too).
+- **The guest link keeps only options vdo.ninja applies on the guest's side.** Frame rate is now the soft `&maxframerate` (the old `&fps`, like `&width` and `&height`, was a strict camera requirement that could stop a guest's camera from starting), the bitrates are `&outboundvideobitrate` / `&outboundaudiobitrate` (the old ones only changed what the guest *receives*), and **no video / no audio** are now `&videodevice=0` / `&audiodevice=0` and relabelled "guest sends no video / audio" (the old flags only stopped the guest from watching others: **if you had them ticked, new links now stop the guest sending**; a note shows until you change them). Width, height, codec, stereo, require approval and room cap are gone from the builder: the link either did nothing useful with them (stereo only turned off echo cancellation) or implied an access control it does not provide. A saved config that still holds them keeps them unused.
+- **Numbers are checked.** A frame rate or bitrate that is not a whole number above zero (`29.97`, `1920x1080`, `30fps`, `0`) is left out of the link and the box is marked, instead of being quietly rewritten. Extra flags are cleaned up (a leading `?` or `&` and spaces removed, a `#` cuts the rest, each flag gets exactly one `&`) and script and style flags are dropped.
+- **Links for several guests no longer share a label.** The label and push ID boxes say they belong to one guest, **new guest link** fills a unique label and a random push ID, and **Copy** empties both so the next link starts blank.
+- **A slot can be pinned to one guest.** The slot row has a **pin** button that stores the guest's current push ID (`pushID`, optional, documented in PROTOCOL.md). A pin is offered once the director has reported the guest, and holds only while that guest keeps the same ID (give them a link with its own `&push`, e.g. from **new guest link**; otherwise a rejoin gets a new ID and the pinned slot shows "pinned: not in room" until you unpin). A pinned slot follows only that stream, so someone else who picks the same label cannot take it over, and **unpin** (or choosing another label) goes back to following the label. Unpinned slots follow their label as before. `director-min` honours pins too.
+- **The room name vdo.ninja will use is shown under the Room box** (`vdo.ninja room: my_room`), with a warning when it differs from what you typed, when it is only underscores (a name written in a script vdo.ninja strips, such as `部屋`), or when it is longer than 30 characters. Save asks first when the name is only underscores and there is no password. This is display only: every link still uses the room as you typed it.
+- The comment about the director's `&novideo&noaudio` no longer says it avoids a camera prompt.
+
+### Added
+
+- Tests: `verify` gains the pin (a pinned slot ignores a same-label impostor, an unpinned one keeps auto-follow), unlabeled-count and room-name checks; `verify:render` has a new section R17 (the default `&label`, sender-side flags, strict numbers, extra flags, per-guest links, the unlabeled pill, pins, the room name). `RENDER_ONLY=invite` runs it alone, `R17_ONLY=a,b` picks sections. The mock director takes `?unlabeled=N`.
+
+**Also:** copying a link never asks a question or alerts, even on a page holding a newer config; a rejected number keeps its red mark when the builder is redrawn; the pill's full text is in its tooltip.
+
+**Not in this release (tracked):** the checks in a throwaway vdo.ninja room (that a bare `&label` prompts the guest, that a guest who cancels shows as unlabeled, that an already-used push ID is rejected, that the room server does not count the overlay viewers) cannot be run offline; the README text for the removed options and GRN-187's mirror recheck against the captured vdo.ninja mirror ride the docs sprint. GRN-187's exact-link cases (the hash links for a spaced room and password and for `café`, the plaintext `a&b c` password, the capture flags) are in `verify:render` R17.
+
+**Deploy:** copy the `control/` folder, reload the dock and refresh the `director-min` source (it honours slot pins), and copy fresh invite links for upcoming guests. Links already sent keep working. `verify` 266/266, `verify:render` 303/303.
+
 ## [1.0.52] — 2026-11-08
 
 Every vdo.ninja address the kit builds (the guest views in OBS, the hidden director, the invite and manage links) now goes through one helper, so the room password and the view flags can no longer be handled differently in different places.
@@ -341,6 +365,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.55]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.52...v1.0.55
 [1.0.52]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.49...v1.0.52
 [1.0.49]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.46...v1.0.49
 [1.0.46]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.43...v1.0.46
