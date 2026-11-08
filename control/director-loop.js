@@ -31,7 +31,11 @@
 
     let url = '', ticker = null, srcSetAt = 0, lastReplyAt = 0, answered = false, retryN = 0, nextRetryAt = 0, hinted = false, wasSilent = false, started = false;
     let sess = freshSession();
-    function freshSession() { return { startedAt: now(), seen: new Set() }; }
+    // startedAt stays null until the first RECOGNISED reply of this load: a director that is slow to answer still gets its whole
+    // settle window, and an unrecognised reply does not start it.
+    function freshSession() { return { startedAt: null, seen: new Set() }; }
+    const hasLoadEvents = !!(o.iframe && typeof o.iframe.addEventListener === 'function');
+    let loaded = !hasLoadEvents; // the iframe has loaded the CURRENT src (the previous document must not answer into the new session)
 
     function makeTicker(fn, ms) {
       if (o.makeTicker) return o.makeTicker(fn, ms);
@@ -59,20 +63,24 @@
       post();
       const t = now();
       const since = t - Math.max(lastReplyAt, srcSetAt);
-      if (!answered && !hinted && since >= hintMs) { hinted = true; if (hooks.hint) hooks.hint(); }
       if (since >= silentMs && !wasSilent) { wasSilent = true; if (hooks.silent) hooks.silent(); } // stays set until a reply
+      if (!answered && !hinted && since >= hintMs) { hinted = true; if (hooks.hint) hooks.hint(wasSilent); }
       if (since >= retryAfterMs && t >= nextRetryAt) reload();
     }
 
-    function reload() {
+    // manual: an operator's Save (nudge) reloads the frame without counting as a retry or moving the backoff along
+    function reload(manual) {
       if (!url) return;
-      retryN++;
-      nextRetryAt = now() + backoffMs[Math.min(retryN - 1, backoffMs.length - 1)];
+      if (!manual) {
+        retryN++;
+        nextRetryAt = now() + backoffMs[Math.min(retryN - 1, backoffMs.length - 1)];
+      }
       sess = freshSession(); // a reloaded director's first (empty or partial) reply must not blank what was seen before
       srcSetAt = now();
       answered = false; // nothing has answered since the frame was pointed at the room again
+      loaded = !hasLoadEvents;
       hinted = false;
-      if (hooks.retrying) hooks.retrying(retryN);
+      if (manual) { if (hooks.connecting) hooks.connecting(); } else if (hooks.retrying) hooks.retrying(retryN);
       const target = url;
       o.iframe.src = 'about:blank';
       timeout(() => { if (url === target) o.iframe.src = target; }, 50);
@@ -80,11 +88,15 @@
 
     function onMessage(e) {
       if (!url || !o.iframe || e.source !== o.iframe.contentWindow || !origins.has(e.origin)) return;
+      // contentWindow is the same object before and after a navigation, so "the iframe's own window" cannot tell the previous
+      // document from the new one: ignore replies until the new src has loaded (or 5 s have passed, in case 'load' never fires).
+      if (!loaded && now() - srcSetAt < 5000) return;
       const d = e.data;
       if (!d || typeof d !== 'object' || !('guestList' in d)) return;
       lastReplyAt = now(); answered = true;
       retryN = 0; nextRetryAt = 0; wasSilent = false;
       if (!VdoParse.guestListOk(d)) { if (hooks.unrecognised) hooks.unrecognised(d); return; }
+      if (sess.startedAt === null) sess.startedAt = now(); // the settle window starts at the first recognised reply
       if (hooks.reply) hooks.reply(VdoParse.parseGuestList(d), d);
     }
 
@@ -92,6 +104,7 @@
       stop(true);
       url = u; srcSetAt = now(); lastReplyAt = 0; answered = false; retryN = 0; nextRetryAt = 0; hinted = false; wasSilent = false;
       sess = freshSession();
+      loaded = !hasLoadEvents;
       o.iframe.src = u;
       if (hooks.connecting) hooks.connecting();
       ticker = makeTicker(tick, pollMs);
@@ -102,9 +115,17 @@
       url = '';
       if (!keepFrame) o.iframe.src = 'about:blank';
     }
-    // Something asked to look again (the room was saved with the same URL): reload only if nothing has ever answered.
-    function nudge() { if (url && !answered) { nextRetryAt = 0; reload(); } }
+    // The room was saved again with the same URL: if the frame has gone quiet (it never answered, or answered and then stopped),
+    // look again now. A young connection is left alone, and this is not a retry (no backoff step, no "retrying").
+    function nudge() { if (url && wasSilent) reload(true); }
 
+    if (hasLoadEvents) {
+      o.iframe.addEventListener('load', () => {
+        // only the load of the CURRENT src counts (about:blank loads in between do not)
+        const attr = typeof o.iframe.getAttribute === 'function' ? o.iframe.getAttribute('src') : url;
+        if (url && attr === url) loaded = true;
+      });
+    }
     if (!started && typeof window !== 'undefined' && window.addEventListener) {
       started = true;
       window.addEventListener('online', () => { if (url && (wasSilent || !answered)) { nextRetryAt = 0; reload(); } });

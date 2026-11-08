@@ -42,7 +42,9 @@
     if (!gl || typeof gl !== 'object' || Array.isArray(gl)) return false;
     const keys = Object.keys(gl);
     if (!keys.length) return true;
-    return keys.some((k) => gl[k] && typeof gl[k] === 'object' && String(gl[k].streamID ?? '').trim() !== '');
+    // At least one entry has a streamID AND a label property (the director's own entry has label: ''). A reply where only
+    // one of the two was renamed would otherwise parse to an empty roster and read as "everyone left".
+    return keys.some((k) => gl[k] && typeof gl[k] === 'object' && 'label' in gl[k] && String(gl[k].streamID ?? '').trim() !== '');
   }
 
   // Which live stream does a label follow? A unique label follows its (one) stream. A label shared by several guests
@@ -78,8 +80,29 @@
     const live = byLabel && byLabel.get(label);
     if (live) { sess.seen.add(label); return live; }
     if (sess.seen.has(label)) return '';
-    return now - sess.startedAt < settleMs ? String(heldID || '') : '';
+    return (sess.startedAt == null || now - sess.startedAt < settleMs) ? String(heldID || '') : '';
   }
 
-  globalThis.VdoParse = { parseGuestList, guestListOk, resolveSlot, resolveSlotID, duplicateLabels, SETTLE_MS: 10000 };
+  // The whole rule in one place (what the pages call): which stream does this slot carry after a director reply?
+  //   • no label: none; a pinned stream that is in the room under the label: that one
+  //   • the stream the slot already holds is still among the guests using the label: it stays (a shared label stays with it)
+  //   • the label is not in the room: seen this load and now lost → none at once; not reported yet → the held stream while
+  //     the load is settling (sess.startedAt is set by the first recognised reply), else none
+  //   • the label is in the room but only under OTHER streams: while the load is settling and the label has not been
+  //     confirmed, the held stream stays (a newcomer reported first must not take a guest who is on air); after that a lone
+  //     stream is followed (a rejoin under a new ID) and a shared label gives none (fail closed)
+  function resolveStream(roster, label, heldID, pinnedID, sess, now, settleMs) {
+    if (!label) return '';
+    const held = String(heldID || '');
+    const matches = (roster || []).filter((g) => g && g.label === label);
+    const settling = sess.startedAt == null || now - sess.startedAt < settleMs;
+    if (pinnedID && matches.some((g) => g.streamID === pinnedID)) { sess.seen.add(label); return pinnedID; }
+    if (held && matches.some((g) => g.streamID === held)) { sess.seen.add(label); return held; }
+    if (!matches.length) return sess.seen.has(label) ? '' : (settling ? held : '');
+    if (held && !sess.seen.has(label) && settling) return held;
+    sess.seen.add(label);
+    return matches.length === 1 ? matches[0].streamID : '';
+  }
+
+  globalThis.VdoParse = { parseGuestList, guestListOk, resolveSlot, resolveSlotID, resolveStream, duplicateLabels, SETTLE_MS: 10000 };
 })();

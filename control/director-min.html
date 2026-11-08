@@ -123,20 +123,23 @@
     extraOrigins: window.__VDO_DIRECTOR_EXTRA_ORIGINS || [], timing: window.__VDO_DIRECTOR_TIMING,
     hooks: {
       connecting: () => show(`room ${cfg.room} · director connecting…`),
-      hint: () => show(`room ${cfg.room} · director still connecting… check the room, the password and that vdo.ninja is reachable`),
-      // Quiet for about 3 polls: keep the last resolved stream IDs (a push never blanks them), say so.
-      silent: () => { hasRoster = false; show('director not responding'); },
-      retrying: () => show('director not responding, retrying'),
-      unrecognised: () => show('director: reply unrecognised - check vdo.ninja version'),
+      hint: (silent) => { directorNote = silent ? 'director not responding · check the room, the password and that vdo.ninja is reachable' : `room ${cfg.room} · director still connecting… check the room, the password and that vdo.ninja is reachable`; show(directorNote); },
+      // Quiet for about 3 polls: keep the last resolved stream IDs (a push never blanks them), say so. The note stays on
+      // screen (other status updates keep it) until a recognised reply arrives.
+      silent: () => { hasRoster = false; directorNote = 'director not responding'; show(directorNote); },
+      retrying: () => { directorNote = 'director not responding, retrying'; show(directorNote); },
+      unrecognised: () => { directorNote = 'reply unrecognised - check vdo.ninja version'; show(directorNote); },
       reply: (r) => {
         roster = r;
         hasRoster = true;
+        directorNote = '';
         show(`room ${cfg.room} · ${roster.length} guest(s)`);
         runAutoAdd(); // new label in the room → placeholder nameplate entry
         assembleAndPush(true); // auto-follow: re-resolve every poll
       },
     },
   });
+  let directorNote = ''; // a director problem (quiet, unrecognised reply) that status updates must not paint over
   let roster = [];
   let hasRoster = false;
   // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
@@ -223,7 +226,9 @@
   // The status for a page that holds its config: idle when there is no director to run, else
   // the room and how many guests the last poll saw.
   function showSteady() {
-    if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)`);
+    if (directorNote && frameUrl) show(directorNote);
+    else if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)`);
+    else if (cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/');
     else show(cfg.enabled ? 'no room configured' : 'director disabled');
   }
   // Re-ask for the saved config until it arrives: after 2, 4, 8 s, then every 15 s.
@@ -261,10 +266,8 @@
       // the held resolution is kept.
       let streamID;
       if (!s.label) streamID = '';
-      else if (hasRoster) {
-        const live = VdoParse.resolveSlot(roster, s.label, s.streamID, '');
-        streamID = VdoParse.resolveSlotID(s.label, s.streamID, new Map([[s.label, live]]), directorLoop.sess, nowMs, VdoParse.SETTLE_MS);
-      } else streamID = String(s.streamID || '');
+      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, '', directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
+      else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
         slot: i + 1,
@@ -498,6 +501,7 @@
     if (url === frameUrl) return;
     frameUrl = url;
     if (url) {
+      roster = []; hasRoster = false; directorNote = ''; // nothing from a previous room, password or load is current for this one
       directorLoop.start(url); // points the frame at the room, starts the poll, begins a fresh settle session
     } else {
       directorLoop.stop();

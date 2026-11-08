@@ -1695,7 +1695,8 @@ async function main() {
         await wait(min, () => /1 guest/.test(document.getElementById('status')?.textContent || ''), null, 8000); // only BRAVO has been reported
         const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?coldstart=1'));
         await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
-        await sleep(2500);
+        await wait(ctl, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000); // its own (cold) director has answered
+        await sleep(1500);
         await ctl.close();
         await sleep(1500);
         const ps = await pushPayloads(x);
@@ -1711,9 +1712,10 @@ async function main() {
         await sleep(300);
         await x.api.clear();
         const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?renamed=1'));
+        await ctl.addInitScript('window.__VDO_SETTLE_MS = 1500;'); // so the check below happens AFTER the settle window: only hasRoster staying false keeps the IDs then
         await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
         const said = await wait(ctl, () => /reply unrecognised/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
-        await sleep(3000);
+        await sleep(6000);
         const ps = await pushPayloads(x);
         const st = await x.api.state();
         check('R13c: a director reply with renamed fields is reported ("reply unrecognised"), pushes nothing, and leaves every resolved slot as it was',
@@ -1799,7 +1801,84 @@ async function main() {
         await sleep(3500);
         const st = await p.evaluate(() => ({ pill: document.getElementById('vdoStatus')?.textContent || '', frame: document.getElementById('vdoDirector')?.getAttribute('src') || '', warn: !document.getElementById('cryptoWarn')?.hidden }));
         check('R13h: on a page that is not a secure context the director is NOT started (the frame stays blank, the pill says why) and the banner shows', /secure page/i.test(st.pill) && /about:blank|^$/.test(st.frame) && st.warn, JSON.stringify(st));
+        // with no director reply at all, clearing a slot persists an empty stream ID and blanks its overlay (GRN-123)
+        const ov = await newPage(browser, { width: 640, height: 360 });
+        await ov.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(ov, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 8000);
+        await p.selectOption('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-label-sel', '');
+        const blanked = await wait(ov, () => (document.getElementById('frame')?.getAttribute('src') || '') === 'about:blank', null, 8000);
+        const stNone = await x.api.state();
+        check('R13i: with NO director reply at all, choosing "none" for slot 1 persists an empty stream ID for it and its overlay goes to about:blank', blanked && stNone.vdo && stNone.vdo.slots[0].streamID === '' && stNone.vdo.slots[0].label === '', JSON.stringify({ blanked, slot: stNone.vdo && stNone.vdo.slots[0] }));
+        await ov.close();
         await p.close();
+      }
+      // (i) A SLOW director: its first reply comes after more than the settle window, and is partial. The window starts at that reply.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        await x.api.clear();
+        const min = await newPage(browser, { width: 480, height: 120 }, mockDir(x, '?fixed=1&delay=12000&late=ALPHA:60000'));
+        await min.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(min, () => /1 guest/.test(document.getElementById('status')?.textContent || ''), null, 20000); // the first (partial) reply, ~12 s in
+        await sleep(6000);
+        const ps = await pushPayloads(x);
+        const st = await x.api.state();
+        check('R13j: a director whose first reply is partial and arrives after 12 s (longer than the 10 s settle window) still cannot blank ALPHA: the window starts at that first reply',
+          blankedBy(ps).length === 0 && st.vdo.slots[0].streamID === 'aaa111', JSON.stringify({ blanked: blankedBy(ps).length, id: st.vdo.slots[0].streamID }));
+        await min.close();
+      }
+      // (j) Relabelling a slot while the director is quiet never carries the previous guest's stream over.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const ctl = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, '?fixed=1&silentAfter=4500'));
+        await ctl.addInitScript('window.__VDO_DIRECTOR_TIMING = { silentMs: 2500, retryAfterMs: 60000, backoffMs: [60000], hintMs: 60000 };');
+        await ctl.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(ctl, () => /not responding/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 20000);
+        await x.api.clear();
+        await ctl.selectOption('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel', 'ALPHA');
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        check('R13k: slot 2 (BRAVO, bbb222) relabelled to ALPHA while the director is quiet pushes label ALPHA with an EMPTY stream ID, never bbb222 under the new name',
+          !!last && last.slots[1].label === 'ALPHA' && last.slots[1].streamID === '', JSON.stringify(last && last.slots[1]));
+        await ctl.close();
+      }
+      // (k) director-min says the same things as the dock, and a quiet-director note survives other status updates.
+      {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const min = await newPage(browser, { width: 480, height: 120 }, mockDir(x, '?fixed=1&silentAfter=4500'));
+        await min.addInitScript('window.__VDO_DIRECTOR_TIMING = { silentMs: 2500, retryAfterMs: 60000, backoffMs: [60000], hintMs: 60000 };');
+        await min.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(min, () => /not responding/.test(document.getElementById('status')?.textContent || ''), null, 20000);
+        await x.api.broadcast({ type: 'vdoninja:update', vdoninja: { ...SEED_R, directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha', socials: [] }] } }); // something else repaints the status
+        await sleep(1500);
+        const txt = await min.evaluate(() => document.getElementById('status')?.textContent || '');
+        check('R13l: director-min keeps "director not responding" on screen when another page\'s push is adopted meanwhile', /not responding/.test(txt) && !/\d+ guest/.test(txt), txt);
+        await min.close();
+        const y = await startExtra({});
+        y.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const minR = await newPage(browser, { width: 480, height: 120 }, mockDir(y, '?renamed=1'));
+        await minR.goto(y.api.base + '/control/director-min.html?sbport=' + y.ws, { waitUntil: 'load' });
+        const saidR = await wait(minR, () => /reply unrecognised/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+        const txtR = await minR.evaluate(() => document.getElementById('status')?.textContent || '');
+        await minR.close();
+        const z = await startExtra({});
+        z.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_R) });
+        await sleep(300);
+        const minI = await newPage(browser, { width: 480, height: 120 }, mockDir(z, '?fixed=1'));
+        await minI.addInitScript('Object.defineProperty(window, "isSecureContext", { value: false });');
+        await minI.goto(z.api.base + '/control/director-min.html?sbport=' + z.ws, { waitUntil: 'load' });
+        await sleep(3500);
+        const txtI = await minI.evaluate(() => document.getElementById('status')?.textContent || '');
+        check('R13m: director-min also reports an unrecognised reply (once, no doubled prefix) and, on an insecure page, why it has no director (not "no room configured")',
+          saidR && !/director: director/.test(txtR) && /secure page/i.test(txtI) && !/no room configured/.test(txtI), JSON.stringify({ txtR, txtI }));
+        await minI.close();
       }
     }
 

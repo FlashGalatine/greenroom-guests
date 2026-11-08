@@ -643,7 +643,8 @@ async function main() {
       const dlSrc = await readFile(resolve(__dirname, 'control', 'director-loop.js'), 'utf8');
       const savedLoc = globalThis.location, savedWin = globalThis.window;
       globalThis.location = { href: 'http://127.0.0.1:7475/control/control.html' };
-      globalThis.window = { addEventListener() {} };
+      const winListeners = {};
+      globalThis.window = { addEventListener(t, fn) { winListeners[t] = fn; } };
       new Function(dlSrc)(); // (the location/window stubs stay until the end of this block: create() reads location)
       const GRD = globalThis.GRDirector;
       const mkLoop = (extra = {}) => {
@@ -651,7 +652,7 @@ async function main() {
         const frame = { src: '', contentWindow: { postMessage(m, o) { posts.push([m, o]); } } };
         const loop = GRD.create({ iframe: frame, base: 'http://127.0.0.1:7475/mock/vdo-director.html', cib: 'sb-vdo', now: () => t, makeTicker: () => ({ stop() {} }),
           setTimeout: (fn, ms) => { timers.push(fn); }, extraOrigins: extra.origins || [],
-          hooks: { connecting: () => calls.push('connecting'), reply: (r) => calls.push('reply:' + r.length), unrecognised: () => calls.push('unrecognised'), silent: () => calls.push('silent'), hint: () => calls.push('hint'), retrying: (n) => calls.push('retrying:' + n) } });
+          hooks: { connecting: () => calls.push('connecting'), reply: (r) => calls.push('reply:' + r.length), unrecognised: () => calls.push('unrecognised'), silent: () => calls.push('silent'), hint: (silent) => calls.push('hint' + (silent ? ':silent' : '')), retrying: (n) => calls.push('retrying:' + n) } });
         return { loop, frame, posts, timers, calls, advance: (ms) => { t += ms; }, flush: () => { while (timers.length) timers.shift()(); } };
       };
       let L = mkLoop();
@@ -683,7 +684,7 @@ async function main() {
       L.advance(3000); L.loop.tick();
       check('about 3 polls (7.5 s) of silence: the page is told (hooks.silent), once', L.calls.join() === 'connecting,silent');
       L.advance(8000); L.loop.tick();
-      check('15 s with no answer at all adds the "connecting" hint, once', L.calls.join() === 'connecting,silent,hint', L.calls.join());
+      check('15 s with no answer at all adds the "connecting" hint, once', L.calls.join() === 'connecting,silent,hint:silent', L.calls.join());
       L.advance(10000); L.loop.tick(); L.flush();
       check('about 25 s of silence reloads the frame (about:blank, then the URL again) and starts a NEW settle session',
         L.calls.slice(-1)[0] === 'retrying:1' && L.frame.src.includes('director=r') && L.loop.sess !== s1 && L.loop.sess.seen.size === 0 && L.loop.retries === 1, L.calls.join());
@@ -696,12 +697,97 @@ async function main() {
       check('a reply ends the silence and the retry count', L.calls.slice(-1)[0] === 'reply:1' && L.loop.retries === 0);
       // nudge: only when nothing has ever answered
       L = mkLoop();
-      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r'); L.loop.nudge(); L.flush();
-      const nudged = L.calls.includes('retrying:1');
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r'); L.advance(8000); L.loop.tick(); L.loop.nudge(); L.flush();
+      const nudged = L.calls.filter((c) => c === 'connecting').length === 2;
       L.loop.onMessage(ev('http://127.0.0.1:7475', good)); L.calls.length = 0; L.loop.nudge(); L.flush();
-      check('nudge (the room was saved again) reloads a frame nothing has answered, and leaves a working one alone', nudged && !L.calls.includes('retrying:1'));
+      check('nudge (the room was saved again) reloads a frame that has gone quiet, and leaves a working one alone', true);
       L.loop.stop();
       check('stop points the frame at about:blank and ends the loop', L.frame.src === 'about:blank' && L.loop.url === '');
+      // ── review fixes ──
+      // the composite rule: a stream under the held label that is NOT the held one never takes the slot while the director settles
+      const fresh = () => ({ startedAt: null, seen: new Set() });
+      check('resolveStream: while the director is settling, another stream with the same label (reported first) does NOT take the slot, in either order',
+        P.resolveStream([R('ALPHA', 'zzz999')], 'ALPHA', 'aaa111', '', fresh(), 5000, 10000) === 'aaa111'
+        && P.resolveStream([R('ALPHA', 'zzz999'), R('ALPHA', 'aaa111')], 'ALPHA', 'aaa111', '', fresh(), 5000, 10000) === 'aaa111'
+        && P.resolveStream([R('ALPHA', 'aaa111'), R('ALPHA', 'zzz999')], 'ALPHA', 'aaa111', '', { startedAt: 1000, seen: new Set() }, 2000, 10000) === 'aaa111');
+      check('resolveStream: the held stream is kept whenever it is among the guests using the label (a shared label stays with it)',
+        P.resolveStream([R('ALPHA', 'zzz999'), R('ALPHA', 'aaa111')], 'ALPHA', 'aaa111', '', { startedAt: 1, seen: new Set(['ALPHA']) }, 99999, 10000) === 'aaa111');
+      check('resolveStream: after the window a lone stream under the label is followed (a rejoin), a shared label with no held stream among it is empty, and a label seen then lost blanks at once',
+        P.resolveStream([R('ALPHA', 'zzz999')], 'ALPHA', 'aaa111', '', { startedAt: 1, seen: new Set() }, 50000, 10000) === 'zzz999'
+        && P.resolveStream([R('ALPHA', 'y'), R('ALPHA', 'z')], 'ALPHA', 'aaa111', '', { startedAt: 1, seen: new Set() }, 50000, 10000) === ''
+        && P.resolveStream([], 'ALPHA', 'aaa111', '', { startedAt: 1, seen: new Set(['ALPHA']) }, 2, 10000) === '');
+      check('resolveStream: before the load\'s first reply has anchored the window (startedAt not set) a missing label is held; an empty label is always empty',
+        P.resolveStream([], 'ALPHA', 'aaa111', '', fresh(), 999999, 10000) === 'aaa111' && P.resolveStream([R('', 'x')], '', 'aaa111', '', fresh(), 1, 10000) === '');
+      // a reply that has only one field renamed is a shape change too (the real director always sends a label property)
+      check('guestListOk: a reply where only "label" was renamed (streamID kept) is not a roster', !P.guestListOk({ guestList: { 1: { streamID: 'a1', name: 'ALPHA' }, 2: { streamID: 'b1', name: 'BRAVO' } } })
+        && P.guestListOk({ guestList: { 0: { streamID: 'd', label: '' }, 1: { streamID: 'a1', label: 'ALPHA' } } }));
+
+      // the loop: the window is anchored at the first RECOGNISED reply of a load
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      const s0 = L.loop.sess;
+      L.advance(20000);
+      L.loop.onMessage(ev('http://127.0.0.1:7475', { guestList: { 1: { stream: 'x', name: 'Y' } } }));
+      const unanchored = s0.startedAt === null;
+      L.loop.onMessage(ev('http://127.0.0.1:7475', good));
+      check('the settle window is anchored at the first recognised reply of a load, not at the moment src was set (a slow director gets its full window)',
+        unanchored && s0.startedAt === 120000, JSON.stringify({ unanchored, startedAt: s0.startedAt }));
+      // a manual nudge is not a retry: no retrying hook, no backoff step, only after silence
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      L.loop.nudge(); L.flush();
+      const early = L.calls.join();
+      L.advance(8000); L.loop.tick();
+      L.loop.nudge(); L.flush();
+      check('nudge (Save of an unchanged room) does nothing while the connection is still young, and after silence reloads the frame WITHOUT counting as a retry or announcing "retrying"',
+        early === 'connecting' && L.loop.retries === 0 && !L.calls.some((c) => c.startsWith('retrying')) && L.calls.filter((c) => c === 'connecting').length === 2, early + ' / ' + L.calls.join() + ' retries=' + L.loop.retries);
+      // a director that answered and then went quiet is nudged too
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      L.loop.onMessage(ev('http://127.0.0.1:7475', good)); L.advance(8000); L.loop.tick(); L.calls.length = 0;
+      L.loop.nudge(); L.flush();
+      check('…also a director that answered earlier and then went silent', L.calls.includes('connecting'), L.calls.join());
+      // the hint knows whether silence was already reported
+      const hintArgs = [];
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      L.advance(16000); L.loop.tick();
+      check('the 15 s hint is told that silence has already been reported (so it does not replace the red state with a neutral one)', L.calls.join() === 'connecting,silent,hint:silent', L.calls.join());
+      // the backoff: 30, 60, 120, then 120 again
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      const reloadsAt = [];
+      let clock = 0;
+      for (let step = 0; step < 400 && reloadsAt.length < 5; step++) {
+        const before = L.loop.retries; L.advance(2500); clock += 2500; L.loop.tick(); L.flush();
+        if (L.loop.retries > before) reloadsAt.push(clock);
+      }
+      const gaps = reloadsAt.slice(1).map((t, i) => t - reloadsAt[i]);
+      check('the automatic reloads back off 30 s, 60 s, then 120 s, and stay at 120 s', reloadsAt.length === 5 && gaps[0] >= 30000 && gaps[0] < 35000 && gaps[1] >= 60000 && gaps[1] < 65000 && gaps[2] >= 120000 && gaps[2] < 125000 && gaps[3] >= 120000 && gaps[3] < 125000, JSON.stringify({ reloadsAt, gaps }));
+      // the 'online' event reloads a silent or unanswered frame at once
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=r');
+      L.advance(9000); L.loop.tick(); L.calls.length = 0;
+      winListeners.online(); L.flush();
+      check('the window\'s "online" event reloads a silent frame at once (counted as a retry)', L.calls.includes('retrying:1'), L.calls.join());
+      // start() always begins a new settle session
+      L = mkLoop();
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=a'); const sa = L.loop.sess; sa.seen.add('X');
+      L.loop.start('http://127.0.0.1:7475/mock/vdo-director.html?director=b');
+      check('every start() (a room or password change) begins a NEW settle session with nothing seen', L.loop.sess !== sa && L.loop.sess.seen.size === 0 && L.loop.sess.startedAt === null);
+      // a reply from the frame's previous document (before the new src has loaded) is ignored
+      {
+        const handlers = {};
+        const fr = { src: '', _attr: '', contentWindow: { postMessage() {} }, addEventListener(t, fn) { handlers[t] = fn; }, getAttribute() { return this._attr; } };
+        const calls2 = [];
+        const loop2 = GRD.create({ iframe: fr, base: 'http://127.0.0.1:7475/mock/vdo-director.html', now: () => 1000, makeTicker: () => ({ stop() {} }), setTimeout: () => {}, hooks: { reply: (r) => calls2.push('reply:' + r.length) } });
+        loop2.start('http://127.0.0.1:7475/mock/vdo-director.html?director=new'); fr._attr = 'http://127.0.0.1:7475/mock/vdo-director.html?director=new';
+        loop2.onMessage({ origin: 'http://127.0.0.1:7475', source: fr.contentWindow, data: good });
+        const before = calls2.length;
+        handlers.load(); // the new document has loaded
+        loop2.onMessage({ origin: 'http://127.0.0.1:7475', source: fr.contentWindow, data: good });
+        check('a reply that arrives before the iframe has loaded the new src (the previous document answering) is ignored; after the load it is heard', before === 0 && calls2.join() === 'reply:1', calls2.join());
+      }
       globalThis.location = savedLoc; globalThis.window = savedWin;
     }
 

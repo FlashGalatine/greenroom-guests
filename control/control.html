@@ -425,7 +425,8 @@
     extraOrigins: window.__VDO_DIRECTOR_EXTRA_ORIGINS || [], timing: window.__VDO_DIRECTOR_TIMING,
     hooks: {
       connecting: () => setPill(els.vdoStatus, 'director: connecting…', ''),
-      hint: () => setPill(els.vdoStatus, 'director: still connecting… check the room, the password and that vdo.ninja is reachable', ''),
+      // after 15 s without an answer; if silence was already reported the pill stays red and gains the advice
+      hint: (silent) => setPill(els.vdoStatus, silent ? 'director: not responding · check the room, the password and that vdo.ninja is reachable' : 'director: still connecting… check the room, the password and that vdo.ninja is reachable', silent ? 'error' : ''),
       // Quiet for about 3 polls: the roster is no longer current, so pushes keep the last resolved stream IDs (never blank them).
       silent: () => { hasRoster = false; setPill(els.vdoStatus, 'director: not responding', 'error'); },
       retrying: () => setPill(els.vdoStatus, 'director: not responding, retrying', 'error'),
@@ -846,10 +847,8 @@
       // settling; one seen and lost blanks at once). With no current roster the held resolution is preserved.
       let streamID;
       if (!s.label) streamID = '';
-      else if (hasRoster) {
-        const live = VdoParse.resolveSlot(roster, s.label, s.streamID, '');
-        streamID = VdoParse.resolveSlotID(s.label, s.streamID, new Map([[s.label, live]]), directorLoop.sess, nowMs, VdoParse.SETTLE_MS);
-      } else streamID = String(s.streamID || '');
+      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, '', directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
+      else streamID = String(s.streamID || '');
       s.streamID = streamID;
       return Object.assign({
         slot: i + 1,
@@ -911,6 +910,7 @@
     if (url === frameUrl) return;
     frameUrl = url;
     if (url) {
+      roster = []; hasRoster = false; // nothing from a previous room, password or load is current for this one
       directorLoop.start(url); // points the frame at the room, starts the poll, and begins a fresh settle session
     } else {
       directorLoop.stop(); // the frame goes to about:blank
@@ -1450,7 +1450,9 @@
       const prev = cfg.slots[i - 1] || {};
       out.push(Object.assign({
         label: sel ? sel.value : String(prev.label ?? ''),
-        streamID: String(prev.streamID ?? ''),
+        // The stream belongs to the label it was resolved for: a different label starts empty (the next poll resolves it), so
+        // a slot relabelled while the director is quiet cannot push the previous guest's stream under the new name.
+        streamID: (sel ? sel.value : String(prev.label ?? '')) === String(prev.label ?? '') ? String(prev.streamID ?? '') : '',
         mirror: mir ? mir.checked : !!prev.mirror,
         mode: modeSel ? modeSel.value : (prev.mode ?? 'webcam'),
         discordUserId: discIn ? discIn.value.replace(/\D/g, '') : String(prev.discordUserId ?? ''),
