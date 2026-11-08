@@ -100,7 +100,7 @@
     const effective = typed.replace(/[\W]+/g, '_').slice(0, 30);
     const onlyUnderscores = !!typed && /^_+$/.test(effective);
     const warnings = [];
-    if (onlyUnderscores) warnings.push('only underscores: vdo.ninja treats this as an empty room name');
+    if (onlyUnderscores) warnings.push('only underscores: vdo.ninja joins the room "_", shared with every other name that collapses the same way');
     else if (typed && effective !== typed.replace(/ /g, '_')) warnings.push('differs from what you typed');
     if (typed.length > 30) warnings.push('longer than 30 characters: vdo.ninja cuts it');
     return { effective, warnings, onlyUnderscores };

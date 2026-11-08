@@ -64,7 +64,7 @@
   // Which live stream does a label follow? A unique label follows its (one) stream. A label shared by several guests
   // keeps the stream it already had if that is still in the room, else nobody (fail closed: anyone in the room can pick
   // a label, so a joiner must not take over a slot by choosing the same one). pinnedID, when given and still in the
-  // room under that label, wins (reserved for a per-slot push-ID pin).
+  // room under that label, wins, and a pin that is not in the room gives nobody (a per-slot push-ID pin, slots[].pushID: it follows only that stream, so a same-label impostor is ignored).
   function resolveSlot(roster, label, prevStreamID, pinnedID) {
     if (!label) return '';
     const matches = (roster || []).filter((g) => g && g.label === label);

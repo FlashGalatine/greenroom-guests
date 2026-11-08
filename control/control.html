@@ -248,6 +248,7 @@
       <label>push id <input type="text" id="vdoInvPush" placeholder="&amp;push=" title="One guest's stream (push) ID. It must differ for every guest; vdo.ninja refuses an ID that is already in use. A slot's 'pin' button pins it to the guest's push ID." /></label>
       <button id="btnVdoInviteNew" type="button" title="Fill in a unique label and a random push ID for one more guest">new guest link</button>
       <span id="vdoInvLabelWarn" class="warn" hidden>No label: guests from this link can't be bound to a slot.</span>
+      <span id="vdoInvLegacy" class="warn" hidden>These boxes were saved by an older page, where they only stopped the guest from watching others. New links now stop the guest SENDING video or audio. Untick them if that is not what you want.</span>
       <label>video bitrate <input type="text" id="vdoInvVideoBitrate" placeholder="kbps" inputmode="numeric" title="Caps what the guest sends (&amp;outboundvideobitrate)" /></label>
       <label>quality
         <select id="vdoInvQuality"><option value="">default</option><option value="0">0 max</option>
@@ -545,6 +546,7 @@
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
       extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
+    legacyNoAV = !!(v.invite && typeof v.invite === 'object' && !('askName' in v.invite) && (v.invite.noVideo || v.invite.noAudio));
     return true;
   }
 
@@ -964,13 +966,14 @@
   window.addEventListener('message', (e) => directorLoop.onMessage(e));
 
   // ── Rendering (focus-guarded, signature-deduped) ──────────────────────────
-  function setPill(el, text, cls) { el.textContent = text; el.className = 'pill' + (cls ? ' ' + cls : ''); }
+  function setPill(el, text, cls) { el.textContent = text; el.title = text; el.className = 'pill' + (cls ? ' ' + cls : ''); } // (the title carries what a narrow dock clips)
   function setIfNotFocused(el, val) { if (document.activeElement !== el && el.value !== val) el.value = val; }
   function setCheck(el, val) { if (document.activeElement !== el) el.checked = !!val; }
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
   // The flags box: what the overlay ignores in the saved flags (script, style, room-identity flags), or what Save just removed.
   let flagsNote = '';
+  let legacyNoAV = false; // the saved invite predates askName and has no video / no audio ticked (their meaning changed)
   // The room name vdo.ninja will actually join, from what is typed (display only: cfg.room and every URL keep the room as typed).
   function renderRoomName() {
     const r = GRVdoUrl.vdoRoomName(els.room.value);
@@ -1006,10 +1009,13 @@
     return Object.entries(users).map(([id, u]) => id + ':' + ((u && u.username) || '')).sort().join(',');
   }
 
+  // The director has reported this guest (its label with this very stream) in the current session: only then can the slot be pinned to
+  // it. A stream ID that is merely held from the saved config may belong to nobody any more, and a pin on it would blank the slot.
+  const guestReported = (s) => hasRoster && !!s.label && !!s.streamID && roster.some((g) => g.label === s.label && g.streamID === s.streamID);
   function renderSlots(force) {
     const live = rosterLabels();
     const dupes = VdoParse.duplicateLabels(roster); // labels more than one live stream is using
-    const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig(), dupes: [...dupes] });
+    const sig = JSON.stringify({ slots: cfg.slots, live, dusers: discordUsersSig(), dupes: [...dupes], pinOk: cfg.slots.map(guestReported) });
     if (!force && sig === slotsSig && els.slots.childElementCount) return;
     // Only a Discord ID being typed holds the redraw back (it would eat the text); the redraw runs when the field is left (GRN-87).
     // Selects and buttons never freeze the panel: a guest who joins must show up in the pickers.
@@ -1076,15 +1082,17 @@
 
       const id = document.createElement('span');
       id.className = 'vdo-id' + (s.streamID ? ' live' : '');
-      id.textContent = s.streamID || '—';
-      id.title = s.streamID || 'no stream resolved';
+      id.textContent = s.streamID || (s.pushID ? 'pinned: not in room' : '—');
+      id.title = s.streamID || (s.pushID ? `Pinned to push ID ${s.pushID}, which is not in the room (a guest who rejoins without a fixed &push gets a new ID: unpin to follow the label)` : 'no stream resolved');
       // Pin: this slot follows only the guest's current push ID, so another guest who picks the same label cannot take it over.
       const pin = document.createElement('button');
       pin.type = 'button';
       pin.className = 'vdo-pin';
       pin.textContent = s.pushID ? 'unpin' : 'pin';
-      pin.title = s.pushID ? `Pinned to push ID ${s.pushID}: this slot follows only that stream (click to follow the label again)` : `Pin this slot to ${s.label || 'the guest'}'s current push ID, so another guest who picks the same label cannot take it over`;
-      pin.disabled = !s.pushID && !s.streamID;
+      pin.title = s.pushID ? `Pinned to push ID ${s.pushID}: this slot follows only that stream (click to follow the label again)`
+        : guestReported(s) ? `Pin this slot to ${s.label}'s current push ID, so another guest who picks the same label cannot take it over. It holds only while that guest keeps the same ID: give them a link with its own &push (new guest link), or a rejoin gets a new ID and the pinned slot stays empty until you unpin.`
+          : 'The director has not reported a guest for this slot yet';
+      pin.disabled = !s.pushID && !guestReported(s);
       webcamWrap.append(sel, mirLabel, id, pin);
       if (s.label && dupes.has(s.label)) {
         // Anyone in the room can pick any label: say that this one is shared, and which streams compete for it.
@@ -1804,7 +1812,7 @@
       if (!cur) return;
       const next = Object.assign({}, cur);
       if (cur.pushID) next.pushID = '';
-      else if (cur.streamID) next.pushID = cur.streamID;
+      else if (guestReported(cur)) next.pushID = cur.streamID;
       else return;
       cfg.slots[idx] = next;
       slotsSig = '';
@@ -1844,7 +1852,7 @@
     // removed is named under the box.
     // A room name that is only symbols becomes underscores at vdo.ninja, with no password that is a public, empty-named room: ask first.
     const rn = GRVdoUrl.vdoRoomName(els.room.value);
-    if (rn.onlyUnderscores && !els.password.value.trim() && !confirm('The room name "' + els.room.value.trim() + '" is only underscores once vdo.ninja cleans it up, and there is no password.\n\nGuests and the director would meet in a room anyone can guess. Save it anyway?')) {
+    if (rn.onlyUnderscores && !GRVdoUrl.effectivePassword(els.password.value) && !confirm('The room name "' + els.room.value.trim() + '" is only underscores once vdo.ninja cleans it up, and there is no password.\n\nGuests and the director would meet in a room anyone can guess. Save it anyway?')) {
       els.enabled.checked = cfg.enabled;
       return;
     }
@@ -1985,6 +1993,7 @@
     els.manageLink.value = manage;
     $('btnVdoInviteOpen').href = invite || '#';
     $('btnVdoManageOpen').href = manage || '#';
+    $('vdoInvLegacy').hidden = !(legacyNoAV && (i.noVideo || i.noAudio));
     const lw = $('vdoInvLabelWarn');
     lw.hidden = !!(i.label || i.askName);
     const needsPw = GRVdoUrl.effectivePassword(cfg.password) && (i.passwordMode === 'none' || (i.passwordMode === 'hash' && !(window.crypto && crypto.subtle)));
@@ -2017,16 +2026,18 @@
       renderDirtyMarker();
     });
   }
+  // A box marked as rejected keeps the text the operator typed (and its mark) when the builder is redrawn; the link already leaves it out.
+  const setNumBox = (el, v) => { if (!el.classList.contains('bad')) setIfNotFocused(el, v ?? ''); };
   function renderInvite() {
     const i = cfg.invite || {};
     if (document.activeElement !== inv.passwordMode) inv.passwordMode.value = i.passwordMode || 'hash';
     setCheck(inv.askName, i.askName !== false);
     setIfNotFocused(inv.label, i.label ?? '');
     setIfNotFocused(inv.push, i.push ?? '');
-    setIfNotFocused(inv.videoBitrate, i.videoBitrate ?? '');
+    setNumBox(inv.videoBitrate, i.videoBitrate);
     if (document.activeElement !== inv.quality) inv.quality.value = i.quality ?? '';
-    setIfNotFocused(inv.fps, i.fps ?? '');
-    setIfNotFocused(inv.audioBitrate, i.audioBitrate ?? '');
+    setNumBox(inv.fps, i.fps);
+    setNumBox(inv.audioBitrate, i.audioBitrate);
     setCheck(inv.noVideo, i.noVideo);
     setCheck(inv.noAudio, i.noAudio);
     if (document.activeElement !== inv.capture) inv.capture.value = i.capture ?? '';
@@ -2038,7 +2049,8 @@
 
   const invOpts = document.querySelector('.vdo-invite-opts');
   invOpts.addEventListener('input', rebuildLinks);
-  invOpts.addEventListener('change', () => {
+  invOpts.addEventListener('change', (e) => {
+    if (e && (e.target === inv.noVideo || e.target === inv.noAudio)) legacyNoAV = false; // the operator has seen and decided
     // Merge over the current invite: the builder only knows its own fields, and a newer
     // page's extra invite fields must ride through a change to one of them.
     cfg.invite = Object.assign({}, cfg.invite, inviteFromDom());
@@ -2102,15 +2114,19 @@
   $('btnVdoInviteCopy').addEventListener('click', () => copyToClipboard(els.inviteLink, $('btnVdoInviteCopy')).then((ok) => {
     if (!ok) return;
     inv.label.value = ''; inv.push.value = '';
-    invOpts.dispatchEvent(new Event('input', { bubbles: true }));
-    invOpts.dispatchEvent(new Event('change', { bubbles: true }));
+    commitInviteQuiet();
   }));
-  const randomId = (n) => { const a = new Uint8Array(n); (window.crypto || { getRandomValues: (x) => x.map(() => Math.floor(Math.random() * 256)) }).getRandomValues(a); return Array.from(a, (b) => (b % 36).toString(36)).join(''); };
+  // Updates the builder and the links, and saves the invite quietly when that is safe: copying a link never asks anything.
+  function commitInviteQuiet() {
+    cfg.invite = Object.assign({}, cfg.invite, inviteFromDom());
+    rebuildLinks();
+    if (synced && !schemaTooNew) assembleAndPush(false);
+  }
+  const randomId = (n) => { const a = new Uint8Array(n); (window.crypto || { getRandomValues: (x) => { for (let k = 0; k < x.length; k++) x[k] = Math.floor(Math.random() * 256); return x; } }).getRandomValues(a); return Array.from(a, (b) => (b % 36).toString(36)).join(''); };
   $('btnVdoInviteNew').addEventListener('click', () => { // a unique label and a random push ID for one more guest
     inv.label.value = 'guest-' + randomId(4);
     inv.push.value = randomId(8);
-    invOpts.dispatchEvent(new Event('input', { bubbles: true }));
-    invOpts.dispatchEvent(new Event('change', { bubbles: true }));
+    commitInviteQuiet();
   });
   $('btnVdoManageCopy').addEventListener('click', () => copyToClipboard(els.manageLink, $('btnVdoManageCopy')));
   $('btnVdoInviteOpen').addEventListener('click', (e) => { if (!els.inviteLink.value) e.preventDefault(); });

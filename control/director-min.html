@@ -134,7 +134,7 @@
       hint: (silent) => { directorNote = silent ? 'director not responding · check the room, the password and that vdo.ninja is reachable' : `room ${cfg.room} · director still connecting… check the room, the password and that vdo.ninja is reachable`; show(directorNote); },
       // Quiet for about 3 polls: keep the last resolved stream IDs (a push never blanks them), say so. The note stays on
       // screen (other status updates keep it) until a recognised reply arrives.
-      silent: () => { hasRoster = false; directorNote = 'director not responding'; show(directorNote); },
+      silent: () => { hasRoster = false; unlabeled = 0; directorNote = 'director not responding'; show(directorNote); },
       retrying: () => { directorNote = 'director not responding, retrying'; show(directorNote); },
       unrecognised: () => { directorNote = 'reply unrecognised - check vdo.ninja version'; show(directorNote); },
       reply: (r, raw) => {
@@ -329,7 +329,7 @@
     // Record it as pushed only if it was sent: with the socket down the next poll must retry.
     if (!doAction(PUSH_ACTION, { payload })) return;
     lastPushedSig = payload;
-    show(`room ${cfg.room} · ${roster.length} guest(s) · pushed`);
+    show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + ' · pushed');
   }
 
   // ── SB WS client ──────────────────────────────────────────────────────────
@@ -533,13 +533,14 @@
     const hadFrame = !!frameUrl;
     frameUrl = url;
     if (url) {
-      roster = []; hasRoster = false; directorNote = ''; // nothing from a previous room, password or load is current for this one
+      roster = []; hasRoster = false; directorNote = ''; unlabeled = 0; // nothing from a previous room, password or load is current for this one
       // A stream belongs to the room it was resolved in: moving to another room (or password) starts empty (GRN-122).
       if (hadFrame) cfg.slots.forEach((s) => { s.streamID = ''; });
       directorLoop.start(url); // points the frame at the room, starts the poll, begins a fresh settle session
     } else {
       directorLoop.stop();
       roster = [];
+      unlabeled = 0;
       hasRoster = false;
       show(cfg.enabled && cfg.room && !window.isSecureContext ? 'director needs a secure page: open via http://127.0.0.1:<port>/' : (cfg.enabled ? 'no room configured' : 'director disabled'));
     }
