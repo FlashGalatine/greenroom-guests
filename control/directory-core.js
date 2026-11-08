@@ -135,7 +135,9 @@
   function isDateShaped(s) { return DATE_SHAPED.test(String(s ?? '')); }
 
   // Turn "who is live right now" into directory entries.
-  //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} } }
+  //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} }, skip: ['vdo:alpha', 'discord:1'] }
+  // `skip` lists keys the caller has already auto-added in this session: they are never appended again (a label that Streamer.bot
+  // rewrites on the way back would otherwise look new on every pass). It does not stop a Discord id being filled into an entry.
   // Returns { directory, changed, added } — `directory` is a NEW array (entries
   // are only ever appended or key-filled, never renamed), `added` lists the keys
   // it created, for status text.
@@ -148,6 +150,7 @@
     const o = opts || {};
     const dir = (Array.isArray(o.directory) ? o.directory : []).slice();
     const ignored = new Set(sanitizeIgnored(o.ignored));
+    const skip = new Set(Array.isArray(o.skip) ? o.skip.map(String) : []);
     const added = [];
     let changed = false;
 
@@ -157,7 +160,7 @@
 
     for (const label of labels) {
       const key = labelKey(label);
-      if (isDateShaped(label) || ignored.has(key) || findByLabel(dir, label)) continue;
+      if (isDateShaped(label) || ignored.has(key) || skip.has(key) || findByLabel(dir, label)) continue;
       dir.push({ vdoLabel: label, discordUserId: '', displayName: label, socials: [], auto: true });
       added.push(key);
       changed = true;
@@ -181,11 +184,12 @@
         && (eqCi(e.displayName, username) || eqCi(e.vdoLabel, username)));
       if (idx >= 0) {
         dir[idx] = Object.assign({}, dir[idx], { discordUserId: id });
-      } else {
+        changed = true;
+      } else if (!skip.has(key)) {
         dir.push({ vdoLabel: '', discordUserId: id, displayName: name, socials: [], auto: true });
         added.push(key);
+        changed = true;
       }
-      changed = true;
     }
 
     return { directory: dir, changed, added };

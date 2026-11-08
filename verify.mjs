@@ -895,6 +895,14 @@ async function main() {
       auto1.changed === true && auto1.directory[0].displayName === 'Alpha Prime' && auto1.directory[0].auto === false);
     const auto2 = D.autoPopulate({ directory: auto1.directory, ignored: ['discord:200000000000000009', 'vdo:lurker'],
       labels: ['ALPHA', 'BRAVO'], users: AUTO_USERS });
+    // skip (GRN-65 step 2): labels / users this page has already auto-added are not appended a second time, but a Discord id is still filled in
+    const sk = D.autoPopulate({ directory: [{ vdoLabel: '', discordUserId: '', displayName: 'Ashe of Outland', socials: [], auto: false }], ignored: [],
+      labels: ['BRAVO', 'CHARLIE'], users: { '110457699291906048': { username: 'Ashe of Outland' }, '200000000000000001': { username: 'Guest One' } },
+      skip: ['vdo:bravo', 'discord:200000000000000001'] });
+    check('autoPopulate: a label or user in opts.skip is not appended again (a label Streamer.bot rewrites cannot loop)',
+      !sk.directory.some((e) => /^bravo$/i.test(e.vdoLabel)) && !sk.directory.some((e) => e.discordUserId === '200000000000000001') && sk.directory.some((e) => e.vdoLabel === 'CHARLIE'), JSON.stringify(sk.directory));
+    check('autoPopulate: …while skip leaves the fill of a Discord id on an existing entry alone',
+      sk.directory.find((e) => e.displayName === 'Ashe of Outland').discordUserId === '110457699291906048');
     check('autoPopulate is a fixpoint: a second pass over the same room changes nothing',
       auto2.changed === false && JSON.stringify(auto2.directory) === JSON.stringify(auto1.directory));
     const auto3 = D.autoPopulate({ directory: autoBase, ignored: ['discord:200000000000000009', 'vdo:lurker'],

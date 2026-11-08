@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster' and 'gestures' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures' and 'directory' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -2341,6 +2341,183 @@ async function main() {
             ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
           await p.close();
         }
+      }
+    }
+
+    // ── R15: directory edits commit from cfg, never from half-edited rows (GRN-72, 63, 71, 28, 96, 111, 134, 182) ──
+    if (!ONLY || ONLY === 'directory') {
+      console.log('\n[R15] directory: a half-edited row never reaches cfg or a push, an edit patches only its own field');
+      const R15_SECTIONS = 'abcdefgh'.split('');
+      for (const k of (process.env.R15_ONLY || '').split(',').filter(Boolean)) if (!R15_SECTIONS.includes(k)) throw new Error('R15_ONLY=' + k + ': the sections are ' + R15_SECTIONS.join(', '));
+      const want = (k) => !process.env.R15_ONLY || process.env.R15_ONLY.split(',').includes(k);
+      const DIR_D = [
+        { vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime', socials: [{ platform: 'twitch', handle: 'AlphaTV' }] },
+        { vdoLabel: 'BRAVO', discordUserId: '', displayName: 'Bravo Boss', socials: [] },
+        { vdoLabel: '', discordUserId: '200000000000000001', displayName: 'Cee', socials: [] },
+      ];
+      const SEED_D = { enabled: true, room: 'dirroom', password: 'pw1', viewFlags: VIEWFLAGS, directoryAutoAdd: true,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'hash' }, directory: DIR_D };
+      const LIVE = '?fixed=1';
+      const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const frameOf = (page) => page.frames().find((f) => /vdo-director/.test(f.url()));
+      const seededMock = async (seed) => {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const openControl = async (x, q, seed) => {
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r && document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, seed.room, 8000);
+        await wait(p, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        await sleep(500);
+        return p;
+      };
+      const foreign = (x, patch) => x.api.broadcast({ type: 'vdoninja:update', vdoninja: Object.assign({}, SEED_D, patch) });
+      const rowSel = (n) => '#vdoDirectory .vdo-dir-row:nth-child(' + n + ')';
+      const dirOf = async (x) => { const st = await x.api.state(); return (st.vdo && st.vdo.directory) || []; };
+      const byName = (dir, n) => dir.find((e) => e.displayName === n);
+
+      // (a) A live label cleared mid-edit: a poll adds no twin, leaving the field records the ignore key (GRN-63).
+      if (want('a')) {
+        const x = await seededMock(SEED_D);
+        const p = await openControl(x, LIVE, SEED_D);
+        await p.click(rowSel(1) + ' .dir-toggle');
+        await p.fill(rowSel(1) + ' input.vdo-dir-label', '');
+        await sleep(3500); // a director poll lands while the field is empty and focused
+        const mid = await pushPayloads(x);
+        await p.keyboard.press('Tab');
+        await sleep(1500);
+        const st = await x.api.state();
+        const dir = (st.vdo && st.vdo.directory) || [];
+        check('R15a: a live label cleared mid-edit: no poll adds a placeholder for it, and once the field is left directoryIgnored holds its key with no auto entry',
+          !mid.some((q) => q.directory.some((e) => e.auto)) && st.vdo.directoryIgnored.includes('vdo:alpha') && !dir.some((e) => e.auto) && dir.length === 2 && !dir.some((e) => /^alpha$/i.test(e.vdoLabel)),
+          JSON.stringify({ midAuto: mid.map((q) => q.directory.length), ignored: st.vdo && st.vdo.directoryIgnored, dir: dir.map((e) => e.displayName + '/' + e.vdoLabel + '/' + !!e.auto) }));
+        await p.close();
+      }
+      // (b) A draft whose label is a live guest, across a poll: no twin, and the half-typed name reaches no push (GRN-28 T1, GRN-72).
+      if (want('b')) {
+        const x = await seededMock(SEED_D);
+        const p = await openControl(x, LIVE, SEED_D);
+        await p.click('#btnDirAdd');
+        await p.keyboard.type('Zed');
+        await p.fill(rowSel(4) + ' input.vdo-dir-label', 'CHARLIE');
+        await frameOf(p).evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'ccc333', label: 'CHARLIE' } })); // CHARLIE goes live while the draft holds its label
+        await x.api.clear();
+        await sleep(3500); // the poll that sees CHARLIE live lands while the draft is mid-edit
+        const mid = await pushPayloads(x);
+        await p.keyboard.press('Tab');
+        await sleep(1500);
+        const all = await pushPayloads(x);
+        const dir = await dirOf(x);
+        const charlies = dir.filter((e) => /^charlie$/i.test(e.vdoLabel));
+        check('R15b: a draft typed into with a live label survives a poll without an auto twin; the half-typed name reaches no push before the field is left',
+          !mid.some((q) => q.directory.some((e) => e.displayName === 'Zed')) && !all.slice(0, mid.length).some((q) => q.directory.some((e) => /^charlie$/i.test(e.vdoLabel) && e.auto)) && charlies.length === 1 && charlies[0].displayName === 'Zed' && !charlies[0].auto,
+          JSON.stringify({ mid: mid.map((q) => q.directory.map((e) => e.displayName)), charlies }));
+        await p.close();
+      }
+      // (c) Blanking a name restores it (decision 12), also when another page's push reordered the directory meanwhile (GRN-71, GRN-28).
+      if (want('c')) {
+        const x = await seededMock(SEED_D);
+        const p = await openControl(x, LIVE, SEED_D);
+        await p.click(rowSel(1) + ' .dir-toggle');
+        await p.fill(rowSel(1) + ' input.vdo-dir-display', '');
+        await foreign(x, { directory: DIR_D.slice().reverse() }); // the same guests in another order, adopted while the row has focus
+        await sleep(700);
+        await x.api.clear();
+        await p.keyboard.press('Tab');
+        await sleep(1500);
+        const shown = await p.evaluate(() => { const r = [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].find((q) => /Alpha/.test(q.querySelector('input.vdo-dir-display').value)); return r ? { name: r.querySelector('input.vdo-dir-display').value, hint: (r.textContent || '').includes('use ×') } : null; });
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        const dir = last ? last.directory : await dirOf(x);
+        const alpha = byName(dir, 'Alpha Prime');
+        check('R15c: blanking a display name restores the old name with a "use × to remove" hint, loses no entry or social, and edits the right entry although the list was reordered by another page',
+          !!shown && shown.name === 'Alpha Prime' && shown.hint && dir.length === 3 && !!alpha && alpha.socials.length === 1 && alpha.vdoLabel === 'ALPHA' && !!byName(dir, 'Bravo Boss') && !!byName(dir, 'Cee') && !dir.some((e) => e.auto),
+          JSON.stringify({ shown, dir: dir.map((e) => e.displayName + '/' + e.vdoLabel + '/' + e.discordUserId + '/' + (e.socials || []).length) }));
+        await p.close();
+      }
+      // (d) A keyless draft survives another page's push and a reload, and reaches no push (GRN-96).
+      if (want('d')) {
+        const x = await seededMock(SEED_D);
+        const p = await openControl(x, LIVE, SEED_D);
+        await p.click('#btnDirAdd');
+        await p.keyboard.type('Keep me');
+        await foreign(x, { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3, { label: 'ZULU' }), slot(4)] });
+        await sleep(700);
+        await p.keyboard.press('Tab');
+        await sleep(1200);
+        const names = () => p.evaluate(() => [...document.querySelectorAll('#vdoDirectory .vdo-dir-display')].map((i) => i.value));
+        const afterPush = await names();
+        await p.reload({ waitUntil: 'load' });
+        await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, null, 8000);
+        await sleep(1500);
+        const afterReload = await names();
+        const ps = await pushPayloads(x);
+        check('R15d: a draft row (a name, no label or Discord user yet) survives another page\'s push and a page reload, and is not in any push',
+          afterPush.includes('Keep me') && afterReload.includes('Keep me') && !ps.some((q) => q.directory.some((e) => e.displayName === 'Keep me')), JSON.stringify({ afterPush, afterReload }));
+        await p.close();
+      }
+      // (e) Editing any field of an auto entry makes it the operator's (GRN-134).
+      if (want('e')) {
+        const seed = Object.assign({}, SEED_D, { directory: DIR_D.concat([{ vdoLabel: 'DELTA', discordUserId: '', displayName: 'DELTA', socials: [], auto: true }]) });
+        const x = await seededMock(seed);
+        const p = await openControl(x, LIVE, seed);
+        const clearBtn = () => p.evaluate(() => { const b = document.getElementById('btnDirClearAuto'); return b && !b.hidden ? b.textContent : ''; });
+        const before = await clearBtn();
+        await p.click(rowSel(4) + ' .dir-toggle');
+        await p.fill(rowSel(4) + ' input.vdo-dir-discord-id', '300000000000000003');
+        await p.keyboard.press('Tab');
+        await sleep(1200);
+        const after = await clearBtn();
+        const dir = await dirOf(x);
+        check('R15e: editing the Discord ID of an auto-added entry clears its auto flag, and the "Clear auto-added" count follows at once',
+          /\(1\)/.test(before) && after === '' && dir.length === 4 && !dir.some((e) => e.auto) && dir[3].discordUserId === '300000000000000003', JSON.stringify({ before, after, dir: dir.map((e) => e.displayName + '/' + !!e.auto) }));
+        await p.close();
+      }
+      // (f) Adopting another page's push runs no auto-add; the next poll does (GRN-65 step 2). Both pages.
+      if (want('f')) {
+        for (const which of ['control', 'min']) {
+          const x = await seededMock(SEED_D);
+          let p;
+          if (which === 'control') p = await openControl(x, LIVE, SEED_D);
+          else {
+            p = await newPage(browser, { width: 480, height: 120 }, mockDir(x, LIVE));
+            await p.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+            await wait(p, () => /2 guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+            await sleep(500);
+          }
+          // just after a poll, so the next one is 2.5 s away and cannot land in the window that is checked
+          await frameOf(p).evaluate(() => new Promise((res) => { window.addEventListener('message', function h(e) { if (e.data && e.data.getGuestList) { window.removeEventListener('message', h); setTimeout(res, 250); } }); }));
+          await x.api.clear();
+          await foreign(x, { directory: [] }); // another writer emptied the book while the guests are live
+          await sleep(700);
+          const early = await pushPayloads(x);
+          await sleep(3500); // the next poll
+          const later = await pushPayloads(x);
+          check('R15f' + (which === 'control' ? '1' : '2') + ': ' + which + ' adopting a push whose directory is empty makes no auto-add push at once; the next poll re-adds the live guests',
+            early.length === 0 && later.some((q) => q.directory.some((e) => e.vdoLabel === 'ALPHA' && e.auto)), JSON.stringify({ early: early.length, later: later.map((q) => q.directory.length) }));
+          await p.close();
+        }
+      }
+      // (g) Collapsed rows carry no pickers, and a voice-membership change updates the dots in place (GRN-182).
+      if (want('g')) {
+        const seed = Object.assign({}, SEED_D, { directoryAutoAdd: false });
+        const x = await seededMock(seed);
+        const p = await openControl(x, LIVE, seed);
+        const pickers = await p.evaluate(() => document.querySelectorAll('#vdoDirectory .vdo-dir-label-pick, #vdoDirectory .vdo-dir-discord-pick').length);
+        await p.evaluate(() => { document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3)').__keep = true; });
+        const dotBefore = await p.evaluate(() => document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3) .dir-dot').classList.contains('live'));
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        const dotOn = await wait(p, () => document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3) .dir-dot')?.classList.contains('live'), null, 6000);
+        const kept = await p.evaluate(() => !!document.querySelector('#vdoDirectory .vdo-dir-row:nth-child(3)').__keep);
+        check('R15g: collapsed directory rows build no pickers, and when only voice membership changes the live dot turns on in place (the row is not rebuilt)',
+          pickers === 0 && !dotBefore && dotOn && kept, JSON.stringify({ pickers, dotBefore, dotOn, kept }));
+        await p.close();
       }
     }
 

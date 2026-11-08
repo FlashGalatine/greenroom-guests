@@ -108,6 +108,7 @@
   .dir-meta { flex: 2 1 18ch; min-width: 0; color: var(--dim); font-size: 11px;
     font-family: Consolas, monospace; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; cursor: pointer; }
+  .dir-hint { flex: none; font-size: 11px; color: var(--amber); }
   .dir-badge { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
     padding: 2px 7px; border-radius: 99px; border: 1px solid var(--amber); color: var(--amber); }
   .vdo-dir-remove { border-color: var(--red); color: var(--red); padding: 3px 9px; flex: none; }
@@ -477,7 +478,7 @@
   // config to arrive, except for the field being typed in at that moment (handle()).
   const dirty = new Set();
   let slotsDeferred = false; // a slots render held back because a Discord ID is being typed; it runs when the field is left
-  const dirOpen = new Set(); // expanded directory rows, by array index (view state only)
+  const dirOpen = new Set(); // expanded directory rows, by entry id (LID; view state only)
 
   // Directory sanitizers, the socials-textarea grammar, and the auto-populate
   // rule all live in directory-core.js — shared verbatim with director-min.html so
@@ -801,7 +802,12 @@
         return;
       }
       const firstSync = !synced;
+      const oldDir = cfg.directory;
+      const drafts = oldDir.filter(isDraft); // this page's unfinished rows (GRN-96)
       if (!adoptCfg(v)) return; // not config-shaped: drop it
+      carryLids(oldDir, cfg.directory); // an open or half-edited row keeps its entry
+      reappendDrafts(drafts);
+      if (firstSync) reappendDrafts(loadDrafts()); // drafts from before a reload
       gotConfig = true; syncedByMarker = false; // a real config reached this page
       if (firstSync) releaseFocusForAdoption();
       markSynced();
@@ -818,10 +824,9 @@
       lastPushedSig = JSON.stringify(assemblePayload());
       renderAll();
       if (heal) { cfg.slots.forEach((s) => { s.streamID = ''; }); hasRoster = false; renderSlots(true); }
-      // A replayed room may already hold guests we've never seen named.
-      const added = runAutoAdd();
-      if (added) renderDirectory();
-      if (heal || added) assembleAndPush(false);
+      // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding here
+      // could answer a rewrite of it with a push of our own (GRN-65).
+      if (heal) assembleAndPush(false);
     } else if (d.type === 'vdo:sync:empty') {
       // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
       if (!synced) syncedByMarker = true;
@@ -1159,49 +1164,157 @@
     return terms.every((t) => hay.includes(t));
   }
 
-  function renderDirectory(force) {
+  // Is this entry one the wire copy would drop (no on-stream name, or neither a VDO label nor a Discord user)? A draft the operator is
+  // still filling in.
+  const isDraft = (e) => !GRDir.sanitizeDirectory([e]).length;
+  // A stable id for each entry on THIS page (GRN-28): rows, the open/closed state and every handler find their entry by it, never by
+  // array index. It is a Symbol key, so JSON.stringify and sanitizeDirectory (which builds new objects) drop it.
+  const LID = Symbol('lid');
+  let lidSeq = 0;
+  const lidOf = (e) => (e[LID] || (e[LID] = ++lidSeq));
+  // After another writer's state is adopted, entries keep the id of the entry they match (same label, else same Discord user), so
+  // an open row stays open and a row being edited still finds its entry.
+  function carryLids(oldDir, newDir) {
+    const used = new Set();
+    for (const e of newDir) {
+      const m = oldDir.find((o) => o[LID] && !used.has(o[LID])
+        && ((e.vdoLabel && o.vdoLabel && GRDir.labelKey(e.vdoLabel) === GRDir.labelKey(o.vdoLabel))
+          || (e.discordUserId && o.discordUserId && e.discordUserId === o.discordUserId)));
+      if (m) { e[LID] = m[LID]; used.add(m[LID]); }
+    }
+  }
+  // Drafts (isDraft entries) are the page's own work in progress: they survive another writer's state (re-appended after it is
+  // adopted unless the adopted book already has their label or user) and a reload (localStorage, never the wire).
+  function reappendDrafts(drafts) {
+    for (const d of drafts) {
+      if ((d.vdoLabel && GRDir.findByLabel(cfg.directory, d.vdoLabel)) || (d.discordUserId && GRDir.findByUserId(cfg.directory, d.discordUserId))) continue;
+      if (!cfg.directory.includes(d)) cfg.directory.push(d);
+    }
+  }
+  const DRAFTS_KEY = 'greenroom.directoryDrafts';
+  let draftsJson = '';
+  function saveDrafts() {
+    if (!synced) return; // before the saved config arrives the book is empty: it must not wipe the drafts kept from before a reload
+    try {
+      const list = cfg.directory.filter(isDraft).map((e) => ({ vdoLabel: String(e.vdoLabel ?? ''), discordUserId: String(e.discordUserId ?? ''), displayName: String(e.displayName ?? ''), socials: (e.socials || []).slice() }));
+      const json = JSON.stringify(list);
+      if (json === draftsJson) return;
+      draftsJson = json;
+      if (list.length) localStorage.setItem(DRAFTS_KEY, json); else localStorage.removeItem(DRAFTS_KEY);
+    } catch (_) { /* storage can be unavailable; the drafts are then simply not kept across a reload */ }
+  }
+  function loadDrafts() {
+    try {
+      const v = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '[]');
+      if (!Array.isArray(v)) return [];
+      return v.filter((x) => x && typeof x === 'object').map((x) => ({ vdoLabel: String(x.vdoLabel ?? ''), discordUserId: String(x.discordUserId ?? '').replace(/\D/g, ''),
+        displayName: String(x.displayName ?? ''), socials: Array.isArray(x.socials) ? x.socials : [], auto: false })).filter(isDraft);
+    } catch (_) { return []; }
+  }
+
+  const metaText = (entry, u) => {
+    const bits = [];
+    if (isDraft(entry)) bits.push(entry.displayName ? 'not saved: add a VDO label or Discord user' : 'not saved: add an on-stream name');
+    if (entry.vdoLabel) bits.push('label ' + entry.vdoLabel);
+    if (entry.discordUserId) bits.push('discord ' + ((u && u.username) || entry.discordUserId));
+    const nSoc = (entry.socials || []).length;
+    if (nSoc) bits.push(nSoc + (nSoc === 1 ? ' social' : ' socials'));
+    return bits.join(' · ');
+  };
+  const dotTitle = (st) => (st.vdo && st.disc ? 'live in the VDO room + the voice channel' : st.vdo ? 'live in the VDO room' : st.disc ? 'in the voice channel' : 'not live');
+  function fillLabelPick(sel, live) {
+    sel.replaceChildren();
+    const l0 = document.createElement('option');
+    l0.value = ''; l0.textContent = live.length ? 'live labels…' : '(no guests live)';
+    sel.appendChild(l0);
+    for (const l of live) { const o = document.createElement('option'); o.value = l; o.textContent = l; sel.appendChild(o); }
+  }
+  function fillUserPick(sel, userOpts) {
+    sel.replaceChildren();
+    const p0 = document.createElement('option');
+    p0.value = ''; p0.textContent = userOpts.length ? 'in channel…' : '(no one in channel)';
+    sel.appendChild(p0);
+    for (const [uid, du] of userOpts) { const o = document.createElement('option'); o.value = uid; o.textContent = (du && du.username) || uid; sel.appendChild(o); }
+  }
+
+  // Only the voice membership or the live labels changed: update the dots, the summaries and the pick lists of the rows that are on
+  // screen, in place. Nothing is rebuilt, so a row being edited keeps its focus and its text (GRN-182).
+  function updateDirectoryLive(live, liveSet, users) {
+    const userOpts = Object.entries(users);
+    for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
+      const entry = cfg.directory.find((e) => e[LID] === Number(row.dataset.lid));
+      if (!entry) continue;
+      const st = entryLive(entry, liveSet, users);
+      const dot = row.querySelector('.dir-dot');
+      if (dot) { dot.classList.toggle('live', st.any); dot.title = dotTitle(st); }
+      const meta = row.querySelector('.dir-meta');
+      if (meta) { meta.textContent = metaText(entry, entry.discordUserId ? users[entry.discordUserId] : null) || 'no match key yet'; meta.title = meta.textContent + ' — click to edit'; }
+      const lp = row.querySelector('select.vdo-dir-label-pick');
+      if (lp && document.activeElement !== lp) fillLabelPick(lp, live);
+      const dp = row.querySelector('select.vdo-dir-discord-pick');
+      if (dp && document.activeElement !== dp) fillUserPick(dp, userOpts);
+    }
+  }
+
+  let dirStale = false; // a redraw held back because focus is inside the editor; it runs when focus leaves the container
+  let dirLiveSig = '';
+  const dirHints = new Set(); // entries whose row says "use × to remove" (a cleared name that was put back)
+  const hintEl = () => { const h = document.createElement('span'); h.className = 'dir-hint'; h.textContent = 'use × to remove'; return h; };
+  // The counts, the pill and the footer buttons come from cfg, not the DOM, so they stay honest even when the rows are not redrawn
+  // (focus is inside the editor) and can be refreshed after a commit without touching the rows under the operator.
+  function renderDirectoryCounts() {
     const live = rosterLabels();
     const liveSet = new Set(live.map((l) => l.toLowerCase()));
     const users = (discord && discord.users) || {};
     const terms = els.dirSearch.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const liveOnly = els.dirLiveOnly.checked;
-
-    // Counts + footer buttons are computed from cfg, not the DOM, so they stay
-    // honest even when the row rebuild below bails on a guard.
     const visible = [];
-    let liveCount = 0, autoCount = 0;
-    cfg.directory.forEach((entry, idx) => {
+    let liveCount = 0, autoCount = 0, unsaved = 0;
+    cfg.directory.forEach((entry) => {
+      lidOf(entry);
       const st = entryLive(entry, liveSet, users);
+      if (isDraft(entry)) unsaved++;
       if (st.any) liveCount++;
       if (entry.auto) autoCount++;
       if (liveOnly && !st.any) return;
       if (!dirMatches(entry, terms, users)) return;
-      visible.push({ entry, idx, st });
+      visible.push({ entry, st });
     });
-    const total = cfg.directory.length;
+    const total = cfg.directory.length - unsaved; // saved guests; the drafts are counted on their own
+    const unsavedTxt = unsaved ? ` · ${unsaved} unsaved` : '';
     setPill(els.dirCount,
-      total === 0 ? 'no guests'
-        : (terms.length || liveOnly) ? `${visible.length} of ${total} shown · ${liveCount} live`
-          : `${total} guest${total === 1 ? '' : 's'} · ${liveCount} live${autoCount ? ' · ' + autoCount + ' auto' : ''}`,
+      (total === 0 && !unsaved) ? 'no guests'
+        : (terms.length || liveOnly) ? `${visible.length} of ${total + unsaved} shown · ${liveCount} live${unsavedTxt}`
+          : `${total} guest${total === 1 ? '' : 's'} · ${liveCount} live${autoCount ? ' · ' + autoCount + ' auto' : ''}${unsavedTxt}`,
       liveCount ? 'live' : '');
     els.dirClearAuto.hidden = !autoCount;
     els.dirClearAuto.textContent = `Clear auto-added (${autoCount})`;
     const ignoredN = (cfg.directoryIgnored || []).length;
     els.dirResetIgnored.hidden = !ignoredN;
     els.dirResetIgnored.textContent = `Un-ignore removed (${ignoredN})`;
+    saveDrafts();
+    return { live, liveSet, users, terms, liveOnly, visible, total, unsaved };
+  }
+  function renderDirectory(force) {
+    const { live, liveSet, users, terms, liveOnly, visible, total, unsaved } = renderDirectoryCounts();
 
-    const sig = JSON.stringify({ dir: cfg.directory, live, dusers: discordUsersSig(),
-      q: terms, liveOnly, open: [...dirOpen].sort((a, b) => a - b) });
-    if (!force && sig === dirSig && els.directory.childElementCount) return;
-    if (els.directory.contains(document.activeElement)) return; // operator mid-edit
+    const sig = JSON.stringify({ dir: cfg.directory, shown: visible.map((v) => v.entry[LID]), q: terms, liveOnly, open: [...dirOpen].sort((a, b) => a - b) });
+    const liveSig = JSON.stringify({ live, dusers: discordUsersSig() });
+    if (!force && sig === dirSig && els.directory.childElementCount) {
+      if (liveSig !== dirLiveSig) { dirLiveSig = liveSig; updateDirectoryLive(live, liveSet, users); } // membership only: in place
+      return;
+    }
+    if (els.directory.contains(document.activeElement)) { dirStale = true; return; } // operator mid-edit: redraw when focus leaves
+    dirStale = false;
     dirSig = sig;
+    dirLiveSig = liveSig;
 
     const userOpts = Object.entries(users);
     els.directory.innerHTML = '';
     if (!visible.length) {
       const empty = document.createElement('div');
       empty.className = 'dir-empty';
-      empty.textContent = total === 0
+      empty.textContent = (total + unsaved) === 0
         ? 'No entries yet — guests are added automatically when they join, or add one yourself with "+ Add guest".'
         : 'No guest matches this filter.';
       els.directory.appendChild(empty);
@@ -1217,11 +1330,18 @@
       return f;
     };
 
-    for (const { entry, idx, st } of visible) {
-      const open = dirOpen.has(idx);
+    for (const { entry, st } of visible) {
+      const open = dirOpen.has(entry[LID]);
       const row = document.createElement('div');
       row.className = 'vdo-dir-row' + (open ? ' open' : '');
-      row.dataset.idx = String(idx);
+      row.dataset.lid = String(entry[LID]);
+      row.dataset.idx = String(cfg.directory.indexOf(entry)); // where it sits in the book when drawn (for reading the page; no handler uses it)
+      // What this row was drawn showing: a change commits only the fields that differ from it (GRN-28), and it names the entry the
+      // row came from if another writer's state has been adopted since.
+      row.dataset.baseLabel = String(entry.vdoLabel ?? '');
+      row.dataset.baseDisc = String(entry.discordUserId ?? '');
+      row.dataset.baseName = String(entry.displayName ?? '');
+      row.dataset.baseSocials = GRDir.socialsToText(entry.socials);
 
       const head = document.createElement('div');
       head.className = 'dir-head';
@@ -1235,9 +1355,7 @@
 
       const dot = document.createElement('span');
       dot.className = 'dir-dot' + (st.any ? ' live' : '');
-      dot.title = st.vdo && st.disc ? 'live in the VDO room + the voice channel'
-        : st.vdo ? 'live in the VDO room'
-          : st.disc ? 'in the voice channel' : 'not live';
+      dot.title = dotTitle(st);
 
       const dispIn = document.createElement('input');
       dispIn.type = 'text';
@@ -1249,15 +1367,8 @@
       const meta = document.createElement('span');
       meta.className = 'dir-meta';
       const u = entry.discordUserId ? users[entry.discordUserId] : null;
-      const bits = [];
-      if (entry.vdoLabel) bits.push('label ' + entry.vdoLabel);
-      if (entry.discordUserId) bits.push('discord ' + ((u && u.username) || entry.discordUserId));
-      if (!bits.length) bits.push('no match key yet');
-      const nSoc = (entry.socials || []).length;
-      if (nSoc) bits.push(nSoc + (nSoc === 1 ? ' social' : ' socials'));
-      meta.textContent = bits.join(' · ');
+      meta.textContent = metaText(entry, u) || 'no match key yet';
       meta.title = meta.textContent + ' — click to edit';
-
       head.append(toggle, dot, dispIn, meta);
 
       if (entry.auto) {
@@ -1267,6 +1378,7 @@
         badge.title = 'Placeholder name taken from the guest — rename it to make this entry yours';
         head.appendChild(badge);
       }
+      if (dirHints.has(entry[LID])) head.appendChild(hintEl());
 
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
@@ -1275,8 +1387,8 @@
       removeBtn.title = 'Remove this guest — and stop auto-adding them';
       head.appendChild(removeBtn);
 
-      // The detail fields are always in the DOM (CSS hides them while collapsed),
-      // so the merge read below always sees every field of every rendered row.
+      // The detail fields are always in the DOM (CSS hides them while collapsed), so a change always reads every field of its row.
+      // The two pick lists exist only for an expanded row: a collapsed row costs a constant amount (GRN-182).
       const labelIn = document.createElement('input');
       labelIn.type = 'text';
       labelIn.className = 'vdo-dir-label';
@@ -1284,36 +1396,12 @@
       labelIn.spellcheck = false;
       labelIn.value = String(entry.vdoLabel ?? '');
 
-      const labelPick = document.createElement('select');
-      labelPick.className = 'vdo-dir-label-pick';
-      labelPick.title = 'Pick a live vdo.ninja label';
-      const l0 = document.createElement('option');
-      l0.value = ''; l0.textContent = live.length ? 'live labels…' : '(no guests live)';
-      labelPick.appendChild(l0);
-      for (const l of live) {
-        const o = document.createElement('option');
-        o.value = l; o.textContent = l;
-        labelPick.appendChild(o);
-      }
-
       const discIn = document.createElement('input');
       discIn.type = 'text';
       discIn.className = 'vdo-dir-discord-id';
       discIn.placeholder = 'Discord User ID';
       discIn.inputMode = 'numeric';
       discIn.value = String(entry.discordUserId ?? '');
-
-      const discPick = document.createElement('select');
-      discPick.className = 'vdo-dir-discord-pick';
-      discPick.title = 'Pick a user currently in the voice channel';
-      const p0 = document.createElement('option');
-      p0.value = ''; p0.textContent = userOpts.length ? 'in channel…' : '(no one in channel)';
-      discPick.appendChild(p0);
-      for (const [uid, du] of userOpts) {
-        const o = document.createElement('option');
-        o.value = uid; o.textContent = (du && du.username) || uid;
-        discPick.appendChild(o);
-      }
 
       const socialsTa = document.createElement('textarea');
       socialsTa.className = 'vdo-dir-socials';
@@ -1324,37 +1412,59 @@
 
       const body = document.createElement('div');
       body.className = 'dir-body';
+      const labelCtl = [labelIn];
+      const discCtl = [discIn];
+      if (open) {
+        const labelPick = document.createElement('select');
+        labelPick.className = 'vdo-dir-label-pick';
+        labelPick.title = 'Pick a live vdo.ninja label';
+        fillLabelPick(labelPick, live);
+        const discPick = document.createElement('select');
+        discPick.className = 'vdo-dir-discord-pick';
+        discPick.title = 'Pick a user currently in the voice channel';
+        fillUserPick(discPick, userOpts);
+        labelCtl.push(labelPick);
+        discCtl.push(discPick);
+      }
       const socialsField = field('socials', socialsTa);
       socialsField.classList.add('wide');
-      body.append(field('vdo label', labelIn, labelPick), field('discord', discIn, discPick), socialsField);
+      body.append(field('vdo label', ...labelCtl), field('discord', ...discCtl), socialsField);
 
       row.append(head, body);
       els.directory.appendChild(row);
     }
   }
+  // Leaving the editor runs the redraw that was held back (another page's state was adopted, or the guests changed, meanwhile).
+  let dirFlushTimer = null;
+  els.directory.addEventListener('focusout', (e) => {
+    if (!dirStale) return;
+    if (e.relatedTarget && els.directory.contains(e.relatedTarget)) return; // still inside the editor
+    clearTimeout(dirFlushTimer);
+    dirFlushTimer = setTimeout(() => { if (dirStale) renderDirectory(true); }, 150);
+  });
 
-  // Read the rendered rows back into a full copy of the directory: rows merge by
-  // data-idx, filtered-away entries pass through untouched. Half-complete rows are
-  // kept as-is (only the wire copy is sanitized when it is pushed).
-  function directoryFromDom() {
-    // Unknown fields of an entry (and of its socials) ride along through the editor.
-    const out = cfg.directory.map((e) => Object.assign({
-      vdoLabel: String(e.vdoLabel ?? ''), discordUserId: String(e.discordUserId ?? ''),
-      displayName: String(e.displayName ?? ''), socials: (e.socials || []).slice(), auto: !!e.auto,
-    }, GRDir.extraFields(e, GRDir.DIR_KEYS)));
-    for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
-      const i = Number(row.dataset.idx);
-      if (!Number.isInteger(i) || i < 0 || i >= out.length) continue;
-      const val = (cls) => { const el = row.querySelector(cls); return el ? el.value : ''; };
-      out[i] = Object.assign({
-        vdoLabel: val('input.vdo-dir-label').trim(),
-        discordUserId: val('input.vdo-dir-discord-id').replace(/\D/g, ''),
-        displayName: val('input.vdo-dir-display').trim(),
-        socials: GRDir.carrySocialExtras(out[i].socials, GRDir.parseSocialsText(val('textarea.vdo-dir-socials'))),
-        auto: out[i].auto,
-      }, GRDir.extraFields(out[i], GRDir.DIR_KEYS));
-    }
-    return out;
+  // What a row is showing right now, raw (the base it was drawn with is in its data attributes).
+  function readRow(row) {
+    const val = (cls) => { const el = row.querySelector(cls); return el ? el.value : ''; };
+    return { label: val('input.vdo-dir-label'), disc: val('input.vdo-dir-discord-id'), name: val('input.vdo-dir-display'), socials: val('textarea.vdo-dir-socials') };
+  }
+  function baseOf(row) {
+    const d = row.dataset;
+    return { label: d.baseLabel || '', disc: d.baseDisc || '', name: d.baseName || '', socials: d.baseSocials || '' };
+  }
+  function setBase(row, b) {
+    row.dataset.baseLabel = b.label; row.dataset.baseDisc = b.disc; row.dataset.baseName = b.name; row.dataset.baseSocials = b.socials;
+  }
+  // The entry a row belongs to: by its page id; if another writer's state has been adopted since the row was drawn, by the keys the
+  // row was drawn showing (and the row takes that entry's id from then on).
+  function rowTarget(row) {
+    const lid = Number(row.dataset.lid);
+    const hit = cfg.directory.find((e) => e[LID] === lid);
+    if (hit) return hit;
+    const b = baseOf(row);
+    const e = (b.label.trim() && GRDir.findByLabel(cfg.directory, b.label)) || (b.disc && GRDir.findByUserId(cfg.directory, b.disc)) || null;
+    if (e) e[LID] = lid;
+    return e;
   }
 
   // "Don't bring this guest back": removing an entry, or clearing one of its match
@@ -1363,29 +1473,112 @@
     cfg.directoryIgnored = GRDir.sanitizeIgnored((cfg.directoryIgnored || []).concat(keys.filter(Boolean)));
   }
 
-  // Append placeholder entries for whoever is live and unknown. Reads the DOM
-  // first so an in-progress edit survives the append, and returns true when the
-  // directory actually grew (the caller pushes).
+  // Commit one row (GRN-28, GRN-71, GRN-111, GRN-134): write only the fields the operator changed, on the entry the row belongs to,
+  // and nothing else. Fields the operator did not touch keep cfg's value, so an auto-fill that landed while the row had focus is not
+  // undone, and the other rows are never read.
+  function commitRow(row) {
+    const raw = readRow(row);
+    const b = baseOf(row);
+    const lid = Number(row.dataset.lid);
+    let e = rowTarget(row);
+    if (!e) { // another page removed the entry while this row was open: this edit brings it back
+      e = { vdoLabel: b.label.trim(), discordUserId: b.disc, displayName: b.name.trim(), socials: GRDir.parseSocialsText(b.socials), auto: false };
+      e[LID] = lid;
+      cfg.directory.push(e);
+    }
+    const nameEl = row.querySelector('input.vdo-dir-display');
+    row.querySelectorAll('.dir-hint').forEach((h) => h.remove());
+    dirHints.delete(e[LID]);
+    let touched = false;
+    if (raw.name !== b.name) {
+      if (!raw.name.trim() && b.name.trim()) { // decision 12 (A): only × removes an entry; an emptied name comes back
+        nameEl.value = b.name;
+        dirHints.add(e[LID]);
+        row.querySelector('.dir-head').insertBefore(hintEl(), row.querySelector('.vdo-dir-remove'));
+      } else {
+        e.displayName = raw.name.trim();
+        nameEl.value = e.displayName;
+        b.name = e.displayName;
+        touched = true;
+      }
+    }
+    if (raw.label !== b.label) {
+      const next = raw.label.trim();
+      if (b.label.trim() && !next) ignoreKeys(GRDir.labelKey(b.label)); // the operator emptied the field
+      e.vdoLabel = next;
+      b.label = next;
+      row.querySelector('input.vdo-dir-label').value = next;
+      touched = true;
+    }
+    if (raw.disc !== b.disc) {
+      const next = raw.disc.replace(/\D/g, '');
+      if (b.disc && !next) ignoreKeys(GRDir.userKey(b.disc));
+      e.discordUserId = next;
+      b.disc = next;
+      row.querySelector('input.vdo-dir-discord-id').value = next;
+      touched = true;
+    }
+    if (raw.socials !== b.socials) {
+      e.socials = GRDir.carrySocialExtras(e.socials, GRDir.parseSocialsText(raw.socials));
+      b.socials = raw.socials;
+      touched = true;
+    }
+    if (touched) {
+      e.auto = false; // naming or changing a guest yourself makes the entry yours; the placeholder badge goes at once
+      const badge = row.querySelector('.dir-badge');
+      if (badge) badge.remove();
+    }
+    setBase(row, b);
+    dirSig = ''; // the rows are redrawn by the next render that finds the operator elsewhere (never under the Tab that caused this)
+    renderDirectoryCounts(); // the counts and the footer buttons follow at once
+    if (touched) operatorAction(() => assembleAndPush(false));
+  }
+
+  // Per-session record of what this page has auto-added (GRN-65 step 2): a label or user is appended once. A label that Streamer.bot
+  // rewrites on the way back would otherwise look new on every poll and loop.
+  const autoAdded = new Set();
+  const addedKeys = (e) => [e.vdoLabel && GRDir.labelKey(e.vdoLabel), e.discordUserId && GRDir.userKey(e.discordUserId)].filter(Boolean);
+
+  // Append placeholder entries for whoever is live and unknown, and fill in Discord ids on existing entries; returns true when
+  // cfg.directory changed (the caller pushes). It works on cfg.directory plus the keys each row on screen is showing right now
+  // (so a label typed into a draft, or cleared mid-edit, is respected), but only autoPopulate's own changes are applied: the view is
+  // never assigned back, so a half-edited row never reaches cfg or a push (GRN-72, GRN-63).
   function runAutoAdd() {
     if (!synced || cfg.directoryAutoAdd === false) return false;
-    const base = els.directory.querySelector('.vdo-dir-row') ? directoryFromDom() : cfg.directory;
+    const base = cfg.directory;
+    const pending = [];
+    for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
+      const r = readRow(row);
+      pending.push({ vdoLabel: r.label.trim(), discordUserId: r.disc.replace(/\D/g, ''), displayName: '', socials: [], auto: false });
+    }
+    const view = base.concat(pending); // the committed entries keep their indices
     const res = GRDir.autoPopulate({
-      directory: base,
+      directory: view,
       ignored: cfg.directoryIgnored,
       labels: rosterLabels(),
       users: (discord && discord.users) || {},
+      skip: [...autoAdded],
     });
-    cfg.directory = res.directory;
     if (!res.changed) return false;
-    dirSig = '';
-    return true;
+    let changed = false;
+    for (let i = 0; i < base.length; i++) {
+      const n = res.directory[i];
+      if (n && !base[i].discordUserId && n.discordUserId) { base[i].discordUserId = n.discordUserId; changed = true; }
+    }
+    for (let i = view.length; i < res.directory.length; i++) {
+      const added = res.directory[i];
+      lidOf(added);
+      base.push(added);
+      addedKeys(added).forEach((k) => autoAdded.add(k));
+      changed = true;
+    }
+    if (changed) dirSig = '';
+    return changed;
   }
 
   els.directory.addEventListener('change', (e) => {
     const row = e.target.closest('.vdo-dir-row');
     if (!row) return;
-    const idx = Number(row.dataset.idx);
-    const before = cfg.directory[idx] || null;
     if (e.target.classList.contains('vdo-dir-label-pick') && e.target.value) {
       const input = row.querySelector('input.vdo-dir-label');
       if (input) input.value = e.target.value;
@@ -1396,29 +1589,19 @@
       if (input) input.value = e.target.value;
       e.target.value = '';
     }
-    const next = directoryFromDom();
-    const entry = next[idx];
-    // Naming a guest yourself makes the entry yours — the auto placeholder is gone.
-    if (entry && e.target.classList.contains('vdo-dir-display')) entry.auto = false;
-    if (before && entry) {
-      if (before.vdoLabel && !entry.vdoLabel) ignoreKeys(GRDir.labelKey(before.vdoLabel));
-      if (before.discordUserId && !entry.discordUserId) ignoreKeys(GRDir.userKey(before.discordUserId));
-    }
-    cfg.directory = next;
-    dirSig = '';
-    operatorAction(() => assembleAndPush(false));
+    commitRow(row);
   });
 
   els.directory.addEventListener('click', (e) => {
     const row = e.target.closest('.vdo-dir-row');
     if (!row) return;
-    const idx = Number(row.dataset.idx);
+    const lid = Number(row.dataset.lid);
 
     // Caret or summary text expands/collapses the row (view state only, no push).
     if (e.target.closest('.dir-toggle, .dir-meta')) {
-      if (dirOpen.has(idx)) dirOpen.delete(idx); else dirOpen.add(idx);
-      cfg.directory = directoryFromDom(); // keep un-blurred edits before the rebuild
+      if (dirOpen.has(lid)) dirOpen.delete(lid); else dirOpen.add(lid);
       dirSig = '';
+      // Leaving a field with a pending edit commits it first (its change event fires on blur), then the row is redrawn.
       if (document.activeElement && row.contains(document.activeElement)) document.activeElement.blur();
       renderDirectory(true);
       return;
@@ -1426,18 +1609,14 @@
 
     const btn = e.target.closest('.vdo-dir-remove');
     if (!btn) return;
-    const entries = directoryFromDom();
-    const entry = entries[idx];
-    if (!entry) return;
-    const hasContent = entry.vdoLabel || entry.discordUserId || entry.displayName || entry.socials.length;
+    const entry = rowTarget(row);
+    if (!entry) { dirSig = ''; renderDirectory(true); return; } // already gone
+    const hasContent = entry.vdoLabel || entry.discordUserId || entry.displayName || (entry.socials || []).length;
     if (hasContent && !confirm(`Remove "${entry.displayName || entry.vdoLabel || entry.discordUserId}" from the directory?\n\nThey will not be auto-added again (undo with "Un-ignore removed").`)) return;
     ignoreKeys(entry.vdoLabel && GRDir.labelKey(entry.vdoLabel), entry.discordUserId && GRDir.userKey(entry.discordUserId));
-    entries.splice(idx, 1);
-    cfg.directory = entries;
-    // Expanded-row indices shift with the splice.
-    const shifted = [...dirOpen].filter((i) => i !== idx).map((i) => (i > idx ? i - 1 : i));
-    dirOpen.clear();
-    shifted.forEach((i) => dirOpen.add(i));
+    addedKeys(entry).forEach((k) => autoAdded.delete(k));
+    cfg.directory.splice(cfg.directory.indexOf(entry), 1);
+    dirOpen.delete(entry[LID]);
     dirSig = '';
     btn.blur(); // the focus guard would otherwise skip the forced re-render
     renderDirectory(true);
@@ -1447,7 +1626,6 @@
   els.dirSearch.addEventListener('input', () => { dirSig = ''; renderDirectory(true); });
   els.dirLiveOnly.addEventListener('change', () => { dirSig = ''; renderDirectory(true); });
   els.dirAutoAdd.addEventListener('change', () => {
-    cfg.directory = directoryFromDom();
     cfg.directoryAutoAdd = els.dirAutoAdd.checked;
     runAutoAdd(); // ticking it back on adopts everyone live right now
     dirSig = '';
@@ -1456,28 +1634,29 @@
   });
 
   $('btnDirAdd').addEventListener('click', () => {
-    cfg.directory = directoryFromDom();
-    cfg.directory.push({ vdoLabel: '', discordUserId: '', displayName: '', socials: [], auto: false });
+    const draft = { vdoLabel: '', discordUserId: '', displayName: '', socials: [], auto: false };
+    lidOf(draft);
+    cfg.directory.push(draft);
     // A draft row matches no search and isn't live — clear the filters or it would
     // render into nothing.
     els.dirSearch.value = '';
     els.dirLiveOnly.checked = false;
-    dirOpen.add(cfg.directory.length - 1); // open the new row on its editor
+    dirOpen.add(draft[LID]); // open the new row on its editor
     dirSig = '';
     renderDirectory(true);
     // Focus the draft row so an incoming push (director-min resolving a slot)
     // can't re-render it away before the operator types anything.
     const rows = els.directory.querySelectorAll('.vdo-dir-row');
-    const draft = rows.length && rows[rows.length - 1].querySelector('input.vdo-dir-display');
-    if (draft) draft.focus();
+    const input = rows.length && rows[rows.length - 1].querySelector('input.vdo-dir-display');
+    if (input) input.focus();
   });
 
   els.dirClearAuto.addEventListener('click', () => {
-    const entries = directoryFromDom();
-    const autos = entries.filter((e) => e.auto);
+    const autos = cfg.directory.filter((e) => e.auto);
     if (!autos.length) return;
     if (!confirm(`Remove ${autos.length} auto-added guest${autos.length === 1 ? '' : 's'} (the ones still showing an "auto" badge)?\n\nAnyone still live is re-added with a placeholder name on the next poll — untick "auto-add guests" first to keep them out.`)) return;
-    cfg.directory = entries.filter((e) => !e.auto);
+    cfg.directory = cfg.directory.filter((e) => !e.auto);
+    autoAdded.clear(); // "re-added on the next poll" must stay true
     dirOpen.clear();
     dirSig = '';
     renderDirectory(true);
@@ -1488,8 +1667,8 @@
     const n = (cfg.directoryIgnored || []).length;
     if (!n) return;
     if (!confirm(`Stop ignoring ${n} removed guest${n === 1 ? '' : 's'}?\n\nThey are auto-added again while they are live.`)) return;
-    cfg.directory = directoryFromDom();
     cfg.directoryIgnored = [];
+    autoAdded.clear();
     runAutoAdd();
     dirSig = '';
     renderDirectory(true);

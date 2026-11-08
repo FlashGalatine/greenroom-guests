@@ -245,6 +245,9 @@
   // Auto-populate from whoever is live right now. Returns true if the directory
   // grew/changed — the caller pushes. Deterministic (directory-core sorts its
   // candidates), so control.html running the same inputs lands on the same array.
+  // Per-session record of what this page has auto-added (GRN-65): a label or user is appended once, so a label that Streamer.bot
+  // rewrites on the way back cannot look new on every poll and loop.
+  const autoAdded = new Set();
   function runAutoAdd() {
     if (!synced || !cfg.directoryAutoAdd) return false;
     const res = GRDir.autoPopulate({
@@ -252,8 +255,14 @@
       ignored: cfg.directoryIgnored,
       labels: roster.map((g) => g.label),
       users: discordUsers,
+      skip: [...autoAdded],
     });
     if (!res.changed) return false;
+    for (let i = cfg.directory.length; i < res.directory.length; i++) {
+      const e = res.directory[i];
+      if (e.vdoLabel) autoAdded.add(GRDir.labelKey(e.vdoLabel));
+      if (e.discordUserId) autoAdded.add(GRDir.userKey(e.discordUserId));
+    }
     cfg.directory = res.directory;
     return true;
   }
@@ -454,8 +463,9 @@
         // syncDirectorFrame says nothing when the frame URL did not change, so a late
         // reply for a disabled config would leave 'has not answered' on screen.
         showSteady();
-        const added = runAutoAdd(); // late arrivals in a replayed room
-        if (heal || added) assembleAndPush(false);
+        // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding
+        // here could answer a rewrite of it with a push of our own (GRN-65).
+        if (heal) assembleAndPush(false);
       } else if (d.type === 'vdo:sync:empty') {
         // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.
         markSynced();

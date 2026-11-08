@@ -269,10 +269,10 @@ exercised on a live rig. Outcomes, faithfully:
   it, or untick **auto-add guests** in the directory bar; **Clear auto-added**
   removes every placeholder at once.
 - **A removed guest keeps coming back** → they're live and auto-add is on, and the
-  ignore key is only recorded by the row's `×` (or by clearing its match key).
-  Blanking the *name* just drops the entry — a nameless entry never reaches the
-  wire, so the next poll re-invents it. **Un-ignore removed (N)** shows how many
-  guests are currently suppressed.
+  ignore key is only recorded by the row's `×` (or by emptying its VDO label or
+  Discord ID field). Emptying the *name* does not remove anyone: the old name
+  comes back with a "use × to remove" hint, because only `×` removes an entry.
+  **Un-ignore removed (N)** shows how many guests are currently suppressed.
 - **Lost your room/slots/guest directory** (SB reinstall, wiped globals, moved
   machines) → the dock config lives only in SB's persisted `vdo.state`. Keep a
   file copy: the control page's **Export/Import config** buttons, or the CLI
