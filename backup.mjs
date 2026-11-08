@@ -44,6 +44,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const BACKUP_DIR = process.env.GREENROOM_BACKUP_DIR ? resolve(process.env.GREENROOM_BACKUP_DIR) : resolve(__dirname, 'backups');
 const CONNECT_MS = 6000; // give up if SB isn't listening
 const REPLY_MS = 5000;   // wait for a sync replay / push rebroadcast
+const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish'; // the control page's default view flags
 const SUPPORTED_SCHEMA = 1; // the newest vdo.state schemaVersion this tool knows (the control page's SCHEMA_VERSION)
 
 function die(msg, code = 1) { console.error('backup: ' + msg); process.exit(code); }
@@ -278,7 +279,9 @@ function checkSnapshot(parsed) {
     return { problem: 'that file stores a Discord user ID as a number, which has already lost digits. Edit the file so each ID is in quotes ("discordUserId": "123..."), or save the snapshot again.' };
   }
   const dir = loadDirectoryCore().sanitizeDirectory(payload.directory);
-  return { payload: { ...payload, directory: dir }, dropped: payload.directory.length - dir.length };
+  // A snapshot without viewFlags (older, or hand-made) would give the overlay no flags at all: restore the default ones.
+  const withFlags = typeof payload.viewFlags === 'string' ? payload : { ...payload, viewFlags: DEFAULT_VIEWFLAGS };
+  return { payload: { ...withFlags, directory: dir }, dropped: payload.directory.length - dir.length };
 }
 
 async function restore(file) {

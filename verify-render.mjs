@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures' and 'directory' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory' and 'urls' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -2666,6 +2666,167 @@ async function main() {
         const ps = await pushPayloads(x);
         check('R15l: after an Import whose book lacks the live guests, the next poll adds them again', ps.some((q) => q.directory.some((e) => e.vdoLabel === 'ALPHA')), JSON.stringify(ps.map((q) => q.directory.length)));
         await p.close();
+      }
+    }
+
+    // ── R16: one vdo.ninja URL helper for the flags and the room password (GRN-88, 61, 15, 101, 102, 163, 161, 131, 177) ──
+    if (!ONLY || ONLY === 'urls') {
+      console.log('\n[R16] urls: the password twice encoded in every builder, flags normalised and sanitised, solo by default');
+      const R16_SECTIONS = 'abcdefg'.split('');
+      for (const k of (process.env.R16_ONLY || '').split(',').filter(Boolean)) if (!R16_SECTIONS.includes(k)) throw new Error('R16_ONLY=' + k + ': the sections are ' + R16_SECTIONS.join(', '));
+      const want = (k) => !process.env.R16_ONLY || process.env.R16_ONLY.split(',').includes(k);
+      const PW = 'p&w #1';
+      const mkSeed = (extra) => Object.assign({ enabled: true, room: 'url room', password: PW, viewFlags: VIEWFLAGS,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'plaintext' }, directory: [] }, extra || {});
+      const QUIET = '?fixed=1&delay=600000';
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const seededMock = async (seed) => {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const overlaySrc = async (x, seed, init) => {
+        const p = await newPage(browser, { width: 640, height: 360 });
+        if (init) await p.addInitScript(init);
+        await p.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, () => (document.getElementById('frame')?.getAttribute('src') || '').startsWith('https://vdo.ninja/'), null, 8000);
+        const src = await p.evaluate(() => document.getElementById('frame')?.getAttribute('src') || '');
+        return { p, src };
+      };
+      const openControl = async (x, q, seed) => {
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r, seed.room, 8000);
+        await sleep(800);
+        return p;
+      };
+
+      // (a) The guest view URL with password "p&w #1" and empty flags (GRN-177, GRN-101, GRN-61).
+      if (want('a')) {
+        const seed = mkSeed({ viewFlags: '' });
+        const x = await seededMock(seed);
+        const { p, src } = await overlaySrc(x, seed);
+        const u = new URL(src);
+        check('R16a: the slot view URL carries the password as encodeURIComponent("p&w #1") (vdo.ninja\'s second decode restores it), no hash, the room, and solo although the saved flags are empty',
+          u.searchParams.get('password') === encodeURIComponent(PW) && u.hash === '' && u.searchParams.get('room') === 'url room' && u.searchParams.get('view') === 'aaa111' && u.searchParams.has('solo'), src);
+        await p.close();
+      }
+      // (b) Whatever vdo.state holds: flags without a leading &, script and room-identity flags (old pages, imports, backups) (GRN-88, GRN-15).
+      if (want('b')) {
+        const seed = mkSeed({ viewFlags: 'cleanish&js=//evil.example/x.js&b64js=eA&css=//e&password=hijack&room=other&hash=ab12' });
+        const x = await seededMock(seed);
+        const { p, src } = await overlaySrc(x, seed);
+        const u = new URL(src);
+        check('R16b: flags saved without a leading "&" work; js, b64js, css and the room-identity flags in them are dropped at the overlay; the room and password are the config\'s',
+          u.searchParams.has('cleanish') && u.searchParams.has('solo') && !u.searchParams.has('js') && !u.searchParams.has('b64js') && !u.searchParams.has('css') && !u.searchParams.has('hash')
+          && u.searchParams.get('room') === 'url room' && u.searchParams.get('password') === encodeURIComponent(PW), src);
+        await p.close();
+        const seed2 = mkSeed({ viewFlags: '?scene=2&cleanish' });
+        const y = await seededMock(seed2);
+        const r = await overlaySrc(y, seed2);
+        const u2 = new URL(r.src);
+        check('R16b2: flags with a leading "?" work, and a scene flag keeps the view from being forced solo', u2.searchParams.get('scene') === '2' && u2.searchParams.has('cleanish') && !u2.searchParams.has('solo'), r.src);
+        await r.p.close();
+      }
+      // (c) The hidden director's URL: the password twice encoded, on both pages (GRN-101, GRN-102).
+      if (want('c')) {
+        const seed = mkSeed({ password: 'abc%41' });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const src = await p.evaluate(() => document.getElementById('vdoDirector').getAttribute('src') || '');
+        check('R16c: the dock\'s director URL carries the password twice encoded (abc%41 → abc%252541)', /[?&]password=abc%252541(&|$)/.test(src), src);
+        await p.close();
+        const m = await newPage(browser, { width: 480, height: 120 }, mockDir(x, QUIET));
+        await m.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(1500);
+        const msrc = await m.evaluate(() => document.getElementById('vdoDirector').getAttribute('src') || '');
+        check('R16c2: director-min\'s director URL does too', /[?&]password=abc%252541(&|$)/.test(msrc), msrc);
+        await m.close();
+        const seedOff = mkSeed({ password: ' off ' });
+        const y = await seededMock(seedOff);
+        const q = await openControl(y, QUIET, seedOff);
+        const osrc = await q.evaluate(() => document.getElementById('vdoDirector').getAttribute('src') || '');
+        check('R16c3: a password of "off" (vdo.ninja\'s "no password") is not sent', !/password=/.test(osrc), osrc);
+        await q.close();
+      }
+      // (d) The invite and manage links: plaintext twice encoded; "none" with a password prompts the guest; no password, no parameter (GRN-101, 102, 163).
+      if (want('d')) {
+        const seed = mkSeed({ password: 'abc%41' });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const links = () => p.evaluate(() => ({ invite: document.getElementById('vdoInviteLink').value, manage: document.getElementById('vdoManageLink').value }));
+        const plain = await links();
+        check('R16d: plaintext mode: the invite and manage links carry the password twice encoded', /[?&]password=abc%252541(&|$)/.test(plain.invite) && /[?&]password=abc%252541(&|$)/.test(plain.manage), JSON.stringify(plain));
+        await p.selectOption('#vdoInvPasswordMode', 'none');
+        await sleep(300);
+        const none = await links();
+        check('R16d2: "none" with a room password emits a bare &password, so vdo.ninja asks the guest for it (not a link into a different room)', /[?&]password(&|$)/.test(none.invite) && !/password=/.test(none.invite) && /[?&]password(&|$)/.test(none.manage), JSON.stringify(none));
+        await p.close();
+        const seedNo = mkSeed({ password: '0' });
+        const y = await seededMock(seedNo);
+        const q = await openControl(y, QUIET, seedNo);
+        const none2 = await q.evaluate(() => document.getElementById('vdoInviteLink').value);
+        await q.selectOption('#vdoInvPasswordMode', 'hash');
+        await sleep(500);
+        const hash2 = await q.evaluate(() => document.getElementById('vdoInviteLink').value);
+        check('R16d3: a password of "0" is no password: no password or hash parameter in any mode', !/password|hash=/.test(none2) && !/password|hash=/.test(hash2), JSON.stringify({ none2, hash2 }));
+        await q.close();
+      }
+      // (e) Saving flags: normalised and sanitised, with a warning naming what was removed (GRN-88, GRN-15).
+      if (want('e')) {
+        const seed = mkSeed({ viewFlags: VIEWFLAGS });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        await x.api.clear();
+        await p.fill('#vdoViewFlags', 'cleanish&js=//evil&b64js=eA&solo');
+        await p.click('#btnVdoSave');
+        await sleep(1500);
+        const ps = pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+        const warn = await p.evaluate(() => document.getElementById('vdoFlagsWarn')?.textContent || '');
+        check('R16e: Save stores the flags with a leading "&" and without js and b64js, and says which were removed',
+          ps.length === 1 && ps[0].viewFlags === '&cleanish&solo' && /js/.test(warn) && /b64js/.test(warn), JSON.stringify({ flags: ps[0] && ps[0].viewFlags, warn }));
+        await p.click('#btnVdoFlagsReset');
+        const reset = await p.inputValue('#vdoViewFlags');
+        const ph = await p.getAttribute('#vdoViewFlags', 'placeholder');
+        check('R16e2: "reset to default" puts the default flags back, and the box shows the default as its placeholder', reset === VIEWFLAGS && ph === VIEWFLAGS, JSON.stringify({ reset, ph }));
+        await p.close();
+        // a saved state that holds script flags (an old page, a backup): the dock keeps it, says so, and pushes nothing by itself
+        const bad = mkSeed({ viewFlags: '&solo&js=//evil' });
+        const y = await seededMock(bad);
+        const q = await openControl(y, QUIET, bad);
+        const keep = await q.inputValue('#vdoViewFlags');
+        const warn2 = await q.evaluate(() => document.getElementById('vdoFlagsWarn')?.textContent || '');
+        const psY = pushesOf(await y.api.actions());
+        check('R16e3: a saved state with a script flag is kept as it is and the dock warns that the overlay ignores it; nothing is pushed by the adoption', keep === '&solo&js=//evil' && /js/.test(warn2) && psY.length === 0, JSON.stringify({ keep, warn2, pushes: psY.length }));
+        await q.close();
+      }
+      // (f) The guest overlay on a page that is not a secure context: no viewer is started, the source says why (GRN-161, overlay half).
+      if (want('f')) {
+        const seed = mkSeed({});
+        const x = await seededMock(seed);
+        const p = await newPage(browser, { width: 640, height: 360 });
+        await p.addInitScript('Object.defineProperty(window, "isSecureContext", { value: false });');
+        await p.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(2500);
+        const st = await p.evaluate(() => ({ src: document.getElementById('frame')?.getAttribute('src') || '', text: document.body.innerText }));
+        check('R16f: the guest overlay on an insecure origin loads no viewer and says to open the source via http://127.0.0.1:<port>', /about:blank|^$/.test(st.src) && /127\.0\.0\.1/.test(st.text), JSON.stringify(st));
+        await p.close();
+      }
+      // (g) director-min fills a missing viewFlags with the default, like the dock (GRN-131).
+      if (want('g')) {
+        const seed = mkSeed({});
+        delete seed.viewFlags;
+        const x = await seededMock(seed);
+        const m = await newPage(browser, { width: 480, height: 120 }, mockDir(x, QUIET));
+        await m.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(1500);
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() }); // makes director-min auto-add and push its view of the config
+        await sleep(2500);
+        const st = await x.api.state();
+        check('R16g: director-min pushing a config that had no viewFlags pushes the default flags (not an empty string)', !!st.vdo && st.vdo.viewFlags === VIEWFLAGS, JSON.stringify(st.vdo && st.vdo.viewFlags));
+        await m.close();
       }
     }
 

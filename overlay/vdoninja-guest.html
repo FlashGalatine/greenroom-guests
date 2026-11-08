@@ -33,6 +33,7 @@
 </script>
 <script src="panel-client-sb.js"></script>
 <script src="nameplate-shared.js"></script>
+<script src="vdo-url.js"></script>
 </head>
 <body>
 <script>
@@ -117,14 +118,18 @@
     if (dpfpImg.getAttribute('src') !== fallback) dpfpImg.src = fallback;
   });
 
-  // view/room/password are added programmatically; viewFlags carries the cosmetic
-  // flags (already leading with '&').
-  function buildUrl(v, streamID) {
-    let url = 'https://vdo.ninja/?view=' + encodeURIComponent(streamID);
-    if (v.room) url += '&room=' + encodeURIComponent(v.room);
-    if (v.password) url += '&password=' + encodeURIComponent(v.password);
-    url += v.viewFlags || '';
-    return url;
+  // The view URL is built by the shared helper (vdo-url.js): the password encoded the way vdo.ninja reads it, the saved flags
+  // normalised and stripped of anything that could load script or style or change the room, and the view solo unless asked otherwise.
+  function buildUrl(v, streamID) { return GRVdoUrl.buildViewUrl(v, streamID); }
+
+  // vdo.ninja refuses to run inside a page that is not a secure context, so a viewer started here would stay black for ever: say so.
+  const INSECURE = !window.isSecureContext;
+  if (INSECURE) {
+    const err = document.createElement('div');
+    err.id = 'insecure';
+    err.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;padding:8px 10px;background:rgba(0,0,0,.75);color:#ffb454;font:14px/1.4 Consolas,monospace;border:1px solid #ffb454;z-index:10';
+    err.textContent = 'This source is not on a secure origin, so vdo.ninja would refuse to play. Open it via http://127.0.0.1:<port>/ (not a LAN name or file://).';
+    document.body.appendChild(err);
   }
 
   function defaultAvatar(userId) {
@@ -158,7 +163,7 @@
     // instant, no reload, works on the cross-origin vdo.ninja viewer.
     frame.style.transform = mine && mine.mirror ? 'scaleX(-1)' : 'none';
 
-    const url = v && streamID ? buildUrl(v, streamID) : 'about:blank';
+    const url = !INSECURE && v && streamID ? buildUrl(v, streamID) : 'about:blank';
     // Only reload the iframe when the resolved URL actually changes, so unrelated
     // pushes (another slot updating, or the voice feed) never interrupt our video.
     if (url !== lastUrl) {

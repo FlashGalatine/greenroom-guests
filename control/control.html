@@ -177,7 +177,9 @@
     <div class="row">
       <label style="flex:1; display:flex; gap:6px; align-items:center;">viewFlags
         <input type="text" id="vdoViewFlags" style="flex:1" spellcheck="false" /></label>
+      <button id="btnVdoFlagsReset" type="button" title="Put the default flags back (not saved until you press Save)">reset to default</button>
     </div>
+    <div id="vdoFlagsWarn" class="warn" role="status"></div>
     <div class="hint">Slots bind guests by their vdo.ninja <b>label</b>; the hidden director iframe
       re-resolves label → current streamID every 2.5&nbsp;s, so a guest who rejoins is re-followed
       automatically. Keep exactly one director page open (this page or director-min.html).</div>
@@ -190,7 +192,8 @@
     <div id="cryptoWarn" class="warn" hidden>This page is not on a secure origin (crypto.subtle is unavailable) —
       the &amp;hash= invite mode can't be computed here, and the director is NOT started: vdo.ninja
       would not accept it, and slots would never resolve. Open this page via http://127.0.0.1:&lt;port&gt;/ (not
-      a LAN name or file://), or use plaintext/none password mode.</div>
+      a LAN name or file://). Until then the invite builder uses plaintext password mode, or asks the guest for the password (none or
+      hash mode).</div>
   </section>
 
   <section>
@@ -322,6 +325,7 @@
 <script src="vdo-parse.js"></script>
 <script src="director-loop.js"></script>
 <script src="directory-core.js"></script>
+<script src="vdo-url.js"></script>
 <script>
 (function () {
   'use strict';
@@ -534,7 +538,7 @@
       enabled: !!v.enabled,
       room: String(v.room ?? ''),
       password: String(v.password ?? ''),
-      viewFlags: String(v.viewFlags ?? DEFAULT_VIEWFLAGS),
+      viewFlags: GRVdoUrl.normalizeFlags(v.viewFlags ?? DEFAULT_VIEWFLAGS),
       slots,
       invite: Object.assign(defaultInvite(), (v.invite && typeof v.invite === 'object') ? v.invite : {}),
       directory: sanitizeDirectory(v.directory),
@@ -811,6 +815,7 @@
       const drafts = oldDir.filter(isDraft); // this page's unfinished rows (GRN-96)
       if (!adoptCfg(v)) return; // not config-shaped: drop it
       carryLids(oldDir, cfg.directory); // an open or half-edited row keeps its entry
+      flagsNote = ''; // what Save removed from the flags was about the previous state
       reappendDrafts(drafts, oldDir);
       if (firstSync) reappendDrafts(loadDrafts(), []); // drafts from before a reload
       gotConfig = true; syncedByMarker = false; // a real config reached this page
@@ -930,11 +935,7 @@
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
     if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
-    const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
-    let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
-    if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
-    u += '&cleanish&novideo&noaudio'; // silent control-only director (no camera prompt)
-    return u;
+    return GRVdoUrl.buildDirectorUrl(DIRECTOR_BASE, cfg.room, cfg.password); // silent control-only director (no camera prompt); the password encoded the way vdo.ninja reads it
   }
 
   function syncDirectorFrame() {
@@ -969,6 +970,12 @@
   function setCheck(el, val) { if (document.activeElement !== el) el.checked = !!val; }
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
+  // The flags box: what the overlay ignores in the saved flags (script, style, room-identity flags), or what Save just removed.
+  let flagsNote = '';
+  function renderFlagsWarn() {
+    const dropped = GRVdoUrl.sanitizeViewFlags(cfg.viewFlags).dropped;
+    $('vdoFlagsWarn').textContent = flagsNote || (dropped.length ? 'The overlay ignores these flags in the saved config: ' + dropped.join(', ') + '. Remove them and press Save.' : '');
+  }
   function renderAll() {
     if (!dirty.has('room')) setIfNotFocused(els.room, cfg.room);
     if (!dirty.has('password')) setIfNotFocused(els.password, cfg.password);
@@ -979,6 +986,7 @@
     renderDirectory(true);
     renderInvite();
     rebuildLinks();
+    renderFlagsWarn();
     renderDiscordSection();
     syncDirectorFrame();
     renderSyncStatus();
@@ -1801,8 +1809,17 @@
   }
   // Save: the whole form (Room, Password, viewFlags and the director box).
   function saveRoom() {
-    const next = { room: els.room.value.trim(), password: els.password.value, viewFlags: els.viewFlags.value.trim(), enabled: els.enabled.checked };
-    if (!operatorAction(() => commitRoomGesture(next, true))) els.enabled.checked = cfg.enabled;
+    // The flags are stored normalised ('&a&b') and without anything that could load script or style or change the room; what was
+    // removed is named under the box.
+    const sv = GRVdoUrl.sanitizeViewFlags(GRVdoUrl.normalizeFlags(els.viewFlags.value));
+    const next = { room: els.room.value.trim(), password: els.password.value, viewFlags: sv.flags, enabled: els.enabled.checked };
+    const ran = operatorAction(() => {
+      flagsNote = sv.dropped.length ? 'Removed from the flags (the overlay would ignore them): ' + sv.dropped.join(', ') : '';
+      els.viewFlags.value = sv.flags; // the box shows what was saved
+      commitRoomGesture(next, true);
+      renderFlagsWarn();
+    });
+    if (!ran) els.enabled.checked = cfg.enabled;
   }
   // The director box changes the director only: Room, Password and viewFlags text still being typed is not saved by it (Save does that).
   function saveEnabled() {
@@ -1810,6 +1827,11 @@
     if (!operatorAction(() => commitRoomGesture(next, false))) els.enabled.checked = cfg.enabled;
   }
   $('btnVdoSave').addEventListener('click', saveRoom);
+  els.viewFlags.placeholder = DEFAULT_VIEWFLAGS;
+  $('btnVdoFlagsReset').addEventListener('click', () => {
+    els.viewFlags.value = DEFAULT_VIEWFLAGS;
+    els.viewFlags.dispatchEvent(new Event('input', { bubbles: true })); // marks it unsaved; Save stores it
+  });
   els.enabled.addEventListener('change', saveEnabled);
 
   // ── Invite + director-link builder (vdo.ninja's exact &hash= algorithm) ────
@@ -1829,10 +1851,16 @@
     }
     return hashCache.hash;
   }
+  // The password part of the invite and manage links. No effective password (empty, 0, false, off) → nothing. Plaintext → the
+  // password encoded the way vdo.ninja reads it. 'none' with a password, and a hash that cannot be computed here (no crypto.subtle
+  // outside a secure origin), emit a bare &password so vdo.ninja asks the guest to type it, instead of a link into a different room.
   function passwordParam(password, mode) {
-    if (!password || mode === 'none') return '';
-    if (mode === 'plaintext') return '&password=' + encodeURIComponent(password);
-    const h = ensureHash(password); // 'hash' (default)
+    const pw = GRVdoUrl.effectivePassword(password);
+    if (!pw) return '';
+    if (mode === 'none') return '&password';
+    if (mode === 'plaintext') return GRVdoUrl.passwordQuery(pw);
+    if (!(window.crypto && crypto.subtle)) return '&password';
+    const h = ensureHash(pw); // 'hash' (default)
     return h ? '&hash=' + h : '';
   }
   function inviteFromDom() {

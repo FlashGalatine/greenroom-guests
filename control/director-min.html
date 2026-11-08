@@ -43,6 +43,7 @@
 <script src="vdo-parse.js"></script>
 <script src="director-loop.js"></script>
 <script src="directory-core.js"></script>
+<script src="vdo-url.js"></script>
 <script>
 (function () {
   'use strict';
@@ -109,6 +110,15 @@
   let transientProblem = '';
   const show = (t) => { statusEl.textContent = 'greenroom director: ' + (connProblem || (schemaTooNew ? MSG_RELOAD : (transientProblem || t))); };
 
+  // The same defaults as the dock, so a config the dock never saw (or a backup without these) reads the same on both pages (GRN-131).
+  const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
+  function defaultInvite() {
+    return { passwordMode: 'hash', label: '', push: '', videoBitrate: '', quality: '', width: '',
+      height: '', fps: '', codec: '', audioBitrate: '', stereo: false, noVideo: false, noAudio: false,
+      capture: '', broadcast: false, meshcast: false, autostart: false, requireApproval: false,
+      roomCap: '', extraFlags: '' };
+  }
+  let flagsNote = ''; // flags in the saved config that the overlay ignores (script, style, room identity)
   function defaultSlots() {
     const out = [];
     for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
@@ -197,14 +207,16 @@
       enabled: !!v.enabled,
       room: String(v.room ?? ''),
       password: String(v.password ?? ''),
-      viewFlags: String(v.viewFlags ?? ''),
+      viewFlags: GRVdoUrl.normalizeFlags(v.viewFlags ?? DEFAULT_VIEWFLAGS),
       slots,
-      invite: (v.invite && typeof v.invite === 'object') ? v.invite : {},
+      invite: Object.assign(defaultInvite(), (v.invite && typeof v.invite === 'object') ? v.invite : {}),
       directory: sanitizeDirectory(v.directory),
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
       extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
+    const dropped = GRVdoUrl.sanitizeViewFlags(cfg.viewFlags).dropped;
+    flagsNote = dropped.length ? 'view flags ignored by the overlay: ' + dropped.join(', ') : '';
     return true;
   }
 
@@ -226,7 +238,8 @@
   // The status for a page that holds its config: idle when there is no director to run, else
   // the room and how many guests the last poll saw.
   function showSteady() {
-    if (directorNote && frameUrl) show(directorNote);
+    if (flagsNote) show(flagsNote);
+    else if (directorNote && frameUrl) show(directorNote);
     else if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)`);
     else if (cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/');
     else show(cfg.enabled ? 'no room configured' : 'director disabled');
@@ -508,11 +521,7 @@
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
     if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
-    const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
-    let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
-    if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
-    u += '&cleanish&novideo&noaudio';
-    return u;
+    return GRVdoUrl.buildDirectorUrl(DIRECTOR_BASE, cfg.room, cfg.password); // the password encoded the way vdo.ninja reads it
   }
 
   function syncDirectorFrame() {
