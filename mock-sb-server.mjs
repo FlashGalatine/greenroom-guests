@@ -52,7 +52,7 @@
 //       SB_SYNC_DROP=1          the first VDO Sync is acked but its replay is never broadcast
 //       SB_PUSH=error|drop      VDO Push is acked status:'error' and not run, or acked ok but stores and broadcasts nothing
 //       SB_MISSING=<a,b>        the named actions do not exist: acked status:'error' (so does any name outside the five)
-//       The four mode options above can also be changed while running:
+//       The mode options above can also be changed while running (a value it does not know is a 400; missing= clears the list):
 //       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve&push=ok|error|drop&missing=<names>   (hello=mock = the default)
 //       GET /mock/dropall       close every WebSocket client (they reconnect)
 //       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
@@ -398,7 +398,16 @@ async function handleHttp(req, res) {
     return;
   }
   if (path === '/mock/mode') {
-    for (const k of Object.keys(modes)) if (query.get(k)) modes[k] = query.get(k);
+    // Every value is checked first, so a typo changes nothing and says so. `missing` takes any text; an empty one clears it.
+    const ALLOWED = { subscribe: ['ok', 'none', 'error'], doaction: ['ok', 'error'], hello: ['none', 'plain', 'auth', 'mock'], auth: ['refuse', 'close', 'serve'], push: ['ok', 'error', 'drop'] };
+    for (const k of Object.keys(modes)) {
+      if (query.has(k) && ALLOWED[k] && !ALLOWED[k].includes(query.get(k))) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: `${k} must be one of ${ALLOWED[k].join(', ')}` }));
+        return;
+      }
+    }
+    for (const k of Object.keys(modes)) if (query.has(k)) modes[k] = query.get(k);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, modes }));
     return;

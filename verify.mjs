@@ -39,6 +39,7 @@ const GUARD_BASE = Number(process.env.VERIFY_GUARD_BASE) || 7591; // the sidecar
 const WS_URL = `ws://127.0.0.1:${WS_PORT}/`;
 
 let passed = 0, failed = 0;
+const scratchDirs = []; // temp folders the checks made; removed at the end even when a check threw
 function check(name, ok, detail) {
   if (ok) { passed++; console.log(`  PASS  ${name}`); }
   else { failed++; console.log(`  FAIL  ${name}${detail ? ' — ' + detail : ''}`); }
@@ -467,10 +468,12 @@ async function main() {
         objC.doAction('VDO Push', { payload: JSON.stringify({ ...VDO_PAYLOAD, room: 'CHANGED' }) });
         await objP.events.next(2000, (d) => d.type === 'vdoninja:update' && d.vdoninja.room === 'CHANGED', 'object-mode change');
         const bkScratch = await mkdtemp(resolve(tmpdir(), 'greenroom-bk3b-'));
+        scratchDirs.push(bkScratch);
         const bkRestore = await runNode(['backup.mjs', 'restore', bkFile, '--yes'], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url, GREENROOM_BACKUP_DIR: bkScratch });
         await rm(bkScratch, { recursive: true, force: true });
         check('backup restore works against the old object format (the snapshot is back in the cache)',
           bkRestore.code === 0 && /restored/.test(bkRestore.out) && (await stateOf(objMock)).vdo.room === 'testroom', bkRestore.out.trim().slice(0, 200));
+        check('…and says that the copy of the current config it saved first came through the old broadcast format', /OLD broadcast format/.test(bkRestore.out), bkRestore.out.trim().slice(0, 300));
         await rm(bkFile, { force: true });
 
         objP.events.drain();
@@ -499,6 +502,17 @@ async function main() {
         const o5 = await objP.events.next(2000, (d) => d.type === 'vdo:error' || d.type === 'vdoninja:update', 'sync result');
         check('object mode: the Sync of that cache fails the same way, and the Discord replay never goes out (ONE try around both)',
           o5.type === 'vdo:error' && await rejects(objP.events.next(600, byType('discord:voice:update'), 'a discord replay')), JSON.stringify(o5).slice(0, 160));
+        {
+          // Restoring a label the old VDO Push cannot broadcast: it caches first, then throws. The tool cannot know the push landed.
+          const oorSnap = resolve(__dirname, '.verify-backup-oor.json');
+          await writeFile(oorSnap, JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: JSON.parse(labelled(OUT_OF_RANGE)) }));
+          const scratchOor = await mkdtemp(resolve(tmpdir(), 'greenroom-bk3c-'));
+          scratchDirs.push(scratchOor);
+          const rOor = await runNode(['backup.mjs', 'restore', oorSnap, '--yes', '--force'], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url, GREENROOM_BACKUP_DIR: scratchOor });
+          await rm(oorSnap, { force: true }); await rm(scratchOor, { recursive: true, force: true });
+          check('restore through an old action that caches and then fails to broadcast says NOT CONFIRMED (it may have saved), never "was NOT restored"',
+            rOor.code === 2 && /NOT confirmed/.test(rOor.out) && /may have saved|may or may not/i.test(rOor.out) && !/was NOT restored|config was NOT restored/.test(rOor.out), rOor.out.trim().slice(0, 400));
+        }
         const bkBad = await runNode(['backup.mjs', 'save', bkFile], { SB_WS_PORT: String(objMock.wsPort), SB_WS_URL: objMock.url });
         check('backup save against the old wire with a saved label that makes the old VDO Sync throw: exits non-zero, shows the error, and tells the operator to carry on with the update and back up again afterwards',
           bkBad.code !== 0 && /reported an error/.test(bkBad.out) && /DateTime/.test(bkBad.out) && /back up again/.test(bkBad.out), bkBad.out.trim().slice(0, 400));
@@ -987,6 +1001,7 @@ async function main() {
     const backupFile = resolve(__dirname, '.verify-backup.json');
     await rm(backupFile, { force: true });
     const bkDir = await mkdtemp(resolve(tmpdir(), 'greenroom-bk9-')); // restore's pre-restore snapshots go here, never into backups/
+    scratchDirs.push(bkDir);
     const bkEnv = { GREENROOM_BACKUP_DIR: bkDir };
     const saveRes = await runNode(['backup.mjs', 'save', backupFile], bkEnv);
     check('backup save exits 0', saveRes.code === 0, saveRes.out.trim());
@@ -1235,24 +1250,28 @@ async function main() {
     console.log('\n[12] backup CLI: strict arguments, a checked snapshot, a confirmed push, a pre-restore copy');
     {
       const bdir = await mkdtemp(resolve(tmpdir(), 'greenroom-bk12-'));
-      const goodEnv = (m, extra = {}) => ({ SB_WS_URL: m.url, GREENROOM_BACKUP_DIR: bdir, ...extra });
+      scratchDirs.push(bdir);
+      const rootBefore = (await readdir(__dirname)).sort().join('|'); // the repo root must not gain a file from these runs
+      const goodEnv = (m, extra = {}) => ({ SB_WS_URL: m.url, GREENROOM_BACKUP_DIR: bdir, INIT_CWD: bdir, ...extra });
       const bk = (m, args, extra = {}) => runNode(['backup.mjs', ...args], goodEnv(m, extra));
       const seedState = { ...VDO_PAYLOAD, room: 'liveroom' };
+      const stateRoom = async (m) => ((await (await fetch(m.base + '/mock/state')).json()).vdo || {}).room;
       const snapshot = (over = {}) => ({ kind: 'greenroom-vdo-backup', savedAt: '2026-01-01T00:00:00.000Z', vdoninja: { ...VDO_PAYLOAD, ...over } });
       const put = async (name, content) => { const p = resolve(bdir, name); await writeFile(p, content); return p; };
       // env: options for the mock at start; mode: a /mock/mode query applied AFTER the seeding push (so a push-refusing mock still holds a state)
       const fresh = async (env = {}, mode = '') => {
         const m = await startMockWith(env);
-        const c = await rawClient(m.url);
-        c.doAction('VDO Push', { payload: JSON.stringify(seedState) });
-        await new Promise((r) => setTimeout(r, 300));
-        if (mode) await fetch(m.base + '/mock/mode?' + mode).then((r) => r.arrayBuffer());
-        await fetch(m.base + '/mock/actions?clear=1').then((r) => r.arrayBuffer());
-        c.close();
-        return m;
+        try {
+          const c = await rawClient(m.url);
+          c.doAction('VDO Push', { payload: JSON.stringify(seedState) });
+          for (let i = 0; i < 40; i++) { if ((await stateRoom(m)) === seedState.room) break; await new Promise((r) => setTimeout(r, 50)); }
+          if (mode) await fetch(m.base + '/mock/mode?' + mode).then((r) => r.arrayBuffer());
+          await fetch(m.base + '/mock/actions?clear=1').then((r) => r.arrayBuffer());
+          c.close();
+          return m;
+        } catch (e) { m.child.kill(); throw e; }
       };
       const actionsOf = async (m) => (await (await fetch(m.base + '/mock/actions')).json()).actions;
-      const stateRoom = async (m) => ((await (await fetch(m.base + '/mock/state')).json()).vdo || {}).room;
       const connsOf = async (m) => (await (await fetch(m.base + '/mock/conns')).json()).conns.length;
 
       // (a) files it must refuse: nothing is pushed, the live state is unchanged
@@ -1266,6 +1285,7 @@ async function main() {
           ['a room that is not text', JSON.stringify(snapshot({ room: 42 })), ['--yes']],
           ['slots that are not a list', JSON.stringify(snapshot({ slots: 'x' })), ['--yes']],
           ['a Discord ID written as a number (its digits are already rounded)', '{"kind":"greenroom-vdo-backup","vdoninja":' + JSON.stringify({ ...VDO_PAYLOAD, directory: [] }).replace('"discordUserId":""', '"discordUserId":123456789012345678') + '}', ['--yes']],
+          ['a Discord ID written as a number inside a directory entry', '{"kind":"greenroom-vdo-backup","vdoninja":' + JSON.stringify({ ...VDO_PAYLOAD, directory: [{ vdoLabel: 'A', discordUserId: '1', displayName: 'A', socials: [] }] }).replace('"discordUserId":"1"', '"discordUserId":123456789012345678') + '}', ['--yes']],
           ['a slot entry that is not an object', JSON.stringify(snapshot({ slots: [null, ...VDO_PAYLOAD.slots.slice(1)] })), ['--yes']],
           ['a snapshot from a newer Greenroom', JSON.stringify(snapshot({ schemaVersion: 99 })), ['--yes']],
           ['a good snapshot, but no --yes', JSON.stringify(snapshot()), []],
@@ -1297,10 +1317,42 @@ async function main() {
         const m = await fresh();
         try {
           const p = await put('snap2.json', JSON.stringify(snapshot()));
+          const preBefore = (await readdir(bdir)).filter((n) => /^pre-restore-.*\.json$/.test(n)).length;
           const r = await bk(m, ['restore', p, '--yes']);
           const pre = (await readdir(bdir)).filter((n) => /^pre-restore-.*\.json$/.test(n));
+          check('…and that good restore wrote exactly ONE new pre-restore copy', pre.length === preBefore + 1, JSON.stringify({ preBefore, after: pre.length }));
           check('a good restore prints the current and the new config, saves the old one first (pre-restore-<time>.json), pushes, and confirms',
             r.code === 0 && /current/i.test(r.out) && /liveroom/.test(r.out) && /file:/i.test(r.out) && pre.length >= 1 && /restored/.test(r.out) && (await stateRoom(m)) === 'testroom', JSON.stringify({ code: r.code, out: r.out.trim().slice(0, 400), pre }));
+        } finally { m.child.kill(); }
+      }
+      {
+        // The current config is unreadable (VDO Sync answers vdo:error): nothing can be saved first, so --force is required, and the
+        // dry run says so. Replacing it is then allowed with --force, without a pre-restore copy.
+        const m = await fresh();
+        try {
+          await fetch(m.base + '/mock/setcache', { method: 'POST', body: JSON.stringify({ vdo: '{"a":1,"a":2}' }) }).then((r) => r.arrayBuffer());
+          const p = await put('snap3.json', JSON.stringify(snapshot()));
+          const preBefore = (await readdir(bdir)).filter((n) => /^pre-restore-/.test(n)).length;
+          const dry = await bk(m, ['restore', p]);
+          const noForce = await bk(m, ['restore', p, '--yes']);
+          const pushesBefore = (await actionsOf(m)).filter((a) => a.name === 'VDO Push').length;
+          check('restore over an UNREADABLE current config (VDO Sync answers vdo:error): the dry run says no copy can be saved, and --yes without --force is refused with nothing pushed',
+            /no copy|cannot be saved|--force/i.test(dry.out) && noForce.code !== 0 && /--force/.test(noForce.out) && pushesBefore === 0, JSON.stringify({ dry: dry.out.slice(0, 300), code: noForce.code, out: noForce.out.slice(0, 200), pushesBefore }));
+          const forced = await bk(m, ['restore', p, '--yes', '--force']);
+          const preAfter = (await readdir(bdir)).filter((n) => /^pre-restore-/.test(n)).length;
+          check('…with --force it proceeds (and says plainly that no copy of the current config was kept)', forced.code === 0 && (await stateRoom(m)) === 'testroom' && preAfter === preBefore && /no (current )?config could be saved|not saved|no copy/i.test(forced.out), JSON.stringify({ code: forced.code, out: forced.out.slice(0, 300) }));
+        } finally { m.child.kill(); }
+      }
+      {
+        const m = await fresh();
+        try {
+          const bad = await fetch(m.base + '/mock/mode?push=errror').then((r) => r.status);
+          const ok1 = await fetch(m.base + '/mock/mode?missing=VDO%20Sync').then((r) => r.status);
+          const m1 = await (await fetch(m.base + '/mock/mode')).json();
+          const ok2 = await fetch(m.base + '/mock/mode?missing=').then((r) => r.status);
+          const m2 = await (await fetch(m.base + '/mock/mode')).json();
+          check('/mock/mode refuses a value it does not know (400, nothing changed), and \'missing=\' with nothing after it clears the list',
+            bad === 400 && ok1 === 200 && m1.modes.missing === 'VDO Sync' && ok2 === 200 && m2.modes.missing === '' && m2.modes.push === 'ok', JSON.stringify({ bad, m1: m1.modes && m1.modes.missing, m2: m2.modes }));
         } finally { m.child.kill(); }
       }
       // (c) a missing VDO Sync and a refused Subscribe name their cause
@@ -1327,6 +1379,15 @@ async function main() {
             bad.length === 0 && h.code === 0 && /Usage|usage/.test(h.out) && h2.code === 0 && (await connsOf(m)) === before, JSON.stringify({ bad, h: h.code, h2: h2.code }));
           const swallowed = await bk(m, ['restore', 'x.json'], { npm_config_url: 'ws://127.0.0.1:1/' });
           check('npm swallowing --url (npm_config_url is set) is refused before connecting, naming the working forms', swallowed.code !== 0 && /-- --url/.test(swallowed.out) && (await connsOf(m)) === before, JSON.stringify({ code: swallowed.code, out: swallowed.out.slice(0, 240) }));
+          const dry2 = await bk(m, ['restore', resolve(bdir, 'snap2.json')]);
+          const dry3 = await bk(m, ['restore', resolve(bdir, 'snap2.json')], { npm_config_yes: 'true', npm_lifecycle_event: 'backup:restore' });
+          check('a restore dry run shows the exact npm form of the --yes it asks for (flags go after "--"), and says so when npm has eaten a --yes',
+            /npm run backup:restore -- .*--yes/.test(dry2.out) && /npm .*(ate|took|swallow)/i.test(dry3.out) && dry2.code === 2, JSON.stringify({ dry2: dry2.out.slice(-260), dry3: dry3.out.slice(-260) }));
+          const urlWord = await bk(m, ['restore', resolve(bdir, 'snap2.json'), 'ws://127.0.0.1:1/'], { npm_config_url: 'true' });
+          check('npm\'s usual swallowed-URL case (--url ws://… leaves the URL as a stray word) is named as that, not as a word-count error', urlWord.code !== 0 && /-- --url/.test(urlWord.out) && !/exactly one file/.test(urlWord.out), urlWord.out.slice(0, 260));
+          const secret = await put('secret.json', '{"kind":"greenroom-vdo-backup","vdoninja":{"password":hunter2-secret}}');
+          const sec = await bk(m, ['restore', secret, '--yes']);
+          check('a snapshot with a JSON syntax error never echoes a piece of the file (it may hold the room password) in the error', sec.code !== 0 && !/hunter2/.test(sec.out), sec.out.slice(0, 260));
           const t = await bk(m, ['save', resolve(bdir, 'target.json')]);
           check('save prints the target URL before it connects', new RegExp('target: ' + m.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(t.out), t.out.slice(0, 200));
         } finally { m.child.kill(); }
@@ -1346,15 +1407,22 @@ async function main() {
           check('save refuses to overwrite an existing file without --force, and leaves it alone', s1.code !== 0 && (await readFile(out1, 'utf8')) === 'precious', s1.out.trim().slice(0, 200));
           const s2 = await bk(m, ['save', out1, '--force']);
           const left = (await readdir(bdir)).filter((n) => /\.tmp-/.test(n));
-          check('--force overwrites; the file is written atomically (no .tmp- file is left), and the output warns that it holds the room password',
-            s2.code === 0 && /"kind": "greenroom-vdo-backup"/.test(await readFile(out1, 'utf8')) && left.length === 0 && /password/i.test(s2.out), JSON.stringify({ code: s2.code, left, out: s2.out.slice(0, 300) }));
-          const rel = await bk(m, ['restore', 'keep.json', '--yes'], { INIT_CWD: bdir });
-          check('a relative file is resolved from where npm was run (INIT_CWD), and a bare name is also looked up in the snapshot folder', rel.code === 0, rel.out.trim().slice(0, 240));
+          check('--force overwrites; no .tmp- file is left behind, backup.mjs writes through a temp file and a rename, and the output warns that it holds the room password',
+            s2.code === 0 && /rename\(tmp, out\)/.test(await readFile(resolve(__dirname, 'backup.mjs'), 'utf8')) && /"kind": "greenroom-vdo-backup"/.test(await readFile(out1, 'utf8')) && left.length === 0 && /password/i.test(s2.out), JSON.stringify({ code: s2.code, left, out: s2.out.slice(0, 300) }));
+          const cwdDir = await mkdtemp(resolve(tmpdir(), 'greenroom-bk12cwd-'));
+          await writeFile(resolve(cwdDir, 'rel.json'), JSON.stringify(snapshot()));
+          const rel = await bk(m, ['restore', './rel.json', '--yes'], { INIT_CWD: cwdDir });
+          await rm(cwdDir, { recursive: true, force: true });
+          check('a relative file with a directory part is resolved from where npm was run (INIT_CWD), in a folder that is NOT the snapshot folder', rel.code === 0, rel.out.trim().slice(0, 240));
+          const viaBackups = await bk(m, ['restore', 'backups/keep.json', '--yes'], { INIT_CWD: tmpdir() });
+          check('…and the README\'s backups/<file> form works from any folder npm was started in', viaBackups.code === 0, viaBackups.out.trim().slice(0, 240));
           const bare = await bk(m, ['restore', 'keep.json', '--yes'], { INIT_CWD: tmpdir() });
           const lst = await bk(m, ['list']);
           check('…the snapshot-folder lookup works from anywhere, and list prints <folder>/<name> (backups/<name> by default)', bare.code === 0 && lst.out.includes(basename(bdir) + '/keep.json'), JSON.stringify({ bare: bare.code, list: lst.out.slice(0, 200) }));
         } finally { m.child.kill(); }
       }
+      const rootAfter = (await readdir(__dirname)).sort().join('|');
+      check('none of these runs wrote a file into the repository root (a relative name goes to the scratch folder)', rootAfter === rootBefore, rootBefore === rootAfter ? '' : 'root changed: ' + rootAfter);
       await rm(bdir, { recursive: true, force: true });
     }
 
@@ -1371,6 +1439,8 @@ async function main() {
     await rm(resolve(__dirname, '.verify-bridge-tokens.json'), { force: true });
     await rm(resolve(__dirname, '.verify-backup.json'), { force: true });
     await rm(resolve(__dirname, '.verify-backup-object.json'), { force: true });
+    await rm(resolve(__dirname, '.verify-backup-oor.json'), { force: true });
+    for (const d of scratchDirs) await rm(d, { recursive: true, force: true });
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);

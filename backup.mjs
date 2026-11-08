@@ -10,7 +10,7 @@
 // voice roster (`discord.state`) is deliberately non-persisted and not snapshotted.
 //
 // Usage (your REAL Streamer.bot must be running; the development mock keeps nothing worth backing up):
-//   node backup.mjs [save] [file]    snapshot vdo.state → file
+//   node backup.mjs [save [file]]    snapshot vdo.state → file (the verb is needed before a file name)
 //                                    (default backups/vdo-state-<timestamp>.json; an explicit file that
 //                                    already exists is refused unless --force)
 //   node backup.mjs restore <file>   check a snapshot, show current vs new, and — only with --yes — save the
@@ -22,7 +22,8 @@
 //                                    SB_WS_PORT, default ws://127.0.0.1:8080/)
 //   --yes                            restore: really replace the saved config
 //   --force                          save: overwrite an existing file; restore: accept a raw payload that is not
-//                                    a backup envelope, and restore even when the current state cannot be read
+//                                    a backup envelope, and restore even when the current config cannot be read
+//                                    (then no copy of it can be saved first)
 //
 // Through npm the flags go after a `--`:  npm run backup -- --url ws://127.0.0.1:8081/
 //                                        npm run backup:restore -- backups/<file> --yes
@@ -47,7 +48,7 @@ const SUPPORTED_SCHEMA = 1; // the newest vdo.state schemaVersion this tool know
 
 function die(msg, code = 1) { console.error('backup: ' + msg); process.exit(code); }
 const USAGE = `usage:
-  node backup.mjs [save] [file] [--force]       snapshot vdo.state to a file (default backups/vdo-state-<time>.json)
+  node backup.mjs [save [file]] [--force]       snapshot vdo.state to a file (default backups/vdo-state-<time>.json)
   node backup.mjs restore <file> [--yes] [--force]   check a snapshot, show current vs new, and with --yes restore it
   node backup.mjs list                           list the snapshots in backups/
   options: --url ws://host:port/   (through npm: npm run backup -- --url ws://host:port/)`;
@@ -68,6 +69,12 @@ for (let i = 0; i < rawArgv.length; i++) {
   else if (a.startsWith('-')) usageDie(`unknown option ${a}`);
   else positional.push(a);
 }
+// npm 7+ takes a bare `--url` for itself and exports it as npm_config_url, so the flag never reaches this script, and the URL
+// that followed it arrives as a stray word. Say what happened before the word checks below complain about it.
+if (process.env.npm_config_url !== undefined && positional[0] !== 'list') {
+  die(`npm swallowed a --url (npm_config_url=${process.env.npm_config_url}), so this run would aim at the default Streamer.bot, not that one. Put the flags after a \`--\`:\n`
+    + '  npm run backup -- --url ws://127.0.0.1:8081/\n  npm run backup:restore -- <file> --url ws://127.0.0.1:8081/ --yes', 2);
+}
 const VERBS = new Set(['save', 'restore', 'list']);
 let cmd = 'save';
 if (positional.length && VERBS.has(positional[0])) cmd = positional.shift();
@@ -76,11 +83,6 @@ if (cmd === 'list' && positional.length) usageDie('list takes no arguments');
 if (cmd === 'save' && positional.length > 1) usageDie('save takes at most one file');
 if (cmd === 'restore' && positional.length !== 1) usageDie('restore takes exactly one file: node backup.mjs restore <file> --yes');
 if (cmd === 'save' && positional[0] && /^wss?:\/\//i.test(positional[0])) usageDie(`"${positional[0]}" looks like a URL, not a file: put --url before the file or use --url=`);
-// npm 7+ takes a bare `--url` for itself and exports it as npm_config_url, so the flag never reaches this script.
-if (process.env.npm_config_url !== undefined && cmd !== 'list') {
-  die(`npm swallowed a --url (npm_config_url=${process.env.npm_config_url}), so this run would aim at the default Streamer.bot, not that one. Put the flags after a \`--\`:\n`
-    + '  npm run backup -- --url ws://127.0.0.1:8081/\n  npm run backup:restore -- <file> --url ws://127.0.0.1:8081/ --yes', 2);
-}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────────────────────
 function tsName() {
@@ -202,7 +204,7 @@ const envelopeText = (state) => JSON.stringify({ kind: 'greenroom-vdo-backup', s
 // ── save ────────────────────────────────────────────────────────────────────────────────────────
 async function save(file) {
   const out = file ? resolveOut(file) : resolve(BACKUP_DIR, `vdo-state-${tsName()}.json`);
-  if (file && existsSync(out) && !FORCE) die(`${out} already exists; pass --force to overwrite it.`);
+  if (file && existsSync(out) && !FORCE) die(`${out} already exists; pass --force to overwrite it (through npm: npm run backup -- ${file} --force).${process.env.npm_config_force === 'true' ? ' npm took a --force for itself: flags go after the --.' : ''}`);
   console.log(`target: ${URL_ARG}`);
   const sb = await connect(URL_ARG);
   try {
@@ -231,9 +233,14 @@ async function save(file) {
 function resolveOut(p) { return isAbsolute(p) ? p : resolve(process.env.INIT_CWD || process.cwd(), p); }
 function resolveIn(p) {
   const direct = resolveOut(p);
-  if (existsSync(direct) || isAbsolute(p) || /[\\/]/.test(p)) return direct;
-  const inFolder = resolve(BACKUP_DIR, p); // a bare name is also looked up in the snapshot folder
-  return existsSync(inFolder) ? inFolder : direct;
+  if (existsSync(direct) || isAbsolute(p)) return direct;
+  // npm starts scripts in the package root but exports where you typed the command as INIT_CWD: a path relative to either works,
+  // the README's backups/<file> form works from any folder, and a bare name is also looked up in the snapshot folder.
+  const tries = [resolve(__dirname, p)];
+  const m = /^backups[\\/](.+)$/.exec(p);
+  if (m) tries.push(resolve(BACKUP_DIR, m[1]));
+  if (!/[\\/]/.test(p)) tries.push(resolve(BACKUP_DIR, p));
+  return tries.find((t) => existsSync(t)) || direct;
 }
 
 // Bytes → text: UTF-8 (BOM stripped), UTF-16 LE or BE by BOM (Notepad and PowerShell write these).
@@ -282,7 +289,9 @@ async function restore(file) {
   try { parsed = JSON.parse(decodeSnapshot(buf)); }
   catch (e) {
     const odd = (buf.length >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) || buf.includes(0);
-    return die(`could not parse ${path}: ${e.message}${odd ? ' (the file looks like UTF-16 or has stray bytes: re-save it as UTF-8)' : ''}`);
+    // V8 quotes a piece of the text in "Unexpected token …, "<snippet>" is not valid JSON": it may hold the room password, so keep only the kind of error.
+    const msg = String(e.message).replace(/^Unexpected token[\s\S]*is not valid JSON$/, 'an unexpected character (not valid JSON)').replace(/"[^"]*"/g, '"…"').replace(/'[^']*'/g, "'…'");
+    return die(`could not parse ${path}: ${msg}${odd ? ' (the file looks like UTF-16 or has stray bytes: re-save it as UTF-8)' : ''}`);
   }
   const checked = checkSnapshot(parsed);
   if (checked.problem) return die(`${path}: ${checked.problem} Nothing was changed.`);
@@ -298,17 +307,28 @@ async function restore(file) {
       : 'no answer from VDO Sync';
     console.log(`  current: ${curLine}`);
     console.log(`  file:    ${summarize(payload)}${checked.dropped ? `  (${checked.dropped} directory entr${checked.dropped === 1 ? 'y' : 'ies'} dropped: no name, or no label and no Discord ID)` : ''}`);
-    if (cur.kind === 'silent' && !FORCE) {
-      return die('Streamer.bot sent nothing back for VDO Sync, so the current config cannot be saved first. Check that "VDO Sync" exists and compiled; pass --force to restore without a copy of the current one. Nothing was changed.');
+    const unreadable = cur.kind === 'silent' || cur.kind === 'error';
+    if (unreadable) {
+      console.log('  NOTE: the current config cannot be read, so no copy of it can be saved before it is replaced.');
+      if (!FORCE) {
+        return die((cur.kind === 'silent'
+          ? 'Streamer.bot sent nothing back for VDO Sync. Check that "VDO Sync" exists and compiled.'
+          : `VDO Sync reported an error (${cur.message}).`)
+          + ' Pass --force to restore anyway, without a copy of the current config. Nothing was changed.', 2);
+      }
     }
     if (!YES) {
-      console.log('  This would REPLACE the saved config with the file. Nothing was changed. Run again with --yes to do it.');
+      console.log('  This would REPLACE the saved config with the file. Nothing was changed.');
+      console.log('  Run again with --yes to do it:  node backup.mjs restore <file> --yes');
+      console.log('  (through npm the flag goes after a --:  npm run backup:restore -- <file> --yes)');
+      if (process.env.npm_config_yes === 'true') console.log('  npm took a --yes for itself (npm_config_yes is set), so it never reached this tool: write it after the --.');
       process.exit(2);
     }
     if (cur.kind === 'state') {
       const pre = resolve(BACKUP_DIR, `pre-restore-${tsName()}.json`);
       await writeAtomic(pre, envelopeText(cur.state));
       console.log(`  saved the current config first: ${pre}`);
+      if (cur.oldWire) console.log('  (that copy came through the OLD broadcast format, in which Streamer.bot re-formats date-shaped guest names; it may not be exact)');
     } else console.log('  (no current config could be saved first)');
 
     // Arm both waiters BEFORE the push, so neither the ack nor the rebroadcast can be missed.
@@ -318,7 +338,9 @@ async function restore(file) {
     if (!ack) die('Streamer.bot did not acknowledge the VDO Push. The config was NOT confirmed restored.', 2);
     if (ack.status && ack.status !== 'ok') die(`Streamer.bot refused the VDO Push: ${ack.error || ack.status}. The config was NOT restored.`, 2);
     let seen = await echoP;
-    if (seen && seen.type === 'vdo:error') die(`the "VDO Push" action reported an error: ${seen.message || '(no message)'}. The config was NOT restored.`, 2);
+    if (seen && seen.type === 'vdo:error') {
+      die(`the "VDO Push" action reported an error: ${seen.message || '(no message)'}. NOT confirmed: the config may or may not have been saved (an action older than the string-field ones saves first and then fails to broadcast it). Check the dock, or take a backup and compare.`, 2);
+    }
     if (!seen) {
       // No matching rebroadcast: read it back instead.
       const again = await readCurrent(sb);
