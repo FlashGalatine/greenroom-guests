@@ -180,6 +180,7 @@
       <button id="btnVdoFlagsReset" type="button" title="Put the default flags back (not saved until you press Save)">reset to default</button>
     </div>
     <div id="vdoFlagsWarn" class="warn" role="status"></div>
+    <div id="vdoPwWarn" class="warn" role="status"></div>
     <div class="hint">Slots bind guests by their vdo.ninja <b>label</b>; the hidden director iframe
       re-resolves label → current streamID every 2.5&nbsp;s, so a guest who rejoins is re-followed
       automatically. Keep exactly one director page open (this page or director-min.html).</div>
@@ -192,8 +193,8 @@
     <div id="cryptoWarn" class="warn" hidden>This page is not on a secure origin (crypto.subtle is unavailable) —
       the &amp;hash= invite mode can't be computed here, and the director is NOT started: vdo.ninja
       would not accept it, and slots would never resolve. Open this page via http://127.0.0.1:&lt;port&gt;/ (not
-      a LAN name or file://). Until then the invite builder uses plaintext password mode, or asks the guest for the password (none or
-      hash mode).</div>
+      a LAN name or file://). Until then use plaintext password mode in the invite builder: hash and none make the guest type the
+      password.</div>
   </section>
 
   <section>
@@ -239,6 +240,7 @@
           <option value="plaintext">plaintext</option>
           <option value="none">none</option>
         </select></label>
+      <span id="vdoInvPwNote" class="warn" hidden></span>
       <label>label <input type="text" id="vdoInvLabel" placeholder="&amp;label=" /></label>
       <label>push id <input type="text" id="vdoInvPush" placeholder="&amp;push=" /></label>
       <label>video bitrate <input type="text" id="vdoInvVideoBitrate" placeholder="kbps" inputmode="numeric" /></label>
@@ -973,6 +975,8 @@
   // The flags box: what the overlay ignores in the saved flags (script, style, room-identity flags), or what Save just removed.
   let flagsNote = '';
   function renderFlagsWarn() {
+    const pwTxt = String(cfg.password || '').trim();
+    $('vdoPwWarn').textContent = pwTxt && !GRVdoUrl.effectivePassword(pwTxt) ? 'vdo.ninja reads this password as "no password", so none is sent and the room is open. Choose another password.' : '';
     const dropped = GRVdoUrl.sanitizeViewFlags(cfg.viewFlags).dropped;
     $('vdoFlagsWarn').textContent = flagsNote || (dropped.length ? 'The overlay ignores these flags in the saved config: ' + dropped.join(', ') + '. Remove them and press Save.' : '');
   }
@@ -1812,10 +1816,11 @@
     // The flags are stored normalised ('&a&b') and without anything that could load script or style or change the room; what was
     // removed is named under the box.
     const sv = GRVdoUrl.sanitizeViewFlags(GRVdoUrl.normalizeFlags(els.viewFlags.value));
-    const next = { room: els.room.value.trim(), password: els.password.value, viewFlags: sv.flags, enabled: els.enabled.checked };
+    const next = { room: els.room.value.trim(), password: els.password.value.trim(), viewFlags: sv.flags, enabled: els.enabled.checked };
     const ran = operatorAction(() => {
       flagsNote = sv.dropped.length ? 'Removed from the flags (the overlay would ignore them): ' + sv.dropped.join(', ') : '';
       els.viewFlags.value = sv.flags; // the box shows what was saved
+      els.password.value = next.password;
       commitRoomGesture(next, true);
       renderFlagsWarn();
     });
@@ -1930,6 +1935,10 @@
     els.manageLink.value = manage;
     $('btnVdoInviteOpen').href = invite || '#';
     $('btnVdoManageOpen').href = manage || '#';
+    const needsPw = GRVdoUrl.effectivePassword(cfg.password) && (i.passwordMode === 'none' || (i.passwordMode === 'hash' && !(window.crypto && crypto.subtle)));
+    const pwNote = $('vdoInvPwNote');
+    pwNote.textContent = needsPw ? 'The guest is asked to type the room password: send it to them separately.' : '';
+    pwNote.hidden = !needsPw;
     renderDirtyMarker();
   }
   const typedText = {
@@ -2246,6 +2255,7 @@
       gotConfig = true; syncedByMarker = false; // this page now holds a real config
       dirOpen.clear(); // a different directory → the open-row ids are meaningless
       autoAdded.clear(); // a new book: live guests it lacks are added again by the next poll
+      flagsNote = ''; // a note about the previous Save says nothing about the imported flags
       blankIfOffOrMoved(prev); // a disabled backup, or one that moves to another room, carries no live streams
       const sentBefore = pushSeq;
       renderAll(); // (switching a running director off pushes the blank state itself)

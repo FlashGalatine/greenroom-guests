@@ -124,13 +124,16 @@
 
   // vdo.ninja refuses to run inside a page that is not a secure context, so a viewer started here would stay black for ever: say so.
   const INSECURE = !window.isSecureContext;
-  if (INSECURE) {
-    const err = document.createElement('div');
+  const err = document.createElement('div');
+  err.hidden = true;
+  {
     err.id = 'insecure';
     err.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;padding:8px 10px;background:rgba(0,0,0,.75);color:#ffb454;font:14px/1.4 Consolas,monospace;border:1px solid #ffb454;z-index:10';
-    err.textContent = 'This source is not on a secure origin, so vdo.ninja would refuse to play. Open it via http://127.0.0.1:<port>/ (not a LAN name or file://).';
+    err.textContent = 'This source is not on a secure origin, so vdo.ninja would refuse to play. Open it via http://127.0.0.1:<port>/ (not a LAN name).';
     document.body.appendChild(err);
   }
+  // shown only for a webcam slot that has a guest to show: a Discord-mode slot needs no vdo.ninja and an empty slot shows nothing
+  const showInsecure = (on) => { err.hidden = !(INSECURE && on); };
 
   function defaultAvatar(userId) {
     // Default embed avatar index for the new username system: (id >> 22) % 6.
@@ -163,6 +166,7 @@
     // instant, no reload, works on the cross-origin vdo.ninja viewer.
     frame.style.transform = mine && mine.mirror ? 'scaleX(-1)' : 'none';
 
+    showInsecure(!!(v && streamID));
     const url = !INSECURE && v && streamID ? buildUrl(v, streamID) : 'about:blank';
     // Only reload the iframe when the resolved URL actually changes, so unrelated
     // pushes (another slot updating, or the voice feed) never interrupt our video.
@@ -173,6 +177,7 @@
   }
 
   function renderDiscord(mine) {
+    showInsecure(false);
     // Blank + hide the iframe so its WebRTC viewer tears down (no phantom video).
     if (lastUrl !== 'about:blank') { frame.src = 'about:blank'; lastUrl = 'about:blank'; }
     frame.style.display = 'none';

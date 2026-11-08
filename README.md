@@ -99,9 +99,11 @@ control/    control.html (director + slot editor + invite builder + Discord sect
             director-min.html (1×1 always-on director) · vdo-parse.js (defensive parser)
             directory-core.js (guest-directory sanitizers + the auto-add rule, shared
               by both pages so the 1×1 director auto-populates on its own)
+            vdo-url.js (the vdo.ninja URL rules: password encoding, view flags; an identical
+              copy lives in overlay/)
 overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|grid)
             nameplate.html (?slot=N standalone nameplate) · nameplate-shared.js
-            panel-client-sb.js (SB transport shim)
+            panel-client-sb.js (SB transport shim) · vdo-url.js (copy of control/vdo-url.js)
 actions/    the five Streamer.bot C# actions (paste + compile)
 sidecar/    discord-bridge.mjs (optional discord.js bot) · its package.json
 docs/       STREAMERBOT-SETUP.md · PROTOCOL.md · THEMING.md · screenshots

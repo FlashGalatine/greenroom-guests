@@ -962,7 +962,7 @@ async function main() {
     {
       const urlOverlay = (await readFile(resolve(__dirname, 'overlay', 'vdo-url.js'), 'utf8')).replace(/\r\n/g, '\n');
       const urlControl = (await readFile(resolve(__dirname, 'control', 'vdo-url.js'), 'utf8')).replace(/\r\n/g, '\n');
-      check('TRIPWIRE: overlay/vdo-url.js and control/vdo-url.js are byte-identical', urlOverlay === urlControl);
+      check('TRIPWIRE: overlay/vdo-url.js and control/vdo-url.js are identical (line endings aside)', urlOverlay === urlControl);
       const hadUrl = globalThis.GRVdoUrl;
       new Function(urlOverlay)();
       const U = globalThis.GRVdoUrl;
@@ -975,25 +975,36 @@ async function main() {
       check('sanitizeViewFlags: the default flags pass unchanged, and sanitising twice changes nothing',
         san(DEFAULT_FLAGS).flags === DEFAULT_FLAGS && san(DEFAULT_FLAGS).dropped.length === 0
         && ['&solo&x=a%20b', '&codec=h264&q=a b&z=%E2%82%AC', '&x=a%2520b'].every((x) => san(san(x).flags).flags === san(x).flags), JSON.stringify(san(DEFAULT_FLAGS)));
-      const aliases = U.INJECTION.concat(U.IDENTITY);
+      // written out here, NOT read from the helper: a list that is trimmed in the helper must fail this check
+      const aliases = ['js', 'base64js', 'b64js', 'jsbase64', 'jsb64', 'css', 'base64css', 'b64css', 'cssbase64', 'cssb64', 'invite', 'i', 'code',
+        'view', 'v', 'room', 'r', 'password', 'pw', 'p', 'hash', 'push', 'director', 'dir', 'id', 'permaid',
+        'streamid', 'pull', 'roomid', 'pass', 'crc', 'check', 'preset', 'whepplay', 'whep', 'website', 'iframe', 'postapi', 'posturl', 'api', 'osc'];
       const allDropped = aliases.every((k) => san('&solo&' + k + '=x').flags === '&solo' && san('&' + k.toUpperCase() + '&solo').flags === '&solo' && san('&solo&' + k + '=x').dropped.includes(k));
-      check('sanitizeViewFlags: every script, style, invite and room-identity alias is dropped (any case, with or without a value), the rest kept', allDropped && aliases.length >= 20, String(aliases.length));
+      check('sanitizeViewFlags: every script, style, invite and room-identity alias is dropped (any case, with or without a value), the rest kept', allDropped && aliases.length >= 40, String(aliases.length));
       check('sanitizeViewFlags: "?" and "#" cannot smuggle a flag in, and a missing leading "&" is fine',
-        san('&solo#&js=x').flags === '&solo' && san('&solo?js=x&cleanish').flags === '&solo&cleanish' && san('solo&cleanish').flags === '&solo&cleanish'
+        san('&solo#&js=x').flags === '&solo' && san('&solo#&js=x').dropped.includes('#…') && san('&solo?js=x&cleanish').flags === '&solo&cleanish' && san('solo&cleanish').flags === '&solo&cleanish'
         && san('&a b=c&d=e').flags === '&d=e' && san('&x=a b').flags === '&x=a%20b' && san('').flags === '' && san(null).flags === '');
-      check('ensureSolo: added unless solo or scene is already there (any case)',
-        U.ensureSolo('') === '&solo' && U.ensureSolo('&cleanish') === '&cleanish&solo' && U.ensureSolo('&scene=1') === '&scene=1' && U.ensureSolo('&Solo&x') === '&Solo&x');
+      check('ensureSolo: added unless solo or scene is already there (exact case, as vdo.ninja reads it)',
+        U.ensureSolo('') === '&solo' && U.ensureSolo('&cleanish') === '&cleanish&solo' && U.ensureSolo('&scene=1') === '&scene=1' && U.ensureSolo('&solo&x') === '&solo&x'
+        && U.ensureSolo('&Solo&x') === '&Solo&x&solo' && U.ensureSolo('&SCENE') === '&SCENE&solo'); // vdo.ninja's own checks are case-sensitive
       const eff = ['', ' ', '0', 'false', 'FALSE', 'off', ' Off '].map((x) => U.effectivePassword(x));
       check('effectivePassword: "", 0, false and off (trimmed, any case) mean no password; anything else is itself, trimmed',
         eff.every((x) => x === '') && U.effectivePassword(' pw ') === 'pw' && U.effectivePassword('0x') === '0x' && U.effectivePassword(undefined) === '');
       check('passwordQuery: the password is encoded exactly twice (abc%41, 50%25off, p&w #1), and nothing is sent for no password',
         U.passwordQuery('abc%41') === '&password=abc%252541' && U.passwordQuery('50%25off') === '&password=50%252525off' && U.passwordQuery('p&w #1') === '&password=p%2526w%2520%25231' && U.passwordQuery('off') === '' && U.passwordQuery('') === '');
+      check('a lone UTF-16 surrogate cannot make the helper throw: the flag is dropped, the password encodes as U+FFFD',
+        (() => { try { return san('&x=\uD800&solo').flags === '&solo' && san('&x=\uD800').dropped.includes('x') && U.passwordQuery('a\uD800b') === '&password=a%25EF%25BF%25BDb'; } catch (e) { return false; } })());
+      check('isInjectionKey: the script, style and remote-content families (any case), not the cosmetic or identity ones',
+        ['js', 'CSS', 'invite', 'code', 'i', 'whep', 'iframe', 'postapi'].every((k) => U.isInjectionKey(k)) && !['room', 'solo', 'cleanish', 'password'].some((k) => U.isInjectionKey(k)));
+      const defaultOf = async (f) => { const m = /const DEFAULT_VIEWFLAGS = '([^']*)'/.exec(await readFile(resolve(__dirname, f), 'utf8')); return m && m[1]; };
+      const defaults = [await defaultOf('control/control.html'), await defaultOf('control/director-min.html'), await defaultOf('backup.mjs')];
+      check('TRIPWIRE: the default view flags are the same string in control.html, director-min.html and backup.mjs', defaults.every(Boolean) && defaults[0] === defaults[1] && defaults[1] === defaults[2] && defaults[0] === DEFAULT_FLAGS, JSON.stringify(defaults));
       const vu = new URL(U.buildViewUrl({ room: 'r m', password: 'p&w #1', viewFlags: '' }, 'aaa111'));
       check('buildViewUrl: with password "p&w #1" the password parameter is encodeURIComponent of it (vdo.ninja\'s second decode restores it), no hash, solo present, room and view intact',
         vu.searchParams.get('password') === encodeURIComponent('p&w #1') && vu.hash === '' && vu.searchParams.has('solo') && vu.searchParams.get('room') === 'r m' && vu.searchParams.get('view') === 'aaa111', vu.href);
       const vj = new URL(U.buildViewUrl({ room: 'r', password: '', viewFlags: 'cleanish&js=//evil&b64js=xx&password=hijack&room=other' }, 'aaa111'));
       check('buildViewUrl: flags without a leading "&" work, script and room-identity flags in them are dropped, solo is added',
-        vj.searchParams.has('cleanish') && !vj.searchParams.has('js') && !vj.searchParams.has('b64js') && vj.searchParams.get('room') === 'r' && !vj.searchParams.has('password') && vj.searchParams.has('solo'), vj.href);
+        vj.searchParams.has('cleanish') && !vj.searchParams.has('js') && !vj.searchParams.has('b64js') && vj.searchParams.getAll('room').join() === 'r' && vj.searchParams.getAll('view').join() === 'aaa111' && vj.searchParams.getAll('password').length === 0 && vj.searchParams.has('solo'), vj.href);
       const du = U.buildDirectorUrl('https://vdo.ninja/', 'rm', 'abc%41');
       check('buildDirectorUrl: director, room, the password twice encoded, silent flags; a base with a query gets "&"',
         du === 'https://vdo.ninja/?director=rm&password=abc%252541&cleanish&novideo&noaudio' && U.buildDirectorUrl('http://x/d.html?fixed=1', 'rm', '').startsWith('http://x/d.html?fixed=1&director=rm&cleanish'), du);

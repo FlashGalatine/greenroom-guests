@@ -21,9 +21,14 @@
     return s ? '&' + s : '';
   }
 
-  // Families of flags that load remote script or style into the viewer, take the invite, or name the room the view joins.
-  const INJECTION = ['js', 'base64js', 'b64js', 'jsbase64', 'jsb64', 'css', 'base64css', 'b64css', 'cssbase64', 'cssb64', 'invite', 'i', 'code'];
-  const IDENTITY = ['view', 'v', 'room', 'r', 'password', 'pw', 'p', 'hash', 'push', 'director', 'dir', 'id', 'permaid'];
+  // Flags that load remote script, style or media into the viewer, send its events away, or take the invite (the exported "injection"
+  // subset); and flags that name the stream, the room or the credentials the view uses (vdo.ninja reads several aliases of each, and
+  // the first one found wins, so every alias is listed). Deployment settings that must match the guests' side (salt, token, wss, ...)
+  // are NOT dropped: a self-hosted vdo.ninja needs them on the viewer too.
+  const INJECTION = ['js', 'base64js', 'b64js', 'jsbase64', 'jsb64', 'css', 'base64css', 'b64css', 'cssbase64', 'cssb64', 'invite', 'i', 'code',
+    'whepplay', 'whep', 'website', 'iframe', 'postapi', 'posturl', 'api', 'osc'];
+  const IDENTITY = ['view', 'v', 'room', 'r', 'password', 'pw', 'p', 'hash', 'push', 'director', 'dir', 'id', 'permaid',
+    'streamid', 'pull', 'roomid', 'pass', 'crc', 'check', 'preset'];
   const injectionSet = new Set(INJECTION);
   const dropSet = new Set(INJECTION.concat(IDENTITY));
   const isInjectionKey = (key) => injectionSet.has(String(key).toLowerCase());
@@ -33,9 +38,12 @@
   function sanitizeViewFlags(raw) {
     let s = String(raw ?? '');
     const hash = s.indexOf('#');
-    if (hash >= 0) s = s.slice(0, hash);
-    const kept = [];
     const dropped = [];
+    if (hash >= 0) {
+      if (s.slice(hash + 1).trim()) dropped.push('#…'); // everything after a '#' is a fragment, not a flag: it is cut, and said so
+      s = s.slice(0, hash);
+    }
+    const kept = [];
     for (const part of s.split(/[&?]/)) {
       const t = part.trim();
       if (!t) continue;
@@ -45,19 +53,15 @@
       if (eq < 0) { kept.push(key); continue; }
       let value = t.slice(eq + 1);
       try { value = decodeURIComponent(value); } catch (_) { /* a stray % stays as typed */ }
-      kept.push(key + '=' + encodeURIComponent(value));
+      try { kept.push(key + '=' + encodeURIComponent(value)); } catch (_) { dropped.push(key.slice(0, 40)); } // a lone surrogate cannot be encoded
     }
     return { flags: kept.length ? '&' + kept.join('&') : '', dropped };
   }
 
-  // The flag keys in a normalised flags string, lower case.
-  function flagKeys(flags) {
-    return String(flags ?? '').split(/[&?]/).map((p) => p.trim().split('=')[0].toLowerCase()).filter(Boolean);
-  }
-
-  // A guest view is solo unless the flags already hold solo or scene.
+  // A guest view is solo unless the flags already hold solo or scene. vdo.ninja reads both names exactly (lower case), so 'Solo' does
+  // not count and &solo is added.
   function ensureSolo(flags) {
-    const keys = flagKeys(flags);
+    const keys = String(flags ?? '').split(/[&?]/).map((p) => p.trim().split('=')[0]);
     return keys.includes('solo') || keys.includes('scene') ? flags : flags + '&solo';
   }
 
@@ -68,7 +72,8 @@
 
   // '&password=<twice encoded>' or '' when there is no effective password.
   function passwordQuery(pw) {
-    const p = effectivePassword(pw);
+    // (a lone UTF-16 surrogate cannot be encoded; it becomes U+FFFD, as it would on the way through Streamer.bot)
+    const p = effectivePassword(pw).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
     return p ? '&password=' + encodeURIComponent(encodeURIComponent(p)) : '';
   }
 
