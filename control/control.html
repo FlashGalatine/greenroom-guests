@@ -467,12 +467,14 @@
   let syncPhase = 0;            // 0 quiet · 1 'has not answered' · 2 names both causes
   let syncTimer = null;
   let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
+  let pushSeq = 0;          // pushes actually sent (a gesture asks whether a push already left)
   let slotsSig = '';
   let dirSig = '';
   let favsSig = '';
   let frameUrl = '';
   // Room, Password and viewFlags text typed but not saved yet (GRN-36). A render never overwrites a field in this set, a foreign
-  // update that makes the saved value equal the text drops it (recomputeDirty), and only Save and Import clear it.
+  // update that makes the saved value equal the text drops it (recomputeDirty), and Save and Import clear it. So does the FIRST saved
+  // config to arrive, except for the field being typed in at that moment (handle()).
   const dirty = new Set();
   let slotsDeferred = false; // a slots render held back because a Discord ID is being typed; it runs when the field is left
   const dirOpen = new Set(); // expanded directory rows, by array index (view state only)
@@ -567,10 +569,9 @@
     b.title = schemaTooNew ? 'This config comes from a newer Greenroom: reload this page before exporting'
       : gotConfig ? EXPORT_TITLE : 'Waiting for the config from Streamer.bot';
   }
-  // The slot and directory editors skip a redraw while one of their controls has focus, so
-  // a director poll never takes away what the operator is typing. The FIRST adoption of the
-  // saved config must redraw them: a panel left showing the defaults it had would hand those
-  // default rows to the next edit, which would push them over the saved slots.
+  // The directory editor skips a redraw while one of its controls has focus, and the slots panel while a Discord ID is being typed,
+  // so a director poll never takes away what the operator is typing. The FIRST adoption of the saved config must redraw them: a
+  // panel left showing the defaults it had would show defaults over the saved slots (and a directory edit would start from them).
   function releaseFocusForAdoption() {
     const a = document.activeElement;
     if (a && a !== document.body && (els.slots.contains(a) || els.directory.contains(a))) a.blur();
@@ -805,8 +806,10 @@
       if (firstSync) releaseFocusForAdoption();
       markSynced();
       // The first saved config to arrive replaces the form: what was typed before it was never saved against it (a declined Save,
-      // text typed during the hydrate window). Later, typed text that now equals the saved value is no longer unsaved.
-      if (firstSync) dirty.clear(); else recomputeDirty();
+      // text typed during the hydrate window), so those marks go. A field being typed in right now keeps its text (a render never
+      // touches a focused field) and its mark. Later, typed text that now equals the saved value is no longer unsaved.
+      if (firstSync) for (const k of [...dirty]) if (els[k] !== document.activeElement) dirty.delete(k);
+      recomputeDirty();
       // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
       // disable. The first page to read it blanks it, once (GRN-48).
       const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
@@ -908,6 +911,7 @@
     // and a status line must not claim a push that never left.
     if (!doAction(PUSH_ACTION, { payload })) return false;
     lastPushedSig = payload;
+    pushSeq++;
     return true;
   }
 
@@ -1116,8 +1120,18 @@
     const to = e.relatedTarget;
     if (to && to.classList && to.classList.contains('vdo-discord-id') && els.slots.contains(to)) return; // from one ID field to the next
     clearTimeout(slotsFlushTimer);
-    slotsFlushTimer = setTimeout(() => { if (slotsDeferred) renderSlots(true); }, SLOTS_FLUSH_MS);
+    slotsFlushTimer = setTimeout(flushSlots, SLOTS_FLUSH_MS);
   });
+  function flushSlots() {
+    if (!slotsDeferred) return;
+    const ae = document.activeElement;
+    if (ae && ae.tagName === 'SELECT' && els.slots.contains(ae)) {
+      // The operator has just moved onto a pick box: rebuilding it now would snap its list shut. Redraw once it is left.
+      ae.addEventListener('blur', () => { clearTimeout(slotsFlushTimer); slotsFlushTimer = setTimeout(flushSlots, SLOTS_FLUSH_MS); }, { once: true });
+      return;
+    }
+    renderSlots(true);
+  }
 
   // ── Guest directory section ───────────────────────────────────────────────
   // Rows are collapsed summaries — live dot · display name · match keys — that
@@ -1321,7 +1335,7 @@
 
   // Read the rendered rows back into a full copy of the directory: rows merge by
   // data-idx, filtered-away entries pass through untouched. Half-complete rows are
-  // kept as-is (only the wire copy is sanitized, exactly like slotsFromDom).
+  // kept as-is (only the wire copy is sanitized when it is pushed).
   function directoryFromDom() {
     // Unknown fields of an entry (and of its socials) ride along through the editor.
     const out = cfg.directory.map((e) => Object.assign({
@@ -1519,8 +1533,8 @@
     cfg.slots[idx] = next;
     slotsSig = ''; // slot ids/labels may need a rebuild on the next render
     operatorAction(() => assembleAndPush(false)); // update overlays now, don't wait for the next poll
-    // A committed pick must not stay focused: a stray key or wheel turn would swap or blank the on-air guest (GRN-199).
-    if (t.classList.contains('vdo-label-sel') || t.classList.contains('vdo-mode-sel')) t.blur();
+    // A committed pick or toggle must not stay focused: a stray key or wheel turn would swap, blank or flip the on-air slot (GRN-199).
+    if (t.tagName === 'SELECT' || t.type === 'checkbox') t.blur();
   });
 
   els.slots.addEventListener('click', (e) => {
@@ -1530,27 +1544,39 @@
     if (openA) setTimeout(() => openA.blur(), 0); // the link opens its tab; the panel must not keep the focus
   });
 
+  // A config that is off (disabled, or no room), or that has moved to another room or password, holds no live streams: the IDs were
+  // resolved by a director in the room it left. This follows the CONFIG, not the director frame: a dock with no director (not a
+  // secure context), or an Import while the director is off, never changes the frame.
+  function blankIfOffOrMoved(prev) {
+    if (!(cfg.enabled && cfg.room) || cfg.room !== prev.room || cfg.password !== prev.password) cfg.slots.forEach((s) => { s.streamID = ''; });
+  }
+  // Applies a room or director change and sends the ONE push for it. The director is switched first (syncDirectorFrame): switching it
+  // off blanks the IDs and pushes that, so a push it already made is the gesture's push; otherwise the gesture forces its own (Save
+  // always pushes, even when nothing changed: GRN-192). Nothing is applied until the action runs, so a declined confirm changes nothing.
+  function commitRoomGesture(next, clearDirty) {
+    const prev = { room: cfg.room, password: cfg.password };
+    Object.assign(cfg, next);
+    if (clearDirty) dirty.clear(); // the typed text is saved now
+    blankIfOffOrMoved(prev);
+    rebuildLinks();
+    const before = frameUrl;
+    const sentBefore = pushSeq;
+    syncDirectorFrame();
+    reportPush(pushSeq !== sentBefore || assembleAndPush(false, true));
+    if (frameUrl && frameUrl === before) directorLoop.nudge(); // same URL, and nothing has answered yet: try the frame again
+  }
+  // Save: the whole form (Room, Password, viewFlags and the director box).
   function saveRoom() {
-    cfg.room = els.room.value.trim();
-    cfg.password = els.password.value;
-    cfg.viewFlags = els.viewFlags.value.trim();
-    cfg.enabled = els.enabled.checked;
-    // Save always pushes, even when nothing changed (GRN-192). The director is switched first: switching it off, clearing the room or
-    // moving to another room blanks the stream IDs and pushes that (syncDirectorFrame), so Save sends ONE push and it never carries
-    // the old room's live IDs. A push syncDirectorFrame already made is the Save's push; otherwise Save forces its own.
-    operatorAction(() => {
-      dirty.clear(); // the typed text is saved now (inside the action: a declined confirm leaves it marked)
-      rebuildLinks();
-      const before = frameUrl;
-      const sigBefore = lastPushedSig;
-      syncDirectorFrame();
-      const pushedByFrame = lastPushedSig !== sigBefore;
-      reportPush(assembleAndPush(false, !pushedByFrame) || pushedByFrame);
-      if (frameUrl && frameUrl === before) directorLoop.nudge(); // same URL, and nothing has answered yet: try the frame again
-    });
+    const next = { room: els.room.value.trim(), password: els.password.value, viewFlags: els.viewFlags.value.trim(), enabled: els.enabled.checked };
+    if (!operatorAction(() => commitRoomGesture(next, true))) els.enabled.checked = cfg.enabled;
+  }
+  // The director box changes the director only: Room, Password and viewFlags text still being typed is not saved by it (Save does that).
+  function saveEnabled() {
+    const next = { enabled: els.enabled.checked };
+    if (!operatorAction(() => commitRoomGesture(next, false))) els.enabled.checked = cfg.enabled;
   }
   $('btnVdoSave').addEventListener('click', saveRoom);
-  els.enabled.addEventListener('change', saveRoom);
+  els.enabled.addEventListener('change', saveEnabled);
 
   // ── Invite + director-link builder (vdo.ninja's exact &hash= algorithm) ────
   let hashCache = { pw: null, hash: '' };
@@ -1706,7 +1732,7 @@
   const copyTimers = new WeakMap();
   function flashCopy(btn, ok, hasText) {
     if (btn.dataset.label === undefined) btn.dataset.label = btn.textContent;
-    btn.textContent = ok ? 'Copied' : (hasText ? 'Copy failed — select & Ctrl+C' : 'Copy failed — use Open');
+    btn.textContent = ok ? 'Copied' : (hasText ? 'Copy failed — select & Ctrl+C' : 'Copy failed');
     clearTimeout(copyTimers.get(btn));
     copyTimers.set(btn, setTimeout(() => { btn.textContent = btn.dataset.label; }, ok ? 1200 : 3000));
   }
@@ -1951,15 +1977,18 @@
     const dirKept = GRDir.sanitizeDirectory(payload.directory).length;
     const dirDropped = (Array.isArray(payload.directory) ? payload.directory.length : 0) - dirKept;
     operatorAction(() => {
+      const prev = { room: cfg.room, password: cfg.password };
       adoptCfg(payload);
       dirty.clear(); // an import replaces what was typed
       hydrated = true;
       gotConfig = true; syncedByMarker = false; // this page now holds a real config
       dirOpen.clear(); // a different directory → the expanded-row indices are meaningless
-      renderAll();
+      blankIfOffOrMoved(prev); // a disabled backup, or one that moves to another room, carries no live streams
+      const sentBefore = pushSeq;
+      renderAll(); // (switching a running director off pushes the blank state itself)
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
       // is identical to what it last pushed, and must still reach a wiped vdo.state.
-      reportPush(assembleAndPush(false, true));
+      reportPush(pushSeq !== sentBefore || assembleAndPush(false, true));
     }, `Import this config and push it to Streamer.bot?
 
 This REPLACES the current room, slots, and guest directory (${dirKept} guest entr${dirKept === 1 ? 'y' : 'ies'} in the file${dirDropped > 0 ? `; ${dirDropped} dropped: no name, or no label and no Discord ID` : ''}).`);

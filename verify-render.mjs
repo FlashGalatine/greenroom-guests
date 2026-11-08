@@ -661,8 +661,7 @@ async function main() {
     await sleep(1800);
     await pgC.fill('#vdoRoom', 'fresh-room');
     await pgC.fill('#vdoPassword', 'pw-fresh');
-    await pgC.check('#vdoEnabled'); // an operator change: it asks (and pushes on yes) by itself
-    await pgC.click('#btnVdoSave');
+    await pgC.click('#btnVdoSave'); // the first Save asks; yes. (The "director enabled" box changes the director only, so it is not part of this Save.)
     let freshPush = null;
     for (let i = 0; i < 20 && !freshPush; i++) {
       freshPush = pushesOf(await fresh.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } })
@@ -1888,7 +1887,10 @@ async function main() {
       const SEED_G = { enabled: true, room: 'gestroom', password: 'pw1', viewFlags: VIEWFLAGS,
         slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
         invite: { passwordMode: 'hash' }, directory: [] };
-      const want = (k) => !process.env.R14_ONLY || process.env.R14_ONLY.split(',').includes(k); // R14_ONLY=c,g runs just those sections
+      // R14_ONLY=c,g runs just those SECTIONS (the letters in the comments below, a-l), not the check ids: R14k is in section c.
+      const R14_SECTIONS = 'abcdefghijkl'.split('');
+      for (const k of (process.env.R14_ONLY || '').split(',').filter(Boolean)) if (!R14_SECTIONS.includes(k)) throw new Error('R14_ONLY=' + k + ': the sections are ' + R14_SECTIONS.join(', '));
+      const want = (k) => !process.env.R14_ONLY || process.env.R14_ONLY.split(',').includes(k);
       const QUIET = '?fixed=1&delay=600000'; // a director that never answers: no roster-driven pushes disturb the counts
       const LIVE = '?fixed=1';
       const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
@@ -2023,8 +2025,9 @@ async function main() {
         check('R14k: a foreign change to slots 2 and 4 made while the operator types a Discord ID in slot 3 survives that edit (it patches slot 3 only)',
           ps.length === 1 && last.slots[1].label === 'CHARLIE' && last.slots[1].streamID === 'ccc333' && last.slots[3].label === 'DELTA' && last.slots[2].discordUserId === '123456789012345678',
           JSON.stringify({ n: ps.length, slots: last && last.slots }));
-        const shown = await p.evaluate(() => document.querySelector('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel')?.value);
-        check('R14l: …and once the field is left the panel shows the foreign change (the deferred render runs)', shown === 'CHARLIE', String(shown));
+        await p.evaluate(() => { if (document.activeElement) document.activeElement.blur(); }); // Tab left the field for the next box; the redraw waits while a pick box is on
+        const shown = await wait(p, () => document.querySelector('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel')?.value === 'CHARLIE', null, 3000);
+        check('R14l: …and once the field (and the box after it) is left the panel shows the foreign change (the deferred render runs)', shown);
         await p.close();
       }
       // (d) The panel is not frozen while a select has focus (GRN-87); a committed select does not keep focus (GRN-199).
@@ -2170,6 +2173,174 @@ async function main() {
         ps = await pushPayloads(z);
         check('R14y: …and an enabled state with a room is left alone (no push at all while the roster matches)', ps.length === 0, summ(ps));
         await m.close(); await m2.close();
+      }
+      // (i) The blanking follows the config, not the director frame: a dock with no director at all, an Import while the director is
+      // off, an Import with it running (one push), and the checkbox changing only the director (review of the first cut).
+      if (want('i')) {
+        const x = await seededMock(SEED_G);
+        const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, QUIET));
+        await p.addInitScript('Object.defineProperty(window, "isSecureContext", { value: false });'); // a dock opened by LAN name: no director frame can start
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r, SEED_G.room, 8000);
+        await sleep(800);
+        await x.api.clear();
+        await p.uncheck('#vdoEnabled');
+        await sleep(1500);
+        let ps = await pushPayloads(x);
+        check('R14i1: on a dock that is not a secure context (no director frame ever runs) unticking still sends ONE push with every stream ID blank', ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        await p.close();
+        const y = await seededMock(SEED_G);
+        const q = await newPage(browser, { width: 920, height: 1300 }, mockDir(y, QUIET));
+        await q.addInitScript('Object.defineProperty(window, "isSecureContext", { value: false });');
+        await q.goto(y.api.base + '/control/control.html?sbport=' + y.ws, { waitUntil: 'load' });
+        await wait(q, (r) => document.getElementById('vdoRoom')?.value === r, SEED_G.room, 8000);
+        await sleep(800);
+        await y.api.clear();
+        await q.fill('#vdoRoom', 'otherroom');
+        await q.click('#btnVdoSave');
+        await sleep(1500);
+        ps = await pushPayloads(y);
+        check('R14i2: …and moving to another room there sends one push with no stream ID from the old room', ps.length === 1 && ps[0].room === 'otherroom' && allBlank(ps[0]), summ(ps));
+        await q.close();
+        // an Import while the director is off
+        const SEED_OFF2 = Object.assign({}, SEED_G, { enabled: false, slots: [slot(1, { label: 'ALPHA' }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)] });
+        const z = await seededMock(SEED_OFF2);
+        const r = await openControl(z, QUIET, SEED_OFF2);
+        dialogsOk(r);
+        const importObj = (obj) => r.setInputFiles('#cfgImportFile', { name: 'i.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: obj })) });
+        await z.api.clear();
+        await importObj(Object.assign({}, SEED_G, { enabled: false }));
+        await sleep(1500);
+        ps = await pushPayloads(z);
+        check('R14i3: importing a disabled backup that holds stream IDs, while the director is off, sends one push with the IDs blank', ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        await z.api.clear();
+        await importObj(Object.assign({}, SEED_G, { room: 'importroom' }));
+        await sleep(1500);
+        ps = await pushPayloads(z);
+        check('R14i4: …and a backup that moves to another room (the director was off) carries no IDs either', ps.length === 1 && ps[0].room === 'importroom' && allBlank(ps[0]), summ(ps));
+        await r.close();
+        // an Import that switches a running director off is one push, not two
+        const w = await seededMock(SEED_G);
+        const s = await openControl(w, QUIET, SEED_G);
+        dialogsOk(s);
+        await w.api.clear();
+        await s.setInputFiles('#cfgImportFile', { name: 'o.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, SEED_G, { enabled: false }) })) });
+        await sleep(1500);
+        ps = await pushPayloads(w);
+        check('R14i5: importing a backup that switches a RUNNING director off sends one push (the director teardown is the import\'s push)', ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+        await s.close();
+        // the checkbox changes the director only: typed Room text is neither saved nor lost
+        const v = await seededMock(SEED_G);
+        const t = await openControl(v, QUIET, SEED_G);
+        await t.fill('#vdoRoom', 'typedroom');
+        await v.api.clear();
+        await t.uncheck('#vdoEnabled');
+        await sleep(1500);
+        ps = await pushPayloads(v);
+        const kept = await t.evaluate(() => { const b = document.getElementById('vdoUnsaved'); return { room: document.getElementById('vdoRoom').value, badge: !!b && !b.hidden }; });
+        check('R14i6: unticking the director with an unsaved Room typed pushes the SAVED room, and the typed text and the unsaved badge stay',
+          ps.length === 1 && ps[0].room === 'gestroom' && ps[0].enabled === false && kept.room === 'typedroom' && kept.badge, JSON.stringify({ ps: summ(ps), kept }));
+        await t.close();
+      }
+      // (j) The first saved config to arrive, and a declined confirm before it (slow VDO Sync).
+      if (want('j')) {
+        const slow = () => startExtra({ SYNC_DELAY_MS: '9000' });
+        const x = await slow();
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_G) });
+        await sleep(300);
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(600);
+        await p.focus('#vdoRoom');
+        await p.keyboard.type('typing');
+        const syncedUp = await wait(p, () => document.getElementById('vdoSlots')?.querySelector('.vdo-slot-row[data-slot="1"] .vdo-label-sel')?.value === 'ALPHA', null, 16000);
+        await sleep(300);
+        const st = await p.evaluate(() => { const b = document.getElementById('vdoUnsaved'); return { room: document.getElementById('vdoRoom').value, badge: !!b && !b.hidden, invite: document.getElementById('vdoInviteLink').value }; });
+        check('R14j1: the saved config arrives while Room has focus and text typed: the text is kept AND still marked unsaved, and the links keep the saved room',
+          syncedUp && st.room === 'typing' && st.badge && /room=gestroom/.test(st.invite), JSON.stringify(st));
+        await p.close();
+        // a Discord ID field has focus when the saved config arrives: the panel is still redrawn from it
+        const y = await slow();
+        y.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_G) });
+        await sleep(300);
+        const q = await newPage(browser, { width: 920, height: 1300 });
+        q.on('dialog', (d) => d.dismiss());
+        await q.goto(y.api.base + '/control/control.html?sbport=' + y.ws, { waitUntil: 'load' });
+        await sleep(600);
+        await q.selectOption('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-mode-sel', 'discord');
+        await q.focus('#vdoSlots .vdo-slot-row[data-slot="3"] input.vdo-discord-id');
+        const redrawn = await wait(q, () => document.getElementById('vdoSlots')?.querySelector('.vdo-slot-row[data-slot="1"] .vdo-label-sel')?.value === 'ALPHA', null, 16000);
+        check('R14j2: the saved config arrives while a Discord ID field has focus: the panel is redrawn from it (the field is released), not left on the defaults', redrawn);
+        await q.close();
+        // a Save declined before the saved config arrives changes nothing, whatever arrives later
+        const z = await slow();
+        const r = await newPage(browser, { width: 920, height: 1300 }, mockDir(z, QUIET));
+        r.on('dialog', (d) => d.dismiss());
+        await r.goto(z.api.base + '/control/control.html?sbport=' + z.ws, { waitUntil: 'load' });
+        await sleep(1500);
+        await r.fill('#vdoRoom', 'declined-room');
+        await r.click('#vdoEnabled'); // asks; declined (the box springs back)
+        await r.click('#btnVdoSave'); // asks; declined
+        await sleep(9500); // the (empty) saved state is reported at about 9 s
+        const after = await r.evaluate(() => ({ frame: document.getElementById('vdoDirector').getAttribute('src') || '', box: document.getElementById('vdoEnabled').checked }));
+        const psD = await pushPayloads(z);
+        check('R14j3: a Save and a tick that were declined before the saved state arrived start no director and push nothing later (the cfg was not changed by them)',
+          /about:blank|^$/.test(after.frame) && !after.box && psD.length === 0, JSON.stringify({ after, pushes: psD.length }));
+        await r.close();
+      }
+      // (k) Pick boxes and the flush of a held-back redraw.
+      if (want('k')) {
+        const seedC = Object.assign({}, SEED_G, { slots: [SEED_G.slots[0], SEED_G.slots[1], slot(3, { mode: 'discord' }), slot(4)] });
+        const x = await seededMock(seedC);
+        const p = await openControl(x, QUIET, seedC);
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        await wait(p, () => document.querySelectorAll('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-discord-pick option').length > 1, null, 8000);
+        await p.focus('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-discord-pick');
+        await p.selectOption('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-discord-pick', '200000000000000001');
+        await sleep(300);
+        const afterPick = await p.evaluate(() => (document.activeElement && document.activeElement.tagName) || '');
+        await p.check('#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-mirror-cb');
+        await sleep(300);
+        const afterMirror = await p.evaluate(() => (document.activeElement && document.activeElement.tagName) || '');
+        check('R14k1: after a Discord pick and after a Mirror toggle the control is released too (a stray ArrowDown or Space cannot re-assign or flip the on-air slot)',
+          afterPick !== 'SELECT' && afterMirror !== 'INPUT', JSON.stringify({ afterPick, afterMirror }));
+        await p.close();
+        // leaving a Discord ID field onto a select does not rebuild that select under the operator
+        const y = await seededMock(seedC);
+        const q = await openControl(y, QUIET, seedC);
+        await q.focus('#vdoSlots .vdo-slot-row[data-slot="3"] input.vdo-discord-id');
+        await q.keyboard.type('123456789012345678');
+        await foreign(y, { slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'CHARLIE', streamID: 'ccc333' }), slot(3, { mode: 'discord' }), slot(4)] });
+        await sleep(700);
+        await q.keyboard.press('Tab'); // onto the "in channel" pick
+        await q.evaluate(() => { document.activeElement.__keep = true; });
+        await sleep(600); // well past the 150 ms flush
+        const same = await q.evaluate(() => !!(document.activeElement && document.activeElement.__keep));
+        await q.evaluate(() => document.activeElement.blur());
+        const flushed = await wait(q, () => document.querySelector('#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel')?.value === 'CHARLIE', null, 3000);
+        check('R14k2: the held-back redraw does not rebuild a select the operator has just moved onto; it runs when that select is left', same && flushed, JSON.stringify({ same, flushed }));
+        await q.close();
+      }
+      // (l) A poll in flight when the director is unticked (the plan's "a poll and an untick in one task"), in-process and out-of-process.
+      if (want('l')) {
+        for (const failover of [false, true]) {
+          const x = await seededMock(SEED_G);
+          const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, failover ? '?fixed=1&failover=1' : LIVE));
+          if (failover) await p.addInitScript('window.__VDO_DIRECTOR_EXTRA_ORIGINS = ' + JSON.stringify(['http://localhost:' + x.http]) + ';');
+          await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+          await wait(p, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+          const tag = await nextCib(p);
+          await x.api.clear();
+          await p.evaluate((c) => {
+            document.getElementById('vdoDirector').contentWindow.postMessage({ getGuestList: true, cib: c }, '*'); // the reply is on its way...
+            document.getElementById('vdoEnabled').click(); // ...when the director is unticked, in the same task
+          }, tag);
+          await sleep(2500); // two more polls' worth
+          const ps = await pushPayloads(x);
+          check('R14l' + (failover ? '2' : '1') + ': a poll in flight when the director is unticked (' + (failover ? 'out-of-process' : 'in-process') + ' frame): one push, blank, and nothing follows it',
+            ps.length === 1 && ps[0].enabled === false && allBlank(ps[0]), summ(ps));
+          await p.close();
+        }
       }
     }
 
