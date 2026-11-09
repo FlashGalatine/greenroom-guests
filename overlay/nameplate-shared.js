@@ -89,8 +89,11 @@ window.GRNameplate = (function () {
   //
   // A label is normalised ONLY into a key; the raw label stays the slot key and is what is stored. canon() decodes vdo.ninja's HTML
   // escaping (it escapes twice: "Tom &amp;amp; Jerry"), reads '_' as a space, applies NFC, drops invisible characters (zero-width
-  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (a few passes at most),
-  // so canon(canon(x)) === canon(x). fold() also folds case. Two labels are "exactly equal" when their canons are equal.
+  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (at most 10 passes, on
+  // the first 400 characters), so canon(canon(x)) === canon(x). fold() also folds case, and canonises once more afterwards: a
+  // lower-cased text can be longer (U+0130 becomes two characters) and so fold(fold(x)) === fold(x) as well. Two labels are
+  // "exactly equal" when their canons are equal. A label made only of invisible characters has an empty canon: it matches an entry
+  // whose label is the same raw text, and nothing else.
   function decodeHtml(s) {
     let t = String(s ?? '').slice(0, 400);
     for (let i = 0; i < 10; i++) {
@@ -109,7 +112,7 @@ window.GRNameplate = (function () {
     }
     return t;
   }
-  function fold(s) { return canon(s).toLowerCase(); }
+  function fold(s) { return canon(canon(s).toLowerCase()); }
   // Does the label draw anything? (U+2800, the Braille blank, is not whitespace but shows nothing.)
   function hasGlyph(s) { return /[^\s⠀ㅤᅟᅠ]/u.test(canon(s)); }
 
@@ -117,14 +120,23 @@ window.GRNameplate = (function () {
   // canon), then a curated entry over an auto one, then the first in array order.
   function findByLabel(dir, label) {
     const c = canon(label);
-    if (!c) return null;
-    const f = c.toLowerCase();
+    if (!c) {
+      const raw = String(label ?? '').trim();
+      if (!raw) return null;
+      let same = null;
+      for (const e of Array.isArray(dir) ? dir : []) {
+        if (!e || !e.vdoLabel || String(e.vdoLabel).trim() !== raw) continue;
+        if (!same || (same.auto && !e.auto)) same = e;
+      }
+      return same;
+    }
+    const f = fold(c);
     let hit = null;
     let hitRank = 99;
     for (const e of Array.isArray(dir) ? dir : []) {
       if (!e || !e.vdoLabel) continue;
       const ec = canon(e.vdoLabel);
-      if (ec.toLowerCase() !== f) continue;
+      if (fold(ec) !== f) continue;
       const rank = (ec === c ? 0 : 2) + (e.auto ? 1 : 0);
       if (rank < hitRank) { hit = e; hitRank = rank; }
     }

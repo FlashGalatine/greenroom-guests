@@ -176,9 +176,15 @@ Labels are matched ignoring case, `_` versus a space and vdo.ninja's HTML
 escaping (`Guest_One` is `Guest One`), and two labels that differ only in case
 can be two guests. A row you have **named yourself is never linked to a Discord
 user by name** (Discord names are self-chosen): when a voice user has the same
-name the row offers "link <name> (<id>)?" for you to accept or reject. Until you
-accept, that guest's roster chip shows the raw Discord name and a discord-mode
-slot bound to them shows no plate. At most 50 auto-added entries are kept; at
+name the row offers "link <name> (<id>)?" for you to accept or reject (with two
+or more voice users of that name it offers nothing and says so: set the ID
+yourself). Until you accept, that guest's roster chip shows the raw Discord name
+and a discord-mode slot bound to them shows no plate. Hidden characters in a
+label (a zero-width space, say) are ignored when labels are compared, so a
+guest who adds one to the name of a guest you have named gets that guest's
+plate; the lists spell such characters out as `<U+200B>` and mark two live
+labels that are the same once case, spacing and hidden characters are ignored,
+including the label pick of a guest slot. At most 50 auto-added entries are kept; at
 the limit the dock says so (the ones for guests no longer in the room, and not
 in a slot, make way first; entries you named never do).
 

@@ -3156,7 +3156,7 @@ async function main() {
     // ── R18: one guest identity rule (GRN-62, 13, 114, 147, 205, 206, 148, 173, 35, 113, 157) ──
     if (!ONLY || ONLY === 'identity') {
       console.log('\n[R18] identity: a stranger is never bound to a curated entry; underscores, escapes and case; the auto cap; the roster order');
-      const R18_SECTIONS = 'abcdefgh'.split('');
+      const R18_SECTIONS = 'abcdefghijklmn'.split('');
       for (const k of (process.env.R18_ONLY || '').split(',').filter(Boolean)) if (!R18_SECTIONS.includes(k)) throw new Error('R18_ONLY=' + k + ': the sections are ' + R18_SECTIONS.join(', '));
       const want = (k) => !process.env.R18_ONLY || process.env.R18_ONLY.split(',').includes(k);
       const mkSeed = (extra) => Object.assign({ enabled: true, room: 'idroom', password: 'pw1', viewFlags: VIEWFLAGS, directoryAutoAdd: true,
@@ -3319,6 +3319,111 @@ async function main() {
         const st = await r.evaluate(() => [...document.querySelectorAll('.member')].map((m) => m.querySelector('.name')?.textContent));
         check('R18h: a chip with a curated directory name shows it, and the chips are ordered by the shown names ("Bob" before "Zoe", although the member behind Zoe is named Alice)', st.join() === 'Bob,Zoe', JSON.stringify(st));
         await r.close();
+      }
+      // (i) The dock applies the Discord-first merge (GRN-114): voice first, then the VDO label, one entry.
+      if (want('i')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1&late=ALPHA:4500', seed);
+        voice(x, { '300000000000000020': U('ALPHA', 3) });
+        await wait(p, () => [...document.querySelectorAll('#vdoDirectory .vdo-dir-display')].some((i) => i.value === 'ALPHA'), null, 8000);
+        await wait(p, () => [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].some((r) => r.querySelector('input.vdo-dir-label').value === 'ALPHA'), null, 12000);
+        await sleep(800);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        const alphas = last.directory.filter((e) => e.displayName === 'ALPHA');
+        check('R18i: a guest who joined the voice channel first and the VDO room later is ONE entry with both the label and the Discord id (the dock applies the merge, no twin)', alphas.length === 1 && alphas[0].vdoLabel === 'ALPHA' && alphas[0].discordUserId === '300000000000000020', JSON.stringify(last.directory.map((e) => e.displayName + '/' + e.vdoLabel + '/' + e.discordUserId)));
+        await p.close();
+      }
+      // (j) 'link' acts only on the offer the row was drawn with.
+      if (want('j')) {
+        const seed = curatedBob();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        voice(x, { [BOB_ID]: U('Bob') });
+        await wait(p, () => !!document.querySelector('#vdoDirectory .vdo-dir-link-yes'), null, 8000);
+        const carried = await p.evaluate(() => document.querySelector('#vdoDirectory .vdo-dir-link-yes').dataset.id);
+        await p.evaluate(() => { document.querySelector('#vdoDirectory .vdo-dir-link-yes').dataset.id = '300000000000000999'; }); // a row drawn for another user
+        await x.api.clear();
+        await p.click('#vdoDirectory .vdo-dir-link-yes');
+        await sleep(1200);
+        const ps = await pushPayloads(x);
+        check('R18j: the buttons carry the offered Discord id, and a click whose id is not the current offer links nobody (it redraws instead)', carried === BOB_ID && ps.every((q) => q.directory.every((e) => e.discordUserId === '')), JSON.stringify({ carried, pushes: ps.map((q) => q.directory.map((e) => e.discordUserId)) }));
+        await p.close();
+      }
+      // (k) Two Discord users with the name: ambiguous, so no one-click link.
+      if (want('k')) {
+        const seed = curatedBob();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        voice(x, { [BOB_ID]: U('Bob'), '300000000000000002': U('bob', 2) });
+        await wait(p, () => /Discord users/.test(document.querySelector('#vdoDirectory .vdo-dir-row')?.textContent || ''), null, 8000);
+        const st = await p.evaluate(() => ({ buttons: document.querySelectorAll('#vdoDirectory .vdo-dir-link-yes').length, text: document.querySelector('#vdoDirectory .vdo-dir-row').textContent }));
+        check('R18k: when two Discord users have the name of one curated entry the row offers no one-click link and says several users have this name', st.buttons === 0 && /2 Discord users/.test(st.text), JSON.stringify(st));
+        await p.close();
+      }
+      // (l) The slot picker shows look-alike labels apart (GRN-148).
+      if (want('l')) {
+        const seed = mkSeed({ directory: [{ vdoLabel: 'Bob', discordUserId: '', displayName: 'Bob Curated', socials: [] }] });
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1', seed);
+        await wait(p, () => /connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'Bob' }, 2: { streamID: 'imp222', label: 'Bob\u200B' }, 3: { streamID: 'fam333', label: 'Fam \u{1F468}\u200D\u{1F469}\u200D\u{1F467}' } }));
+        await wait(p, () => [...document.querySelectorAll('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-label-sel option')].some((o) => /Fam/.test(o.textContent)), null, 9000);
+        const opts = await p.evaluate(() => [...document.querySelectorAll('#vdoSlots .vdo-slot-row[data-slot="3"] .vdo-label-sel option')].map((o) => o.textContent));
+        check('R18l: the slot picker lists "Bob" and "Bob<U+200B>" apart and says they are the same as another label (a stranger cannot pass for the curated Bob unnoticed)', opts.some((t) => /<U\+200B>/.test(t)) && opts.filter((t) => /same as another/i.test(t)).length === 2, JSON.stringify(opts));
+        check('R18l2: an emoji sequence keeps its joiners in the pick lists (no "<U+200D>" inside "Fam \uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"), and an ordinary label gets no "same as" note', !opts.some((t) => /<U\+200D>/.test(t)) && opts.some((t) => /Fam \u{1F468}\u200D\u{1F469}\u200D\u{1F467} \u2022 live$/u.test(t)), JSON.stringify(opts));
+        await p.close();
+      }
+      // (m) "live only" keeps a row that carries an offer; the roster uses the live name over an auto placeholder (GRN-35).
+      if (want('m')) {
+        const seed = curatedBob();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        voice(x, { [BOB_ID]: U('Bob') });
+        await wait(p, () => !!document.querySelector('#vdoDirectory .dir-suggest'), null, 8000);
+        await p.check('#dirLiveOnly');
+        await sleep(400);
+        const kept = await p.evaluate(() => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length);
+        check('R18m: with "live only" ticked the row that carries a link offer stays visible', kept === 1, String(kept));
+        await p.close();
+        const seed2 = mkSeed({ directory: [{ vdoLabel: '', discordUserId: '300000000000000010', displayName: 'placeholder', socials: [], auto: true }] });
+        const y = await seededMock(seed2);
+        const r = await newPage(browser, { width: 1000, height: 300 });
+        await r.goto(y.api.base + '/overlay/discord-roster.html?layout=row&sbport=' + y.ws, { waitUntil: 'load' });
+        voice(y, { '300000000000000010': U('RealName', 1) });
+        await wait(r, () => document.querySelectorAll('.member').length === 1, null, 8000);
+        await sleep(400);
+        const nm = await r.evaluate(() => document.querySelector('.member .name')?.textContent);
+        check('R18m2: an auto placeholder does not freeze a renamed member\'s roster name: the live Discord name is shown', nm === 'RealName', String(nm));
+        await r.close();
+      }
+      // (n) At the cap the entries of guests who left make way (never one that sits in a slot), and a guest who comes back is added again.
+      if (want('n')) {
+        const id = (i) => '4000000000000' + String(10000 + i);
+        const mem = (i) => U('Member ' + String(i).padStart(2, '0'), (i % 5) + 1);
+        const seed = mkSeed({ slots: [slot(1, { mode: 'discord', discordUserId: id(0) }), slot(2), slot(3), slot(4)] });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const dirNames = async () => { const ps = await pushPayloads(x); const l = ps[ps.length - 1]; return l ? l.directory.map((e) => e.displayName) : []; };
+        const until = async (fn, ms) => { for (let t = 0; t < ms; t += 250) { if (await fn()) return true; await sleep(250); } return false; };
+        const wave1 = {};
+        for (let i = 0; i < 50; i++) wave1[id(i)] = mem(i);
+        voice(x, wave1);
+        await until(async () => (await dirNames()).length === 50, 9000);
+        const wave2 = { [id(0)]: mem(0) }; // Member 00 stays (and sits in slot 1); the others leave while ten new members arrive
+        for (let i = 50; i < 60; i++) wave2[id(i)] = mem(i);
+        voice(x, wave2);
+        await until(async () => (await dirNames()).includes('Member 59'), 9000);
+        const n2 = await dirNames();
+        voice(x, Object.assign({}, wave2, { [id(1)]: mem(1) })); // Member 01 was evicted: back in the channel, they are added again
+        await until(async () => (await dirNames()).includes('Member 01'), 9000);
+        const n3 = await dirNames();
+        check('R18n: at the cap ten new members evict the idle guests who left (Member 01..10) and not the one in slot 1 (Member 00); a guest who returns after being evicted is added again',
+          n2.length === 50 && n2.includes('Member 00') && n2.includes('Member 59') && !n2.includes('Member 01') && !n2.includes('Member 10') && n2.includes('Member 11')
+          && n3.length === 50 && n3.includes('Member 01') && n3.includes('Member 00'), JSON.stringify({ n2: n2.length, n3: n3.length, has01: n3.includes('Member 01') }));
+        await p.close();
       }
     }
 

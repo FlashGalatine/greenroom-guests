@@ -7,7 +7,7 @@
 // Wire shape (docs/PROTOCOL.md) — the vdoninja payload's directory fields:
 //   directory:          [ { vdoLabel, discordUserId, displayName, socials[], auto } ]
 //   directoryAutoAdd:   bool  — auto-populate new guests (default ON)
-//   directoryIgnored:   [ "vdo:<lowercased label>" | "discord:<snowflake>" ]
+//   directoryIgnored:   [ "vdo:<label key>" | "discord:<snowflake>" ]   (the label key is fold(label): see the identity block)
 //
 // `auto` marks a placeholder name the page invented from a live guest (the VDO
 // label or the Discord username); any edit the operator makes to the entry clears
@@ -92,8 +92,11 @@
   //
   // A label is normalised ONLY into a key; the raw label stays the slot key and is what is stored. canon() decodes vdo.ninja's HTML
   // escaping (it escapes twice: "Tom &amp;amp; Jerry"), reads '_' as a space, applies NFC, drops invisible characters (zero-width
-  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (a few passes at most),
-  // so canon(canon(x)) === canon(x). fold() also folds case. Two labels are "exactly equal" when their canons are equal.
+  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (at most 10 passes, on
+  // the first 400 characters), so canon(canon(x)) === canon(x). fold() also folds case, and canonises once more afterwards: a
+  // lower-cased text can be longer (U+0130 becomes two characters) and so fold(fold(x)) === fold(x) as well. Two labels are
+  // "exactly equal" when their canons are equal. A label made only of invisible characters has an empty canon: it matches an entry
+  // whose label is the same raw text, and nothing else.
   function decodeHtml(s) {
     let t = String(s ?? '').slice(0, 400);
     for (let i = 0; i < 10; i++) {
@@ -112,7 +115,7 @@
     }
     return t;
   }
-  function fold(s) { return canon(s).toLowerCase(); }
+  function fold(s) { return canon(canon(s).toLowerCase()); }
   // Does the label draw anything? (U+2800, the Braille blank, is not whitespace but shows nothing.)
   function hasGlyph(s) { return /[^\s⠀ㅤᅟᅠ]/u.test(canon(s)); }
 
@@ -120,14 +123,23 @@
   // canon), then a curated entry over an auto one, then the first in array order.
   function findByLabel(dir, label) {
     const c = canon(label);
-    if (!c) return null;
-    const f = c.toLowerCase();
+    if (!c) {
+      const raw = String(label ?? '').trim();
+      if (!raw) return null;
+      let same = null;
+      for (const e of Array.isArray(dir) ? dir : []) {
+        if (!e || !e.vdoLabel || String(e.vdoLabel).trim() !== raw) continue;
+        if (!same || (same.auto && !e.auto)) same = e;
+      }
+      return same;
+    }
+    const f = fold(c);
     let hit = null;
     let hitRank = 99;
     for (const e of Array.isArray(dir) ? dir : []) {
       if (!e || !e.vdoLabel) continue;
       const ec = canon(e.vdoLabel);
-      if (ec.toLowerCase() !== f) continue;
+      if (fold(ec) !== f) continue;
       const rank = (ec === c ? 0 : 2) + (e.auto ? 1 : 0);
       if (rank < hitRank) { hit = e; hitRank = rank; }
     }
@@ -186,10 +198,14 @@
   // rewrites on the way back would otherwise look new on every pass). `boundLabels` / `boundUsers` name the guests that sit in a slot:
   // an auto entry for one of them is never evicted.
   //
-  // Returns { directory, changed, added, linked, suggested, skipped, evicted, appended }:
-  //   directory  a NEW array: the input without the evicted entries, with the appended ones at the end
+  // Returns { directory, changed, added, linked, labeled, suggested, skipped, evicted, appended }. Every change to the input list is
+  // reported, so a caller that keeps its own live list can apply the changes to it instead of replacing it. `index` is always the
+  // entry's position in the INPUT list; a link or a label that lands on an entry appended in this same pass is set on that entry
+  // itself and is in none of the lists below.
+  //   directory  a NEW array: the input with the changes below applied (evicted entries gone, appended ones at the end)
   //   added      the keys of the entries it appended (for status text)
-  //   linked     [{ index, id, username, name }] a Discord id filled into an AUTO entry whose name matched (index = input index)
+  //   linked     [{ index, id, username, name }] a Discord id filled into an AUTO entry whose name matched
+  //   labeled    [{ index, label }] a VDO label filled into an AUTO entry that the guest's Discord name had created first
   //   suggested  [{ index, id, username }] a CURATED entry whose name matches a Discord user: never linked silently (anyone can pick
   //              a Discord name), only offered to the operator; it changes nothing, so the pass stays a fixpoint
   //   skipped    how many new entries were not added because AUTO_MAX auto entries exist and none could be evicted
@@ -197,7 +213,8 @@
   //   appended   the new entry objects
   //
   // Both control pages run this on the same inputs, so the result must not depend on iteration order: labels are sorted (by key, then
-  // exact case, then raw text) and user ids as strings before anything is appended.
+  // exact case, then raw text; of several raw texts with one canon the smallest is used) and user ids as strings before anything is
+  // appended.
   const AUTO_MAX = 50;
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   function autoPopulate(opts) {
@@ -211,6 +228,7 @@
     const boundUsers = new Set((Array.isArray(o.boundUsers) ? o.boundUsers : []).map(digits).filter(Boolean));
     const added = [];
     const linked = [];
+    const labeled = [];
     const suggested = [];
     const evicted = [];
     const appended = [];
@@ -219,9 +237,12 @@
 
     // Live labels: unique by exact key (labels that differ only in case stay separate guests), in a fixed order.
     const byCanon = new Map();
-    for (const l of (Array.isArray(o.labels) ? o.labels : []).map((x) => String(x ?? '').trim()).filter(Boolean).sort(cmp)) {
-      const c = canon(l);
-      if (c && !byCanon.has(c)) byCanon.set(c, l);
+    for (const x of Array.isArray(o.labels) ? o.labels : []) {
+      const l = String(x ?? '').trim();
+      const c = l && canon(l);
+      if (!c) continue;
+      const prev = byCanon.get(c);
+      if (prev === undefined || cmp(l, prev) < 0) byCanon.set(c, l);
     }
     const labels = [...byCanon.values()].sort((a, b) => cmp(fold(a), fold(b)) || cmp(canon(a), canon(b)) || cmp(a, b));
     const foldCount = new Map();
@@ -229,7 +250,15 @@
     const users = (o.users && typeof o.users === 'object') ? o.users : {};
     const liveUsers = new Set(Object.keys(users).map(digits).filter(Boolean));
 
-    const isLive = (e) => (e.vdoLabel && foldCount.has(fold(e.vdoLabel))) || (e.discordUserId && liveUsers.has(digits(e.discordUserId)));
+    // A Discord user in the channel counts for an entry without an id too when the name is the entry's: the user pass below will link
+    // them, so the entry must not be evicted first and then made again.
+    const liveNames = new Set();
+    for (const rawId of Object.keys(users)) {
+      const n = String((users[rawId] || {}).username ?? '').trim();
+      if (n && !isDateShaped(n)) liveNames.add(fold(n));
+    }
+    const isLive = (e) => (e.vdoLabel && foldCount.has(fold(e.vdoLabel))) || (e.discordUserId && liveUsers.has(digits(e.discordUserId)))
+      || (!e.discordUserId && (liveNames.has(fold(e.displayName)) || (e.vdoLabel && liveNames.has(fold(e.vdoLabel)))));
     const isBound = (e) => (e.vdoLabel && boundLabels.has(fold(e.vdoLabel))) || (e.discordUserId && boundUsers.has(digits(e.discordUserId)));
     // Room for one more auto entry? At AUTO_MAX, drop the first auto entry that is not in the room and not in a slot; else skip.
     const room = () => {
@@ -253,7 +282,7 @@
       // the guest came into the voice channel first: their auto entry takes the label (never a curated one)
       const mi = dir.findIndex((e) => e && !e.vdoLabel && e.auto && fold(e.displayName) === fold(label));
       if (mi >= 0) {
-        dir[mi] = Object.assign({}, dir[mi], { vdoLabel: label });
+        if (orig[mi] >= 0) { dir[mi] = Object.assign({}, dir[mi], { vdoLabel: label }); labeled.push({ index: orig[mi], label }); } else dir[mi].vdoLabel = label;
         changed = true;
         continue;
       }
@@ -284,8 +313,7 @@
         const idx = nameHits.find((k) => dir[k].auto);
         if (idx !== undefined) {
           const e = dir[idx];
-          dir[idx] = Object.assign({}, e, { discordUserId: id });
-          linked.push({ index: orig[idx], id, username, name: e.displayName });
+          if (orig[idx] >= 0) { dir[idx] = Object.assign({}, e, { discordUserId: id }); linked.push({ index: orig[idx], id, username, name: e.displayName }); } else e.discordUserId = id;
           changed = true;
         } else {
           suggested.push({ index: orig[nameHits[0]], id, username });
@@ -302,7 +330,7 @@
       changed = true;
     }
 
-    return { directory: dir, changed, added, linked, suggested, skipped, evicted, appended };
+    return { directory: dir, changed, added, linked, labeled, suggested, skipped, evicted, appended };
   }
 
   globalThis.GRDir = {

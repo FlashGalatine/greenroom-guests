@@ -275,10 +275,18 @@
       boundUsers: cfg.slots.map((s) => s.discordUserId).filter(Boolean),
     });
     if (!res.changed) return false; // (suggestions are for the dock: this page only follows what changes the book)
+    // An evicted guest's keys leave the record, so they are added again if they come back (the dock does the same).
+    for (const i of res.evicted) {
+      const gone = cfg.directory[i];
+      if (!gone) continue;
+      if (gone.vdoLabel) autoAdded.delete(GRDir.labelExactKey(gone.vdoLabel));
+      if (gone.discordUserId) autoAdded.delete(GRDir.userKey(gone.discordUserId));
+    }
     for (const e of res.appended) {
       if (e.vdoLabel) autoAdded.add(GRDir.labelExactKey(e.vdoLabel));
       if (e.discordUserId) autoAdded.add(GRDir.userKey(e.discordUserId));
     }
+    for (const lb of res.labeled) autoAdded.add(GRDir.labelExactKey(lb.label));
     cfg.directory = res.directory;
     return true;
   }

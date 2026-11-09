@@ -921,7 +921,7 @@ async function main() {
       auto2.changed === false && JSON.stringify(auto2.directory) === JSON.stringify(auto1.directory));
     const auto3 = D.autoPopulate({ directory: autoBase, ignored: ['discord:200000000000000009', 'vdo:lurker'],
       labels: [' BRAVO ', 'LURKER', 'ALPHA'], users: AUTO_USERS });
-    check('autoPopulate is order-independent (two director pages converge, no push ping-pong)',
+    check('autoPopulate gives the same entries for a padded label and an ignored label given in another order (two director pages converge, no push ping-pong)',
       JSON.stringify(auto3.directory) === JSON.stringify(auto1.directory));
     check('autoPopulate: no live guests → no change',
       D.autoPopulate({ directory: autoBase, ignored: [], labels: [], users: {} }).changed === false);
@@ -956,7 +956,8 @@ async function main() {
         C('Café') === C('Café') && C('Al​pha') === 'Alpha' && C('A‍lpha') === 'Alpha' && C('Al­pha') === 'Alpha'
         && D.findByLabel([{ vdoLabel: 'Al​pha', displayName: 'x' }], 'Alpha').vdoLabel === 'Al​pha');
       check('canon is idempotent and never throws (nested escapes, hidden characters that rebuild an entity, junk, very long text)',
-        ['&amp;amp;amp;amp;x', '&a​mp;amp;', '__a__', null, undefined, 7, {}, '​', 'x'.repeat(5000)].every((x) => C(C(x)) === C(x)));
+        ['&amp;amp;amp;amp;x', '&a​mp;amp;', '__a__', null, undefined, 7, {}, '​', 'x'.repeat(5000)].every((x) => C(C(x)) === C(x))
+        && ['\u0130', 'ss\u00DF', '\u01C5', '\u0391\u03A3', 'I\u0307', 'Tom &AMP;amp; Jerry', '&amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;x', '\u0130\u0307', '&#x130;', '\u0130'.repeat(300)].every((x) => F(F(x)) === F(x)));
       check('labelKey follows the comparison key; the old-format key for "Guest One" still matches',
         D.labelKey('Guest_One') === D.labelKey('guest one') && D.labelKey('GUEST  ONE') === 'vdo:guest one' && D.labelKey(' Alpha ') === 'vdo:alpha');
       const dupDir = [{ vdoLabel: 'bob', displayName: 'Auto Bob', auto: true }, { vdoLabel: 'Bob', displayName: 'Curated Bob', auto: false }, { vdoLabel: 'BOB', displayName: 'Auto BOB', auto: true }];
@@ -1017,6 +1018,10 @@ async function main() {
       check('GRN-35: at the cap the first auto entry that is not live and not in a slot is evicted (index reported); bound and live ones survive; curated entries are never evicted and do not count',
         ev1.directory.length === 50 && ev1.evicted.join() === '0' && ev1.directory[49].vdoLabel === 'NEW' && ev2.evicted.join() === '1' && ev2.directory[0].vdoLabel === 'OLD00'
         && ev3.skipped === 1 && ev3.evicted.length === 0 && ev3.directory.length === 50 && ev4.directory.length === 51 && ev4.evicted.length === 0, JSON.stringify({ e1: ev1.evicted, e2: ev2.evicted, s3: ev3.skipped, n4: ev4.directory.length }));
+      const idEntries = Array.from({ length: 50 }, (_, i) => ({ vdoLabel: '', discordUserId: '5000000000000' + String(10000 + i), displayName: 'U' + i, socials: [], auto: true }));
+      const ev5 = D.autoPopulate({ directory: idEntries, ignored: [], labels: ['NEW'], users: {}, boundUsers: ['<@' + idEntries[0].discordUserId + '>'] });
+      check('GRN-35: an auto entry for a Discord user who sits in a slot (boundUsers, ids with or without <@>) is not evicted; the next idle one is',
+        ev5.evicted.join() === '1' && ev5.directory[0].displayName === 'U0', JSON.stringify(ev5.evicted));
       const emptyName = D.autoPopulate({ directory: [], ignored: [], labels: [], users: { '300000000000000003': { username: '' }, '300000000000000004': { username: '  ' }, '300000000000000005': { } } });
       const named = D.autoPopulate({ directory: emptyName.directory, ignored: [], labels: [], users: { '300000000000000003': { username: 'Zed' } } });
       check('GRN-35: a Discord user with no name yet is not added (not stored under the snowflake); the entry is added once the name arrives',
@@ -1029,6 +1034,20 @@ async function main() {
       check('GRN-55/116: the output is the same for any order of the labels (ZULU/BRAVO/CHARLIE with no entry to anchor them) and of the 17-19 digit users; "Alpha"/"alpha" in either order',
         JSON.stringify(o1.directory) === JSON.stringify(o2.directory) && o1.directory.map((e) => e.vdoLabel || e.discordUserId).join() === 'BRAVO,CHARLIE,ZULU,300000000000000001,300000000000000009'
         && JSON.stringify(o3.directory) === JSON.stringify(o4.directory));
+      const lab = D.autoPopulate({ directory: df1.directory, ignored: [], labels: ['Guest_One'], users: { '300000000000000002': { username: 'Guest One' } } });
+      check('GRN-114: the label a Discord-first auto entry takes is REPORTED (labeled: [{index, label}]) so a caller that applies only the reported changes (the dock) does it too',
+        (lab.labeled || []).length === 1 && lab.labeled[0].index === 0 && lab.labeled[0].label === 'Guest_One' && lab.changed === true, JSON.stringify(lab.labeled));
+      const same = D.autoPopulate({ directory: [], ignored: [], labels: ['Zed'], users: { '300000000000000006': { username: 'Zed' } } });
+      check('a guest who is in the VDO room and the voice channel at once, in an empty book, is ONE entry carrying both keys (the link is made on the appended entry itself)',
+        same.directory.length === 1 && same.directory[0].vdoLabel === 'Zed' && same.directory[0].discordUserId === '300000000000000006' && (same.appended || []).length === 1 && same.appended[0] === same.directory[0] && same.linked.length === 0, JSON.stringify(same));
+      const many2 = D.autoPopulate({ directory: curated, ignored: [], labels: [], users: { '300000000000000001': { username: 'Bob' }, '300000000000000002': { username: 'bob' } } });
+      check('two Discord users with the name of one curated entry are both reported as suggestions for it (the dock calls that ambiguous and offers neither)', many2.suggested.length === 2 && many2.suggested.every((x) => x.index === 0) && many2.directory[0].discordUserId === '');
+      const oldA = Array.from({ length: 49 }, (_, i) => ({ vdoLabel: 'OLD' + String(i).padStart(2, '0'), discordUserId: '', displayName: 'OLD' + i, socials: [], auto: true }));
+      const casper = D.autoPopulate({ directory: [{ vdoLabel: '', discordUserId: '', displayName: 'Casper', socials: [], auto: true }].concat(oldA), ignored: [], labels: ['NEW'], users: { '300000000000000007': { username: 'Casper' } } });
+      check('GRN-35: an auto entry whose Discord namesake is in the room counts as live: the entry behind it is the one that stays and the next idle one is evicted, so the guest is not dropped and then re-created as a twin',
+        casper.evicted.join() === '1' && casper.directory.filter((e) => e.displayName === 'Casper').length === 1 && casper.directory[0].displayName === 'Casper' && casper.directory[0].discordUserId === '300000000000000007', JSON.stringify({ ev: casper.evicted, first: casper.directory[0] }));
+      check('GRN-148: a curated entry whose label is only invisible characters still matches the same raw label, and a different invisible one does not',
+        D.findByLabel([{ vdoLabel: '\u3164', displayName: 'x' }], '\u3164') !== null && D.findByLabel([{ vdoLabel: '\u3164', displayName: 'x' }], '\u2800') === null && D.findByLabel([{ vdoLabel: '\u3164' }], '  ') === null);
       const ign2 = D.sanitizeIgnored(['vdo:Guest_One', 'vdo:guest one', 'vdo:Tom &amp;amp; Jerry', 'vdo:   ', 'discord:1']);
       check('GRN-216: ignore keys are built with the comparison key (sorted, deduped, idempotent), and an old-format key still blocks the live label',
         ign2.join('|') === 'discord:1|vdo:guest one|vdo:tom & jerry' && JSON.stringify(D.sanitizeIgnored(ign2)) === JSON.stringify(ign2)
@@ -1065,13 +1084,14 @@ async function main() {
       const idBlock = (src) => { const m = /\/\/ <guest-identity>[\s\S]*?\/\/ <\/guest-identity>/.exec(src.replace(/\r\n/g, '\n')); return m && m[0]; };
       check('TRIPWIRE: the guest-identity block (canon, fold, findByLabel, findByUserId) is identical in directory-core.js and nameplate-shared.js',
         !!idBlock(dirCoreSrc) && idBlock(dirCoreSrc) === idBlock(npSrc), String((idBlock(dirCoreSrc) || '').length) + ' / ' + String((idBlock(npSrc) || '').length));
-      const labelsV = ['Guest_One', 'Guest One', 'GUEST  ONE', 'Tom &amp;amp; Jerry', 'Tom & Jerry', 'Al\u200Bpha', 'Alpha', 'alpha', 'ALPHA', 'Cafe\u0301', 'Caf\u00E9', '', '  ', '<b>', '&lt;b&gt;', '\u2800', 'x'.repeat(500), null, 7];
-      const dirV = [{ vdoLabel: 'Guest One', discordUserId: '111', displayName: 'a', auto: true }, { vdoLabel: 'guest one', discordUserId: '111', displayName: 'b', auto: false },
+      const labelsV = ['Guest_One', 'Guest One', 'GUEST  ONE', 'Tom &amp;amp; Jerry', 'Tom & Jerry', 'Al\u200Bpha', 'Alpha', 'alpha', 'ALPHA', 'Cafe\u0301', 'Caf\u00E9', '', '  ', '<b>', '&lt;b&gt;', '\u2800', 'x'.repeat(500), '\u3164', '\u0130'.repeat(300), null, 7];
+      const dirV = [{ vdoLabel: '\u3164', displayName: 'blank' },{ vdoLabel: 'Guest One', discordUserId: '111', displayName: 'a', auto: true }, { vdoLabel: 'guest one', discordUserId: '111', displayName: 'b', auto: false },
         { vdoLabel: 'Tom & Jerry', displayName: 'tj' }, { vdoLabel: 'alpha', displayName: 'lo', auto: true }, { vdoLabel: 'Alpha', displayName: 'Cap' }, { vdoLabel: 'Caf\u00E9', displayName: 'c' },
         { vdoLabel: '<b>', displayName: 'tag' }, null, 7, { displayName: 'no label' }];
       check('both lookup copies answer identically over curated-after-auto, case twins, double-escaped, underscore, invisible and NFC vectors',
         labelsV.every((l) => D.canon(l) === NP.canon(l) && D.fold(l) === NP.fold(l) && JSON.stringify(D.findByLabel(dirV, l)) === JSON.stringify(NP.findByLabel(dirV, l)))
-        && NP.findByLabel(dirV, 'GUEST ONE').displayName === 'b' && NP.findByLabel(dirV, 'Tom &amp;amp; Jerry').displayName === 'tj' && NP.findByLabel(dirV, 'Guest_One').displayName === 'a' /* exact canon beats the curated inexact one */);
+        && NP.findByLabel(dirV, 'GUEST ONE').displayName === 'b' && NP.findByLabel(dirV, 'Tom &amp;amp; Jerry').displayName === 'tj' && NP.findByLabel(dirV, 'Guest_One').displayName === 'a' /* exact canon beats the curated inexact one */
+        && NP.findByLabel(dirV, 'ㅤ').displayName === 'blank' && NP.findByLabel(dirV, '⠀') === null);
       check('findByUserId: both copies strip non-digits and prefer a curated entry; resolvePlateEntry strips the slot\'s id too (GRN-216)',
         ['111', '<@111>', ' 111 ', '', 'x', 111, null].every((id) => JSON.stringify(D.findByUserId(dirV, id)) === JSON.stringify(NP.findByUserId(dirV, id))) && NP.findByUserId(dirV, '<@111>').displayName === 'b'
         && NP.resolvePlateEntry({ slots: [{ slot: 1, mode: 'discord', discordUserId: '<@111>' }], directory: dirV.filter((e) => e && typeof e === 'object' && e.vdoLabel || false) }, 1) !== null);

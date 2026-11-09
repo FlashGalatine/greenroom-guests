@@ -1033,6 +1033,7 @@
     }
 
     const users = Object.entries((discord && discord.users) || {});
+    const twins = twinCounts(live);
     els.slots.innerHTML = '';
     for (let i = 1; i <= SLOT_COUNT; i++) {
       const s = cfg.slots[i - 1];
@@ -1068,8 +1069,10 @@
         sel.appendChild(o);
       };
       addOpt('', '— none —');
-      for (const l of live) { addOpt(l, `${l} • live`); seen.add(l); }
-      if (s.label && !seen.has(s.label)) addOpt(s.label, `${s.label} (offline)`);
+      // Hidden characters are spelled out and look-alike labels are flagged: a stranger who picks "Bob" plus a zero-width character gets
+      // the curated Bob's plate, and the operator must be able to see that two entries in this list are not the same guest.
+      for (const l of live) { addOpt(l, `${showInvisible(l)} • live${twinNote(twins, l)}`); seen.add(l); }
+      if (s.label && !seen.has(s.label)) addOpt(s.label, `${showInvisible(s.label)} (offline)`);
 
       const mirLabel = document.createElement('label');
       mirLabel.className = 'vdo-mirror';
@@ -1275,7 +1278,16 @@
 
   // Characters that draw nothing (zero-width, Braille blank, ...) are shown as <U+XXXX> where a label is listed, so two labels that look the
   // same but are not can be told apart.
-  const showInvisible = (t) => String(t ?? '').replace(/[\p{Default_Ignorable_Code_Point}\u2800]/gu, (ch) => '<U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '>');
+  // The joiners an emoji sequence is built from (the zero-width joiner, the emoji/text variation selectors, the tag characters of a flag)
+  // stay as they are: a family or a flag is one picture, and spelling out its joiners would make every such label unreadable.
+  const SOCIAL_PLATFORMS = 'Platforms: twitch, youtube (yt), x (twitter), bluesky (bsky), instagram (ig), tiktok (tt), discord; any other name gets a globe.';
+  // (Function declarations, not consts: the slots panel is drawn before this part of the script has run.)
+  function showInvisible(t) {
+    return String(t ?? '').replace(/[\p{Default_Ignorable_Code_Point}\u2800]/gu, (ch) => (/^[\u200d\ufe0e\ufe0f\u{E0020}-\u{E007F}]$/u.test(ch) ? ch : '<U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '>'));
+  }
+  // The pick lists mark a live label that another live label equals once case, spacing, underscores and invisible characters are ignored.
+  function twinCounts(live) { const m = new Map(); for (const l of live) m.set(GRDir.fold(l), (m.get(GRDir.fold(l)) || 0) + 1); return m; }
+  function twinNote(count, l) { return count.get(GRDir.fold(l)) > 1 ? ' (same as another label ignoring case, spacing or hidden characters)' : ''; }
   const metaText = (entry, u) => {
     const bits = [];
     if (isDraft(entry)) bits.push(entry.displayName ? 'not saved: add a VDO label or Discord user' : 'not saved: add an on-stream name');
@@ -1291,12 +1303,11 @@
     const l0 = document.createElement('option');
     l0.value = ''; l0.textContent = live.length ? 'live labels…' : '(no guests live)';
     sel.appendChild(l0);
-    const keyCount = new Map();
-    for (const l of live) keyCount.set(GRDir.fold(l), (keyCount.get(GRDir.fold(l)) || 0) + 1);
+    const keyCount = twinCounts(live);
     for (const l of live) {
       const o = document.createElement('option');
       o.value = l;
-      o.textContent = showInvisible(l) + (keyCount.get(GRDir.fold(l)) > 1 ? ' (same as another label ignoring case or spacing)' : '');
+      o.textContent = showInvisible(l) + twinNote(keyCount, l);
       sel.appendChild(o);
     }
   }
@@ -1351,7 +1362,7 @@
       if (isDraft(entry)) unsaved++;
       if (st.any) liveCount++;
       if (entry.auto) autoCount++;
-      if (liveOnly && !st.any) return;
+      if (liveOnly && !st.any && !dirSuggest.has(entry[LID])) return; // a row with a link offer is waiting for an answer: it stays
       if (!dirMatches(entry, terms, users)) return;
       visible.push({ entry, st });
     });
@@ -1477,12 +1488,19 @@
         const box = document.createElement('span');
         box.className = 'dir-suggest';
         const q = document.createElement('span');
-        q.textContent = `link ${sg.username} (${sg.id})?`;
-        const yes = document.createElement('button');
-        yes.type = 'button'; yes.className = 'vdo-dir-link-yes'; yes.textContent = 'link';
-        const no = document.createElement('button');
-        no.type = 'button'; no.className = 'vdo-dir-link-no'; no.textContent = 'not them';
-        box.append(q, yes, no);
+        if (sg.n > 1) {
+          // Several Discord users have this name: no one-click link, the operator picks the right one in the Discord field.
+          q.textContent = `${sg.n} Discord users have this name - set the Discord ID yourself`;
+          box.append(q);
+        } else {
+          q.textContent = `link ${sg.username} (${sg.id})?`;
+          // The buttons carry the offer they were drawn with: a click acts only if it is still the current one.
+          const yes = document.createElement('button');
+          yes.type = 'button'; yes.className = 'vdo-dir-link-yes'; yes.textContent = 'link'; yes.dataset.id = sg.id;
+          const no = document.createElement('button');
+          no.type = 'button'; no.className = 'vdo-dir-link-no'; no.textContent = 'not them'; no.dataset.id = sg.id;
+          box.append(q, yes, no);
+        }
         head.appendChild(box);
       }
 
@@ -1513,7 +1531,8 @@
       socialsTa.className = 'vdo-dir-socials';
       socialsTa.rows = 2;
       socialsTa.spellcheck = false;
-      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social\n(one per line: platform, then handle. Platforms: twitch, youtube/yt, x/twitter, bluesky/bsky, instagram/ig, tiktok/tt, discord; anything else gets a globe)';
+      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social\n(one per line: platform, then handle)';
+      socialsTa.title = 'One per line: platform, then handle. ' + SOCIAL_PLATFORMS; // a placeholder is gone once something is typed
       socialsTa.value = GRDir.socialsToText(entry.socials);
 
       const body = document.createElement('div');
@@ -1652,7 +1671,7 @@
       const lost = lines - parsed.length;
       row.querySelectorAll('.dir-note').forEach((n) => n.remove());
       if (lost > 0) {
-        const msg = lost + (lost === 1 ? ' line' : ' lines') + ' ignored - use "platform handle", e.g. twitch bob';
+        const msg = lost + (lost === 1 ? ' line' : ' lines') + ' ignored - use "platform handle", e.g. twitch bob. ' + SOCIAL_PLATFORMS;
         dirNotes.set(e[LID], msg);
         row.querySelector('.dir-head').insertBefore(noteEl(msg), row.querySelector('.vdo-dir-remove'));
       } else dirNotes.delete(e[LID]);
@@ -1682,7 +1701,11 @@
   // (so a label typed into a draft, or cleared mid-edit, is respected), but only autoPopulate's own changes are applied: the view is
   // never assigned back, so a half-edited row never reaches cfg or a push (GRN-72, GRN-63).
   function runAutoAdd() {
-    if (!synced || cfg.directoryAutoAdd === false) return false;
+    if (!synced || cfg.directoryAutoAdd === false) {
+      // Nothing is added in this state, so nothing is offered and there is no limit to report.
+      if (dirSuggest.size || autoLimitHit) { dirSuggest.clear(); autoLimitHit = false; dirSig = ''; }
+      return false;
+    }
     const base = cfg.directory;
     const pending = [];
     for (const row of els.directory.querySelectorAll('.vdo-dir-row')) {
@@ -1700,8 +1723,15 @@
       boundUsers: cfg.slots.map((s) => s.discordUserId).filter(Boolean),
     });
     // A Discord user whose name matches a CURATED entry is only offered the link (the row shows 'link <name> (<id>)?').
+    // When several Discord users have the name, no single one is offered (n > 1): the operator sets the ID by hand.
     const offers = new Map();
-    for (const sg of res.suggested) { const en = base[sg.index]; if (en) offers.set(lidOf(en), { id: sg.id, username: sg.username }); }
+    for (const sg of res.suggested) {
+      const en = base[sg.index];
+      if (!en) continue;
+      const cur = offers.get(lidOf(en));
+      if (!cur) offers.set(lidOf(en), { id: sg.id, username: sg.username, n: 1 });
+      else { cur.n++; cur.id = ''; cur.username = ''; }
+    }
     const offersChanged = JSON.stringify([...offers]) !== JSON.stringify([...dirSuggest]);
     dirSuggest.clear();
     offers.forEach((v, k) => dirSuggest.set(k, v));
@@ -1715,8 +1745,18 @@
       const en = base[lk.index];
       if (en && !en.discordUserId) { en.discordUserId = lk.id; changed = true; linkedNames.push(lk.username + ' with ' + lk.name); }
     }
+    for (const lb of res.labeled) { // a guest who joined the voice channel first: their auto entry takes the VDO label (no twin)
+      const en = base[lb.index];
+      if (en && en.auto && !en.vdoLabel) { en.vdoLabel = lb.label; autoAdded.add(GRDir.labelExactKey(lb.label)); changed = true; }
+    }
     for (const idx of res.evicted.slice().sort((a, b) => b - a)) { // auto entries that left the room made way for new ones
-      if (idx < base.length) { dirOpen.delete(base[idx][LID]); dirSuggest.delete(base[idx][LID]); base.splice(idx, 1); changed = true; }
+      if (idx < base.length) {
+        const gone = base[idx];
+        addedKeys(gone).forEach((k) => autoAdded.delete(k)); // a guest who comes back is added again
+        dirOpen.delete(gone[LID]); dirSuggest.delete(gone[LID]); dirNotes.delete(gone[LID]);
+        base.splice(idx, 1);
+        changed = true;
+      }
     }
     for (const added of res.appended) {
       lidOf(added);
@@ -1765,8 +1805,12 @@
     if (yes || no) {
       const target = rowTarget(row);
       const sg = target && dirSuggest.get(target[LID]);
-      (yes || no).blur();
-      if (!target || !sg) { dirSig = ''; renderDirectory(true); return; }
+      const clicked = yes || no;
+      const offeredId = clicked.dataset.id;
+      clicked.blur();
+      // The answer is for the Discord user this button was drawn with. If the offer has moved on (another user, none, or the entry has an
+      // ID now) nothing is linked or ignored: the row is redrawn with what is current.
+      if (!target || !sg || !offeredId || sg.id !== offeredId || target.discordUserId) { dirSig = ''; renderDirectory(true); return; }
       dirSuggest.delete(target[LID]);
       if (yes) target.discordUserId = sg.id; // the operator said it is them
       else ignoreKeys(GRDir.userKey(sg.id)); // not them: this Discord user is not offered (or added) again

@@ -183,12 +183,16 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   (merge in both directions, auto entries only). A **curated** entry is never
   linked by name: Discord names are self-chosen, so anyone can be called "Bob".
   The dock offers the link on the row ("link <name> (<id>)?"): accepting sets
-  the `discordUserId`, rejecting adds `discord:<id>` to `directoryIgnored`. Until
-  the operator accepts, the guest's roster chip shows the raw Discord name and a
-  discord-mode slot bound to them shows no plate. Auto entries are capped at 50:
-  at the cap the first auto entry that is not in the room and not in a slot is
-  dropped to make room, curated entries never are, and the dock says "auto-add
-  limit reached" when someone could not be added. A Discord user with no name
+  the `discordUserId`, rejecting adds `discord:<id>` to `directoryIgnored`; each
+  button acts only on the Discord user it was drawn for, and when two or more
+  Discord users have the name the row offers nothing and says so (set the ID by
+  hand). Until the operator accepts, the guest's roster chip shows the raw
+  Discord name and a discord-mode slot bound to them shows no plate. Auto
+  entries are capped at 50: at the cap the first auto entry that is not in the
+  room (by label, Discord ID or Discord name) and not in a slot is dropped to
+  make room, curated entries never are, the dropped guest is added again if they
+  come back, and the dock says "auto-add limit reached" when someone could not
+  be added. A Discord user with no name
   yet is added when the name arrives (never stored under the snowflake), and a
   label that draws nothing (zero-width characters, U+2800) is not added. A page appends a given label or voice
   user at most once per page session (so a label that Streamer.bot rewrites on the
