@@ -9,6 +9,27 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.66] — 2026-11-09
+
+The Discord bridge has one way out, a guard that says who holds it, and survives bad frames. The sidecar version is now 1.0.66.
+
+### Added
+
+- **Liveness fields on the Discord feed.** Every payload carries `hb` (5000: the bridge pushes at least every 5 seconds, so a consumer can tell a live bridge from a dead one), `stopped` (true on the last frame before the bridge exits) and `bridgeVersion` (additive; docs/PROTOCOL.md). The mock bridge sends the same. The overlays and the control pill that use them come in later releases.
+- **A `quit` command** (the clean stop) and **command-line arguments**: `--sb-ws-url=`, `--guard-port=` and `--exit-on-sb-close=` win over `SB_WS_URL`, `GREENROOM_GUARD_PORT` and `GREENROOM_EXIT_ON_SB_CLOSE`; put them in an edited `start-discord-bridge.bat` (it passes its arguments on) or after `npm run bridge --`.
+- Tests: `verify` section [8b] drives the real token-less bridge on mock Streamer.bots, and a mock Discord REST and gateway, through the shutdown paths, the crash policy, hostile command frames, the guard (a program that holds the port, a newer build, resets), arguments, the exit grace window and the login races. The bridge reads two test-only switches, `GREENROOM_TEST_HOOKS=1` (the `test-*` commands) and `DISCORD_BRIDGE_API` (a loopback address only).
+
+### Fixed
+
+- **Every way the bridge stops leaves a clean state.** Ctrl+C, Ctrl+Break, closing its window, `quit`, Streamer.bot closing (with that option on) and a crash all go through one routine: it pushes a last state (nobody in voice, `stopped`), leaves the voice call once and exits. Before, the last roster stayed in `discord.state` with nothing to say the bridge was gone. A crash exits with code 1 and puts the error in `rpc.error`; a rejected promise is logged and the bridge keeps running. (Ending `node.exe` in Task Manager cannot leave cleanly: use `quit` or exit-on-close for the hidden instance.)
+- **A bad frame on the bus can no longer crash the bridge.** A command that is an object or an array, or a value that is not text (for example `{toString:1}`), is dropped and only its type is logged.
+- **A console that stops draining no longer freezes the bridge.** The log is written from a worker thread (a click in the console window starts a selection and Windows pauses the writer); control characters are replaced, and the bot token is never written to the log or to `rpc.error`.
+- **The single-instance guard says who holds it.** It sends a banner (name, pid, version). A program that holds the port without a banner, or a bridge older than this release, makes the bridge say so and exit instead of running without a guard; a newer build asks an older one to quit and takes over (versions are compared as numbers: 1.0.10 is newer than 1.0.9); a bridge of the same or a newer version is left alone. A reset or a killed peer on the guard port no longer crashes the bridge. The Node version is checked before discord.js loads.
+- **Connect, Reset auth and Stop while the bot is still dialing the gateway.** A login that fails after it was replaced no longer stops the newer bot, and a client stopped mid-dial is closed once its login finishes, so no session is left behind.
+- **Streamer.bot back inside the exit-on-close grace window keeps the bridge running**: the bridge retries about once a second while the countdown runs and makes one last attempt at the end. The connect push is one frame, and the connection to Streamer.bot has a handshake timeout.
+
+**Deploy:** **stop the running bridge first**: close its window, or end `node.exe` and confirm it exited (the old build has no quit command). Copy the `sidecar/` folder (and `start-discord-bridge.bat` and `mock-discord-bridge.mjs` if you use them) and start the bridge again with Discord Bridge Start or `start-discord-bridge.bat`. If the new bridge exits at once saying the guard port is held, an old bridge is still running: end `node.exe` and start again. Nothing to re-paste; no page reload. `verify` 363/363, `verify:render` 357/357.
+
 ## [1.0.63] — 2026-11-09
 
 The dock and `director-min` now tell their own pushes from someone else's by a revision number, the newer saved state wins, an edit made while Streamer.bot is unreachable is kept, and one director is the designated one.
@@ -415,6 +436,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.66]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.63...v1.0.66
 [1.0.63]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.59...v1.0.63
 [1.0.59]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.55...v1.0.59
 [1.0.55]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.52...v1.0.55
