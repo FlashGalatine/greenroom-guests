@@ -55,6 +55,10 @@
 //       The mode options above can also be changed while running (a value it does not know is a 400; missing= clears the list):
 //       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve&push=ok|error|drop&missing=<names>   (hello=mock = the default)
 //       GET /mock/dropall       close every WebSocket client (they reconnect)
+//       GET /mock/drop?ms=<n>   close every WebSocket client AND refuse new connections (the upgrade is answered 503) for n ms, as a
+//                               Streamer.bot that is down for a while is; pages see no 'open', then reconnect after their backoff
+//       GET /mock/mode?rewrite=fffd   VDO Push text comes back (and is cached) with every lone surrogate replaced by U+FFFD, as
+//                               Streamer.bot's own string handling does; rewrite= (empty) turns it off
 //       SB_DATA=string          deliver General.Custom `data` as a JSON string, not an object
 //       SB_DROP=1               accept each connection, greet it, answer no request, and close it ~100 ms later
 //       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
@@ -116,7 +120,9 @@ const modes = {
   auth: process.env.SB_AUTH === 'close' ? 'close' : (process.env.SB_AUTH === 'serve' ? 'serve' : 'refuse'),
   push: process.env.SB_PUSH === 'error' || process.env.SB_PUSH === 'drop' ? process.env.SB_PUSH : 'ok', // VDO Push: ok | error (acked status:'error', not run) | drop (acked ok, stores and broadcasts nothing)
   missing: process.env.SB_MISSING || '', // comma-separated action names that do not exist: acked status:'error'
+  rewrite: process.env.SB_REWRITE === 'fffd' ? 'fffd' : '', // VDO Push: '' (verbatim) | fffd (lone surrogates become U+FFFD, in the broadcast and in the cache)
 };
+let refuseUntil = 0; // /mock/drop: WebSocket connections are refused until this time
 // The actions the real install has (an action that is not one of these, or is listed in `missing`, is answered 'not found').
 const KNOWN_ACTIONS = new Set(['VDO Push', 'Discord Voice Push', 'VDO Sync', 'Discord Voice Command', 'Discord Bridge Start']);
 const SUBSCRIBE_DELAY_MS = Number(process.env.SB_SUBSCRIBE_DELAY_MS) || 0;
@@ -287,6 +293,7 @@ function push(name, args) {
   let payload = args.payload;
   if (typeof payload !== 'string' || !payload) { console.log(`[mock] ${name}: no payload argument`); emitError(kind, `${name} called without a 'payload' argument`); return; }
   payload = netTrim(payload); // C# string.Trim(), which is not quite JavaScript's trim()
+  if (modes.rewrite === 'fffd' && name === 'VDO Push') payload = payload.replace(/\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})|(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2}/g, '\\ufffd');
   if (WIRE_OBJECT) {
     if (!payload.startsWith('{') || !payload.endsWith('}')) { console.log(`[mock] ${name}: payload is not a JSON object string`); emitError(kind, `${name} payload must be a JSON object string`); return; }
     caches[kind.key] = payload; // the old actions cached first…
@@ -399,7 +406,7 @@ async function handleHttp(req, res) {
   }
   if (path === '/mock/mode') {
     // Every value is checked first, so a typo changes nothing and says so. `missing` takes any text; an empty one clears it.
-    const ALLOWED = { subscribe: ['ok', 'none', 'error'], doaction: ['ok', 'error'], hello: ['none', 'plain', 'auth', 'mock'], auth: ['refuse', 'close', 'serve'], push: ['ok', 'error', 'drop'] };
+    const ALLOWED = { subscribe: ['ok', 'none', 'error'], doaction: ['ok', 'error'], hello: ['none', 'plain', 'auth', 'mock'], auth: ['refuse', 'close', 'serve'], push: ['ok', 'error', 'drop'], rewrite: ['', 'fffd'] };
     for (const k of Object.keys(modes)) {
       if (query.has(k) && ALLOWED[k] && !ALLOWED[k].includes(query.get(k))) {
         res.writeHead(400, { 'content-type': 'application/json' });
@@ -416,6 +423,14 @@ async function handleHttp(req, res) {
     for (const c of clients) { try { c.close(); } catch {} }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (path === '/mock/drop') {
+    const ms = Math.max(0, Math.min(60000, Number(query.get('ms')) || 0));
+    refuseUntil = ms ? Date.now() + ms : 0;
+    for (const c of clients) { try { c.terminate(); } catch {} }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, refusingForMs: ms }));
     return;
   }
   if (path === '/mock/conns') {
@@ -511,7 +526,7 @@ http.listen(HTTP_PORT, '127.0.0.1', () => {
 
 // ── WebSocket server (SB WebSocket Server mimic) ─────────────────────────────
 
-const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT });
+const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT, verifyClient: (info, cb) => { if (Date.now() < refuseUntil) cb(false, 503, 'mock: down for a while'); else cb(true); } });
 const clients = new Set();
 
 function broadcastRaw(msg) {

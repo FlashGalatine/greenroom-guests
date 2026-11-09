@@ -45,7 +45,7 @@ const BACKUP_DIR = process.env.GREENROOM_BACKUP_DIR ? resolve(process.env.GREENR
 const CONNECT_MS = 6000; // give up if SB isn't listening
 const REPLY_MS = 5000;   // wait for a sync replay / push rebroadcast
 const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish'; // the control page's default view flags
-const SUPPORTED_SCHEMA = 1; // the newest vdo.state schemaVersion this tool knows (the control page's SCHEMA_VERSION)
+const SUPPORTED_SCHEMA = 2; // the newest vdo.state schemaVersion this tool knows (the control page's SCHEMA_VERSION)
 
 function die(msg, code = 1) { console.error('backup: ' + msg); process.exit(code); }
 const USAGE = `usage:
@@ -298,7 +298,11 @@ async function restore(file) {
   }
   const checked = checkSnapshot(parsed);
   if (checked.problem) return die(`${path}: ${checked.problem} Nothing was changed.`);
-  const { payload } = checked;
+  // The file is pushed as a NEW write (control/vdo-rev.js): stamped with the time as its rev and this tool as its writer, so the pages
+  // adopt it over what they hold (a file's own, older rev would be dropped as a stale replay), and with the slots' stream IDs blanked:
+  // they were true when the file was saved, not now, and the designated director puts the live ones back within two polls.
+  const { rev: _r, writer: _w, schemaVersion: _s, ...rest } = checked.payload;
+  const payload = { ...rest, slots: checked.payload.slots.map((s) => ({ ...s, streamID: '' })), schemaVersion: SUPPORTED_SCHEMA, rev: Date.now(), writer: 'backup' };
 
   console.log(`target: ${URL_ARG}`);
   const sb = await connect(URL_ARG);

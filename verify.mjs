@@ -1107,6 +1107,87 @@ async function main() {
         NP.icon('x') === NP.ICONS.twitter && NP.icon('YT') === NP.ICONS.youtube && NP.icon('ig') === NP.ICONS.instagram && NP.icon('bsky') === NP.ICONS.bluesky && NP.icon('tt') === NP.ICONS.tiktok && NP.icon('nope') === NP.ICONS.website);
     }
 
+    // ── Sprint 11: revisions, echoes and the newer state (GRN-64, 04, 149, 11, 169) ──
+    {
+      const revSrc = await readFile(resolve(__dirname, 'control', 'vdo-rev.js'), 'utf8');
+      const hadRev = globalThis.GRRev;
+      new Function(revSrc)();
+      const RV = globalThis.GRRev;
+      if (hadRev) globalThis.GRRev = hadRev; else delete globalThis.GRRev;
+      const st = { enabled: true, room: 'r', slots: [{ slot: 1, label: 'A', streamID: 'a1' }, { slot: 2, label: '', streamID: '' }], directory: [], schemaVersion: 2 };
+      const withIds = (o, id) => Object.assign({}, o, { slots: o.slots.map((s) => (s.label ? Object.assign({}, s, { streamID: id }) : s)) });
+      check('GRRev.sigOf: the signature ignores rev, writer, schemaVersion and the key order, tells real differences apart, and is empty for a non-object',
+        RV.sigOf(Object.assign({}, st, { rev: 5, writer: 'wA' })) === RV.sigOf(Object.assign({ writer: 'x', rev: 9 }, st, { schemaVersion: 7 }))
+        && RV.sigOf({ b: 1, a: { d: 1, c: 2 } }) === RV.sigOf('{"a":{"c":2,"d":1},"b":1}')
+        && RV.sigOf('junk') === '' && RV.sigOf(null) === '' && RV.sigOf([1]) === '' && RV.sigOf(st) !== RV.sigOf(Object.assign({}, st, { room: 'q' })));
+      check('GRRev.revOf / writerOf: a positive whole number or 0 (a legacy write); a writer is a string or empty',
+        RV.revOf({ rev: 12.7 }) === 12 && RV.revOf({ rev: '7' }) === 7 && RV.revOf({}) === 0 && RV.revOf({ rev: -3 }) === 0 && RV.revOf({ rev: 'x' }) === 0
+        && RV.revOf('{"rev":4}') === 4 && RV.revOf(null) === 0 && RV.writerOf({ writer: 'wA' }) === 'wA' && RV.writerOf({ writer: 5 }) === '' && RV.writerOf('junk') === '');
+      const sA = RV.sigOf(st);
+      check('GRRev.diffKind: same, only the stream IDs differ, or anything else',
+        RV.diffKind(sA, RV.sigOf(Object.assign({ rev: 3 }, st))) === 'same' && RV.diffKind(sA, RV.sigOf(withIds(st, 'a2'))) === 'ids'
+        && RV.diffKind(sA, RV.sigOf(Object.assign({}, st, { room: 'q' }))) === 'other' && RV.diffKind(sA, RV.sigOf(Object.assign({}, st, { slots: [] }))) === 'other' && RV.diffKind(sA, '') === 'other');
+
+      let clock = 1000;
+      const mk = (w) => RV.create({ now: () => clock, writer: w });
+      const A = mk('wA');
+      const n1 = A.nextRev(), n2 = A.nextRev();
+      A.sent(n1);
+      const n3 = A.nextRev();
+      clock = 5000;
+      const n4 = A.nextRev();
+      check('nextRev: the clock; the same until a push is really sent; then always above the last one sent, even in the same millisecond',
+        n1 === 1000 && n2 === 1000 && n3 === 1001 && n4 === 5000 && A.lastSent === 1000 && A.highest === 0);
+      const stamped = A.stamp(Object.assign({ rev: 1, writer: 'old', extra: [1, 2] }, st));
+      const body = JSON.parse(stamped.text);
+      check('stamp: the state plus schemaVersion 2, the rev and this page\'s writer (an old stamp on the state is replaced); the signature is unchanged',
+        body.schemaVersion === 2 && body.rev === 5000 && stamped.rev === 5000 && body.writer === 'wA' && Object.keys(body).slice(-3).join() === 'schemaVersion,rev,writer'
+        && RV.sigOf(stamped.text) === RV.sigOf(Object.assign({ extra: [1, 2] }, st)) && A.lastSent === 1000 && A.inflight.length === 1);
+      A.sent(5000);
+      const echoed = JSON.stringify(Object.assign({}, st, { slots: [{ slot: 1, label: 'A�', streamID: 'a1' }], rev: 5000, writer: 'wA' }));
+      const e1 = A.receive(JSON.parse(echoed));
+      check('GRN-149: an own echo is recognised by writer and rev, not by its text (a lone surrogate comes back as U+FFFD), and clears the push and every older one',
+        e1.kind === 'echo' && A.inflight.length === 0 && A.highest === 5000);
+      check('…and an old own echo coming back later (a replay of an earlier push) is an echo too: never adopted',
+        A.receive({ rev: 1000, writer: 'wA', room: 'old' }).kind === 'echo' && A.receive({ rev: 5000, writer: 'wA', room: 'again' }).kind === 'echo');
+      A.sent(5001); A.sent(5002);
+      A.receive({ rev: 5002, writer: 'wA' });
+      check('…an echo clears everything older than it and nothing newer', A.inflight.length === 0);
+      A.sent(5003); A.sent(5004);
+      A.receive({ rev: 5003, writer: 'wA' });
+      check('…a newer push of this page stays in flight', A.inflight.length === 1 && A.inflight[0].rev === 5004 && A.pending(5004) && !A.pending(5003));
+      A.refused(5004);
+      check('refused(): a push Streamer.bot refused is no longer waiting for an echo', A.inflight.length === 0);
+
+      const B = mk('wB');
+      check('GRN-04: a higher rev from another writer is adopted and raises the highest; a lower one is dropped; the very payload held again is "same"',
+        B.receive({ rev: 9000, writer: 'wX' }).kind === 'newer' && B.highest === 9000 && B.receive({ rev: 8999, writer: 'wY' }).kind === 'stale'
+        && B.receive({ rev: 9000, writer: 'wX' }).kind === 'same' && B.highest === 9000);
+      check('…equal revs are broken by the writer id (the larger wins), the same way on every page',
+        B.receive({ rev: 9000, writer: 'wZ' }).kind === 'newer' && B.highestWriter === 'wZ' && B.receive({ rev: 9000, writer: 'wA' }).kind === 'stale' && B.receive({ rev: 9000, writer: 'wZ' }).kind === 'same');
+      const lg = B.receive({ room: 'legacy', slots: [] });
+      check('a payload with no rev is a legacy write: adopted, never dropped as rev 0, and it does not move the highest rev; the next stamp is still above everything seen',
+        lg.kind === 'legacy' && B.highest === 9000 && B.nextRev() === 9001);
+      // two pages that stamp the same millisecond: both end on the same winner
+      clock = 20000;
+      const P1 = mk('wP1'), P2 = mk('wP2');
+      const r1 = P1.nextRev(), r2 = P2.nextRev();
+      P1.sent(r1); P2.sent(r2);
+      const k1 = [P1.receive({ rev: r1, writer: 'wP1' }).kind, P1.receive({ rev: r2, writer: 'wP2' }).kind];
+      const k2 = [P2.receive({ rev: r2, writer: 'wP2' }).kind, P2.receive({ rev: r1, writer: 'wP1' }).kind];
+      check('two pages that stamp the same millisecond end on the same winner (the larger writer id): the other page adopts it and the loser\'s copy is dropped',
+        r1 === r2 && k1.join() === 'echo,newer' && k2.join() === 'echo,stale' && P1.highestWriter === 'wP2' && P2.highestWriter === 'wP2');
+      // GRN-31: a delayed Sync broadcast of an old state arrives after a newer push
+      clock = 30000;
+      const D = mk('wD');
+      D.receive({ rev: 29000, writer: 'wX' });
+      const d1 = D.nextRev(); D.sent(d1);
+      D.receive({ rev: d1, writer: 'wD' });
+      check('GRN-31: a delayed replay of an older state, arriving after this page\'s newer push, is dropped', D.receive({ rev: 29000, writer: 'wX' }).kind === 'stale' && D.receive({ rev: 28000, writer: 'wQ' }).kind === 'stale');
+      check('create() with no options works (a random writer id, the real clock) and two pages differ',
+        /^w[0-9a-f]{16}$/.test(RV.create().writer) && RV.create().writer !== RV.create().writer && Math.abs(RV.create().nextRev() - Date.now()) < 1000);
+    }
+
     // ── The vdo.ninja URL helper (GRN-88, 15, 61, 101, 102): two identical copies, one set of rules ──
     {
       const urlOverlay = (await readFile(resolve(__dirname, 'overlay', 'vdo-url.js'), 'utf8')).replace(/\r\n/g, '\n');
@@ -1243,6 +1324,10 @@ async function main() {
     check('/control/director-loop.js 200 javascript + exports GRDirector', dlRes.status === 200 && (dlRes.headers.get('content-type') || '').includes('javascript') && (await dlRes.text()).includes('globalThis.GRDirector'));
     check('both control pages load director-loop.js and run the director through it, with no poll loop of their own (GRN-66)',
       [ctrlBody, minBody].every((b) => b.includes('director-loop.js') && b.includes('GRDirector.create') && b.includes('directorLoop.onMessage') && !/setInterval\(pollGuestList/.test(b) && !/function pollGuestList/.test(b)));
+    const revRes = await fetch(`${BASE}/control/vdo-rev.js`);
+    check('/control/vdo-rev.js 200 javascript + exports GRRev', revRes.status === 200 && (revRes.headers.get('content-type') || '').includes('javascript') && (await revRes.text()).includes('globalThis.GRRev'));
+    check('both control pages load vdo-rev.js and stamp every push and judge every vdo.state through it (GRN-64, 04, 149)',
+      [ctrlBody, minBody].every((b) => b.includes('vdo-rev.js') && b.includes('GRRev.create') && b.includes('.stamp(') && b.includes('.receive(') && b.includes('GRRev.SCHEMA_VERSION')));
     // (The director-min strip guard is a behaviour test now: verify-render R9, GRN-202.)
     check('director-min auto-populates too (shared core + the Discord-feed source)',
       minBody.includes('directory-core.js') && minBody.includes('GRDir.autoPopulate')
@@ -1440,8 +1525,10 @@ async function main() {
     check('restore re-pushed the snapshot → SB vdo.state is "testroom" again with the 2 directory entries',
       afterState.vdo && afterState.vdo.room === 'testroom' && Array.isArray(afterState.vdo.directory) && afterState.vdo.directory.length === 2);
     const sameJson = (a, b) => { const canon = (x) => (Array.isArray(x) ? x.map(canon) : x && typeof x === 'object' ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, canon(x[k])])) : x); return JSON.stringify(canon(a)) === JSON.stringify(canon(b)); };
-    check('the restored vdo.state deep-equals the fixture (room, the password "pw1", slots with their stream IDs, invite, directory as the page would sanitise it)',
-      sameJson(afterState.vdo, { ...VDO_PAYLOAD, directory: D.sanitizeDirectory(VDO_PAYLOAD.directory) }), JSON.stringify(afterState.vdo).slice(0, 300));
+    const stampedAt = afterState.vdo && Number(afterState.vdo.rev);
+    check('the restored vdo.state deep-equals the fixture (room, the password "pw1", slots, invite, directory as the page would sanitise it), as a NEW write: the slots\' stream IDs blanked (they were true when the file was saved), schemaVersion 2, rev = the time of the restore, writer "backup" (GRN-64, GRN-70)',
+      sameJson(afterState.vdo, { ...VDO_PAYLOAD, slots: VDO_PAYLOAD.slots.map((s) => ({ ...s, streamID: '' })), directory: D.sanitizeDirectory(VDO_PAYLOAD.directory), schemaVersion: 2, rev: stampedAt, writer: 'backup' })
+      && Number.isInteger(stampedAt) && Math.abs(stampedAt - Date.now()) < 60000 && VDO_PAYLOAD.slots.some((s) => s.streamID), JSON.stringify(afterState.vdo).slice(0, 300));
     const preRestore = (await readdir(bkDir)).filter((n) => /^pre-restore-.*\.json$/.test(n));
     let preState = null; try { preState = JSON.parse(await readFile(resolve(bkDir, preRestore[0]), 'utf8')); } catch { /* left null */ }
     check('restore first wrote pre-restore-<time>.json (the state it was about to replace, room "CHANGED") into the snapshot folder, and nothing into backups/',

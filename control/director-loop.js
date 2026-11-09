@@ -9,6 +9,7 @@
 //     keeping the last resolved stream IDs); after about 25 s it reloads the frame (via about:blank) with a 30 s, 60 s,
 //     then 120 s backoff, and at once on the window's 'online' event; "connecting" gets a hint after 15 s
 //   • the settle session (VdoParse.resolveSlotID): a fresh one every time the frame's src is set, reload included
+//   • whether it owns the room: hooks.owner(false) when vdo.ninja says another director holds it (information only, GRN-94)
 // It never blanks a slot itself; the pages decide what a roster means.
 
 (function () {
@@ -16,7 +17,7 @@
   const BACKUP_ORIGIN = 'https://cdn-backup.vdo.ninja';
 
   // o: { iframe, base, cib, extraOrigins, now, pollMs, firstProbeMs, silentMs, retryAfterMs, backoffMs, hintMs,
-  //      makeTicker(fn, ms) → { stop() }, setTimeout, hooks: { connecting, reply(roster, rawReply), unrecognised, silent, hint, retrying(n) } }
+  //      makeTicker(fn, ms) → { stop() }, setTimeout, hooks: { connecting, reply(roster, rawReply), unrecognised, silent, hint, retrying(n), owner(isOwner) } }
   function create(o) {
     const now = o.now || (() => Date.now());
     const T = Object.assign({}, o.timing); // a test shortens the clock with window.__VDO_DIRECTOR_TIMING = { silentMs, retryAfterMs, backoffMs, hintMs }
@@ -98,6 +99,9 @@
       // document from the new one: ignore replies until the new src has loaded (or 5 s have passed, in case 'load' never fires).
       if (!loaded && now() - srcSetAt < 5000) return;
       const d = e.data;
+      // vdo.ninja says whether this director owns the room: {action:'director', value:false} when another director got there first.
+      // Information only (a guestList from it is still read): the page may show it, and decides nothing from it (GRN-94).
+      if (d && typeof d === 'object' && d.action === 'director' && typeof d.value === 'boolean') { if (hooks.owner) hooks.owner(d.value); return; }
       if (!d || typeof d !== 'object' || !('guestList' in d)) return;
       if (typeof d.cib === 'string' && d.cib !== tag()) return; // asked of an earlier load of the frame
       lastReplyAt = now(); answered = true;

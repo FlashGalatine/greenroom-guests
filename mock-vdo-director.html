@@ -35,6 +35,7 @@
   ?malformed=1 answers the first four polls with malformed shapes (null guestList,
   string guestList, entry missing streamID, numeric label/streamID) before going
   normal — the defensive-parser cases, live.
+  ?notowner=1 also says {action:'director', value:false} on the first poll: another director holds the room and this one is not its owner.
   window.__setRoster({...}) overrides the timeline for hand-driven tests.
 -->
 <style>
@@ -54,6 +55,8 @@
   const P = new URLSearchParams(location.search);
   const SPEED = P.get('fast') === '1' ? 2.5 : 1;
   const MALFORMED = P.get('malformed') === '1';
+  const NOTOWNER = P.get('notowner') === '1';
+  let notOwnerSaid = false;
   const FIXED = P.get('fixed') === '1';
   const ALPHA = P.get('label') || 'ALPHA'; // ?label=<text> renames ALPHA (every poll, whatever the timeline)
   const COLDSTART = Number(P.get('coldstart')) || 0;
@@ -97,6 +100,7 @@
     const d = e.data;
     if (!d || typeof d !== 'object' || !d.getGuestList) return;
     polls++;
+    if (NOTOWNER && !notOwnerSaid) { notOwnerSaid = true; (e.source || window.parent).postMessage({ action: 'director', value: false, cib: d.cib }, '*'); }
     if (DELAY && Date.now() - t0 < DELAY) return; // not answering yet
     if (SILENT_AFTER && Date.now() - t0 >= SILENT_AFTER) return; // gone quiet
     let reply;

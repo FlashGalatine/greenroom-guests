@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite' and 'identity' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18; RENDER_ONLY=revision just R19.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -3423,6 +3423,295 @@ async function main() {
         check('R18n: at the cap ten new members evict the idle guests who left (Member 01..10) and not the one in slot 1 (Member 00); a guest who returns after being evicted is added again',
           n2.length === 50 && n2.includes('Member 00') && n2.includes('Member 59') && !n2.includes('Member 01') && !n2.includes('Member 10') && n2.includes('Member 11')
           && n3.length === 50 && n3.includes('Member 01') && n3.includes('Member 00'), JSON.stringify({ n2: n2.length, n3: n3.length, has01: n3.includes('Member 01') }));
+        await p.close();
+      }
+    }
+
+    // ── R19: revisions, echoes and one director (GRN-64, 04, 149, 11, 169, 94, 39) ──
+    if (!ONLY || ONLY === 'revision') {
+      console.log('\n[R19] revision: rev/writer/schemaVersion 2 on every push, echoes by rev, the newer state wins, offline edits kept, one designated director');
+      const R19_SECTIONS = 'abcdefghijklmn'.split('');
+      for (const k of (process.env.R19_ONLY || '').split(',').filter(Boolean)) if (!R19_SECTIONS.includes(k)) throw new Error('R19_ONLY=' + k + ': the sections are ' + R19_SECTIONS.join(', '));
+      const want = (k) => !process.env.R19_ONLY || process.env.R19_ONLY.split(',').includes(k);
+      const OLD = () => ({ schemaVersion: 2, rev: Date.now() - 100000, writer: 'wOld' }); // a state some page saved a while ago
+      const mkSeed = (extra) => Object.assign({ enabled: true, room: 'revroom', password: 'pw1', viewFlags: VIEWFLAGS, directoryAutoAdd: false,
+        slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)],
+        invite: { passwordMode: 'plaintext' }, directory: [{ vdoLabel: 'alpha', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] }, OLD(), extra || {});
+      const QUIET = '?fixed=1&delay=600000'; // a director that never answers: no roster-driven pushes
+      const FIXED = '?fixed=1';                // ALPHA aaa111, BRAVO bbb222, every poll
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const payloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const seededMock = async (seed, env) => {
+        const x = await startExtra(env || {});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const openDock = async (x, q, seed, init) => {
+        const p = await newPage(browser, { width: 920, height: 1500 }, mockDir(x, q));
+        if (init) await p.addInitScript(init);
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r, seed.room, 9000);
+        await sleep(600);
+        return p;
+      };
+      const openMin = async (x, q, init) => {
+        const p = await newPage(browser, { width: 500, height: 200 }, mockDir(x, q));
+        if (init) await p.addInitScript(init);
+        await p.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(900);
+        return p;
+      };
+      const MIRROR1 = '#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-mirror-cb';
+      const mirror1 = (p) => p.evaluate((s) => document.querySelector(s)?.checked, MIRROR1);
+      const setMirror1 = (p, on) => p.setChecked(MIRROR1, on);
+      const send = (x, o) => x.api.broadcast({ type: 'vdoninja:update', vdoninjaJson: JSON.stringify(o) });
+      const until = async (fn, ms) => { for (let t = 0; t < ms; t += 250) { if (await fn()) return true; await sleep(250); } return false; };
+      const sbText = (p) => p.evaluate(() => document.getElementById('sbStatus')?.textContent || '');
+
+      // (a) Every push is stamped.
+      if (want('a')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await setMirror1(p, true); await sleep(1300);
+        await setMirror1(p, false); await sleep(1300);
+        const ps = await payloads(x);
+        const w = await p.evaluate(() => window.__GR_WRITER);
+        const p2 = await openDock(x, QUIET, seed);
+        const w2 = await p2.evaluate(() => window.__GR_WRITER);
+        check('R19a: every push carries schemaVersion 2, a whole-number rev and this page\'s writer; the revs grow with each push; another load of the page has another writer',
+          ps.length === 2 && ps.every((q) => q.schemaVersion === 2 && Number.isInteger(q.rev) && q.rev > 0 && q.writer === w) && ps[1].rev > ps[0].rev && !!w && !!w2 && w !== w2,
+          JSON.stringify(ps.map((q) => [q.schemaVersion, q.rev, q.writer])));
+        await p2.close(); await p.close();
+      }
+      // (b) An echo that Streamer.bot rewrote is still this page's own push (GRN-149, GRN-232).
+      if (want('b')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed, { SB_REWRITE: 'fffd' });
+        const p = await openDock(x, QUIET, seed);
+        await p.evaluate(() => { const i = document.querySelector('#vdoDirectory .vdo-dir-row .vdo-dir-display'); i.value = 'Al\uD800pha'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+        await sleep(3000);
+        const ps = await payloads(x);
+        const st = await x.api.state();
+        const shown = await p.evaluate(() => document.querySelector('#vdoDirectory .vdo-dir-row .vdo-dir-display')?.value);
+        check('R19b: a name with a lone surrogate comes back from Streamer.bot with U+FFFD in it: the echo is recognised by rev, not adopted (the box keeps what was typed) and does not make the page push again',
+          ps.length === 1 && shown === 'Al\uD800pha' && !!st.vdo && st.vdo.directory[0].displayName === 'Al�pha', JSON.stringify({ pushes: ps.length, shown, stored: st.vdo && st.vdo.directory[0].displayName }));
+        await p.close();
+      }
+      // (c) An old echo of this page's own earlier push is not adopted (GRN-149).
+      if (want('c')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await setMirror1(p, true); await sleep(1300);
+        await setMirror1(p, false); await sleep(1300);
+        const ps = await payloads(x);
+        await x.api.clear();
+        await send(x, ps[0]); // the first push comes back late, as a replayed broadcast would
+        await sleep(1500);
+        const m = await mirror1(p);
+        const after = await payloads(x);
+        check('R19c: an old echo of this page\'s own earlier push, arriving after a newer one, is not adopted (the box stays unticked) and the page pushes nothing because of it',
+          ps.length === 2 && ps[0].slots[0].mirror === true && ps[1].slots[0].mirror === false && m === false && after.length === 0, JSON.stringify({ n: ps.length, m, after: after.length }));
+        await p.close();
+      }
+      // (d) The rev gate and legacy writes (GRN-04, GRN-64).
+      if (want('d')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        const future = Date.now() + 3600000; // far ahead of this page's own clock
+        const st = (rev, writer, mirror) => { const o = mkSeed({ slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111', mirror }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)], schemaVersion: 2, rev, writer }); if (!rev) { delete o.rev; delete o.writer; delete o.schemaVersion; } return o; };
+        await send(x, st(future, 'wZ', true)); await sleep(800);
+        const m1 = await mirror1(p);
+        await send(x, st(future - 5, 'wY', false)); await sleep(800);
+        const m2 = await mirror1(p);
+        await send(x, st(0, '', false)); await sleep(800);
+        const m3 = await mirror1(p);
+        await x.api.clear();
+        await setMirror1(p, true); await sleep(1300);
+        const ps = await payloads(x);
+        check('R19d: a higher rev from another writer is adopted, a lower one is dropped, a payload with no rev (a legacy write) is adopted; the next push of this page is stamped above the highest rev it has seen',
+          m1 === true && m2 === true && m3 === false && ps.length === 1 && ps[0].rev === future + 1, JSON.stringify({ m1, m2, m3, revs: ps.map((q) => q.rev), future }));
+        await p.close();
+      }
+      // (e) A delayed Sync broadcast plus a push inside the window ends with the newer state (GRN-31).
+      if (want('e')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed, { SYNC_DELAY_MS: '3500' });
+        const p = await openDock(x, QUIET, seed);
+        await sleep(300);
+        const nConns = async () => ((await (await fetch(x.api.base + '/mock/conns')).json()).conns || []).length;
+        const before = await nConns();
+        await fetch(x.api.base + '/mock/dropall').then((r) => r.arrayBuffer()); // the page reconnects and asks for a Sync again: the replay of the OLD state is held back 3.5 s
+        await until(async () => (await nConns()) > before, 8000);
+        await setMirror1(p, true); await sleep(1500); // the newer push, inside the window
+        await sleep(3500); // the old replay lands
+        const m = await mirror1(p);
+        const st = await x.api.state();
+        check('R19e: a delayed replay of the older saved state, landing after this page\'s newer push, is dropped: the page and the saved state both keep the edit', m === true && !!st.vdo && st.vdo.slots[0].mirror === true, JSON.stringify({ m, stored: st.vdo && st.vdo.slots[0].mirror }));
+        await p.close();
+      }
+      // (f) An edit made while Streamer.bot is unreachable is flagged and kept (GRN-11).
+      if (want('f')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await fetch(x.api.base + '/mock/drop?ms=4500').then((r) => r.arrayBuffer());
+        await wait(p, () => /offline/i.test(document.getElementById('sbStatus')?.textContent || ''), null, 6000);
+        await setMirror1(p, true); await sleep(1600);
+        const note = await sbText(p);
+        await wait(p, () => /SB: connected/.test(document.getElementById('sbStatus')?.textContent || ''), null, 15000);
+        await sleep(2500); // the replay of the older saved state arrives
+        const m = await mirror1(p);
+        const ps = await payloads(x);
+        const st = await x.api.state();
+        check('R19f: an edit made while Streamer.bot is down says "SB offline, changes will be sent on reconnect", survives the replay of the older saved state, and is pushed once with a new rev after the reconnect',
+          /SB offline, changes will be sent on reconnect/.test(note) && m === true && ps.length === 1 && ps[0].slots[0].mirror === true && ps[0].rev > seed.rev && !!st.vdo && st.vdo.slots[0].mirror === true,
+          JSON.stringify({ note, m, pushes: ps.length, stored: st.vdo && st.vdo.slots[0].mirror }));
+        await p.close();
+      }
+      // (g) A guest's stream ID changed while Streamer.bot was down: the designated director-min puts the new ID in the saved state afterwards (GRN-169).
+      if (want('g')) {
+        const seed = mkSeed({ alwaysOnDirector: 'director-min' });
+        const x = await seededMock(seed);
+        const p = await openMin(x, FIXED);
+        await sleep(2500);
+        await fetch(x.api.base + '/mock/drop?ms=4000').then((r) => r.arrayBuffer());
+        await sleep(500);
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa999', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } }));
+        const ok = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa999'; }, 22000);
+        const ps = await payloads(x);
+        check('R19g: ALPHA got a new stream ID while Streamer.bot was down; after the reconnect and the replay of the old saved state the designated director-min corrects it, once', ok && ps.length >= 1 && ps.length <= 2, JSON.stringify({ ok, pushes: ps.length }));
+        await p.close();
+      }
+      // (h) The designation (decision 14 A): the setting, and a dock that then pushes only operator edits.
+      if (want('h')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await p.setChecked('#vdoAlwaysOn', true);
+        const got = await until(async () => (await payloads(x)).some((q) => q.alwaysOnDirector === 'director-min'), 5000);
+        const p2 = await openDock(x, QUIET, seed);
+        const stays = await p2.evaluate(() => document.getElementById('vdoAlwaysOn')?.checked);
+        check('R19h: the "director-min.html is my always-on director" box is saved with the config (alwaysOnDirector: "director-min") and is ticked when the page is opened again', got && stays === true, JSON.stringify({ got, stays }));
+        await p.close(); await p2.close();
+        // a dock beside a designated director-min sends no roster-driven and no auto-add push; an operator edit still goes out
+        const seed2 = mkSeed({ alwaysOnDirector: 'director-min', directoryAutoAdd: true, slots: [slot(1, { label: 'ALPHA' }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)] });
+        const y = await seededMock(seed2);
+        const q = await openDock(y, '', seed2); // the mock director's own timeline: ALPHA, BRAVO, a leave and a rejoin with a new ID
+        await sleep(12500);
+        const quiet = await payloads(y);
+        await setMirror1(q, true); await sleep(1500);
+        const edit = await payloads(y);
+        check('R19h2: with director-min designated, the dock pushes nothing on its own over 12 s of roster changes (no follow, no auto-add), and an operator edit still pushes',
+          quiet.length === 0 && edit.length === 1 && edit[0].slots[0].mirror === true, JSON.stringify({ quiet: quiet.length, edit: edit.length }));
+        await q.close();
+      }
+      // (i) The correction after adopting someone else's state: the designated director sends it, once, and nobody else does (GRN-64, GRN-169).
+      if (want('i')) {
+        const stale = { slots: [slot(1, { label: 'ALPHA', streamID: '' }), slot(2, { label: 'BRAVO', streamID: '' }), slot(3), slot(4)] }; // as a restore sends them: the IDs blanked (a non-empty stale ID is kept for the 10 s settle window)
+        const seed = mkSeed(stale);
+        const x = await seededMock(seed);
+        const p = await openDock(x, FIXED, seed);
+        const ok = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222'; }, 14000);
+        await sleep(3000);
+        const ps = await payloads(x);
+        check('R19i: a payload with stale stream IDs (a restore) is adopted by the designated dock, and it sends ONE correction with the live IDs after the same difference holds for two polls',
+          ok && ps.length === 1, JSON.stringify({ ok, pushes: ps.length, ids: ps.map((q) => q.slots.slice(0, 2).map((s) => s.streamID).join('/')), revs: ps.map((q) => q.rev) }));
+        await p.close();
+        // a dock that is not the designated director sends nothing, and says director-min is not correcting
+        const seed2 = mkSeed(Object.assign({ alwaysOnDirector: 'director-min' }, stale));
+        const y = await seededMock(seed2);
+        const q = await openDock(y, FIXED, seed2, 'window.__DESIGNATION_WARN_MS = 2500;');
+        await sleep(9000);
+        const none = await payloads(y);
+        const note = await q.evaluate(() => { const e = document.getElementById('designationNote'); return e && !e.hidden ? e.textContent : ''; });
+        check('R19i2: with director-min designated and not running, the dock sends no correction and warns that director-min is not correcting (is its OBS source visible?)',
+          none.length === 0 && /not correcting/.test(note) && /OBS source/.test(note), JSON.stringify({ pushes: none.length, note }));
+        await q.close();
+        // the designated director-min corrects and the dock beside it does not
+        const z = await seededMock(seed2);
+        const d = await openDock(z, FIXED, seed2, 'window.__DESIGNATION_WARN_MS = 2500;');
+        const m = await openMin(z, FIXED);
+        const wm = await m.evaluate(() => window.__GR_WRITER);
+        const wd = await d.evaluate(() => window.__GR_WRITER);
+        const done = await until(async () => { const st = await z.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa111'; }, 14000);
+        await sleep(2500);
+        const pz = await payloads(z);
+        const note2 = await d.evaluate(() => { const e = document.getElementById('designationNote'); return e && !e.hidden ? e.textContent : ''; });
+        check('R19i3: with the designated director-min running beside the dock, the saved IDs converge to the live ones, every push is the director-min\'s, and the dock shows no warning',
+          done && pz.length >= 1 && pz.every((q) => q.writer === wm) && wm !== wd && note2 === '', JSON.stringify({ done, pushes: pz.length, writers: [...new Set(pz.map((q) => q.writer))], wm, wd, note2 }));
+        await d.close(); await m.close();
+      }
+      // (j) GRN-169's two render tests: a forged reply is ignored, and a malformed one changes nothing.
+      if (want('j')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await p.evaluate(() => window.postMessage({ guestList: { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'evil999', label: 'ALPHA' } } }, '*'));
+        await sleep(3500);
+        const ids = await p.evaluate(() => [...document.querySelectorAll('#vdoSlots .vdo-slot-row .vdo-id')].map((e) => e.textContent));
+        const ps = await payloads(x);
+        check('R19j: a guestList posted by the page itself (not by the director frame) is ignored: the slots keep their stream IDs and nothing is pushed', ids[0] === 'aaa111' && ids[1] === 'bbb222' && ps.length === 0, JSON.stringify({ ids, pushes: ps.length }));
+        await p.close();
+        const y = await seededMock(seed);
+        const q = await openDock(y, '?fixed=1&malformed=1', seed);
+        await sleep(7500); // the first four replies are malformed
+        const ids2 = await q.evaluate(() => [...document.querySelectorAll('#vdoSlots .vdo-slot-row .vdo-id')].map((e) => e.textContent));
+        const ps2 = await payloads(y);
+        check('R19j2: while the director\'s replies are malformed the dock keeps its resolved slots and pushes nothing', ids2[0] === 'aaa111' && ids2[1] === 'bbb222' && ps2.length === 0, JSON.stringify({ ids2, pushes: ps2.length }));
+        await q.close();
+      }
+      // (k) A director that is not the room's owner is information, not an error (GRN-94).
+      if (want('k')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, FIXED + '&notowner=1', seed);
+        const ok = await wait(p, () => /not room owner/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        const cls = await p.evaluate(() => document.getElementById('vdoStatus')?.className || '');
+        check('R19k: when the director says it does not own the room, the dock shows "director: connected (not room owner, another director holds the room)" and not as an error', ok && !/error/.test(cls), JSON.stringify({ ok, cls }));
+        await p.close();
+      }
+      // (l) A push nobody confirms (VDO Push not compiled) is said so (GRN-149, GRN-192).
+      if (want('l')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed, 'window.__UNCONFIRMED_MS = 1500;');
+        await fetch(x.api.base + '/mock/mode?push=drop').then((r) => r.arrayBuffer()); // acked, stored and broadcast by nobody
+        await setMirror1(p, true);
+        const ok = await wait(p, () => /not confirmed by Streamer\.bot/.test(document.getElementById('sbStatus')?.textContent || ''), null, 8000);
+        const text = await sbText(p);
+        check('R19l: a push whose echo never comes back is reported after a few seconds ("not confirmed by Streamer.bot: is VDO Push compiled?")', ok && /VDO Push compiled/.test(text), text);
+        await p.close();
+      }
+      // (m) schemaVersion 2 is this page's own; a higher one stops it.
+      if (want('m')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        const hidden1 = await p.evaluate(() => document.getElementById('syncStatus')?.hidden !== false);
+        await send(x, Object.assign(mkSeed(), { schemaVersion: 3, rev: Date.now() + 5000, writer: 'wFuture' }));
+        await sleep(900);
+        const shown = await p.evaluate(() => { const e = document.getElementById('syncStatus'); return e && !e.hidden ? e.textContent : ''; });
+        await x.api.clear();
+        await setMirror1(p, true); await sleep(1300).catch(() => {});
+        const ps = await payloads(x);
+        check('R19m: a saved state with schemaVersion 2 is read without complaint; one with schemaVersion 3 shows "reload this page" and this page pushes nothing', hidden1 && /newer Greenroom/.test(shown) && ps.length === 0, JSON.stringify({ hidden1, shown, pushes: ps.length }));
+        await p.close();
+      }
+      // (n) director-min stamps its pushes too.
+      if (want('n')) {
+        const seed = mkSeed({ slots: [slot(1, { label: 'ALPHA' }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)] });
+        const x = await seededMock(seed);
+        const p = await openMin(x, FIXED);
+        const w = await p.evaluate(() => window.__GR_WRITER);
+        await until(async () => (await payloads(x)).length >= 1, 12000);
+        const ps = await payloads(x);
+        check('R19n: director-min\'s pushes carry schemaVersion 2, a rev and its own writer id', ps.length >= 1 && ps.every((q) => q.schemaVersion === 2 && Number.isInteger(q.rev) && q.writer === w) && !!w, JSON.stringify(ps.map((q) => [q.schemaVersion, q.rev, q.writer])));
         await p.close();
       }
     }

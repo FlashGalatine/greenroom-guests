@@ -177,6 +177,10 @@
       <button id="btnVdoSave" class="primary">Save</button>
       <span id="vdoUnsaved" class="pill warn" hidden>unsaved changes</span>
     </div>
+    <div class="row">
+      <label title="Tick this when the director-min.html source in OBS is your always-on director. This page then sends only your own edits and leaves following the guests to director-min. Saved with the config."><input type="checkbox" id="vdoAlwaysOn" /> director-min.html is my always-on director</label>
+    </div>
+    <div id="designationNote" class="warn" role="status" hidden></div>
     <div id="vdoRoomEff" class="hint" role="status"></div>
     <div class="row">
       <label style="flex:1; display:flex; gap:6px; align-items:center;">viewFlags
@@ -326,6 +330,7 @@
 
 <script src="vdo-parse.js"></script>
 <script src="director-loop.js"></script>
+<script src="vdo-rev.js"></script>
 <script src="directory-core.js"></script>
 <script src="vdo-url.js"></script>
 <script>
@@ -385,7 +390,7 @@
     sbStatus: $('sbStatus'), vdoStatus: $('vdoStatus'), dvoStatus: $('dvoStatus'),
     room: $('vdoRoom'), password: $('vdoPassword'), viewFlags: $('vdoViewFlags'), enabled: $('vdoEnabled'),
     slots: $('vdoSlots'), directory: $('vdoDirectory'), director: $('vdoDirector'), cryptoWarn: $('cryptoWarn'),
-    syncStatus: $('syncStatus'), cfgStatus: $('cfgStatus'),
+    syncStatus: $('syncStatus'), cfgStatus: $('cfgStatus'), alwaysOn: $('vdoAlwaysOn'), designationNote: $('designationNote'),
     dirSearch: $('dirSearch'), dirLiveOnly: $('dirLiveOnly'), dirAutoAdd: $('dirAutoAdd'),
     dirCount: $('dirCount'), dirClearAuto: $('btnDirClearAuto'), dirResetIgnored: $('btnDirResetIgnored'),
     inviteLink: $('vdoInviteLink'), manageLink: $('vdoManageLink'),
@@ -406,12 +411,14 @@
     exitOnSbClose: $('dvoExitOnSbClose'),
   };
 
-  // Wire compatibility. Fields this page does not know pass through every push; `rev`
-  // and `writer` are reserved for a later release (per-push metadata) and are never
-  // copied. A saved config with a higher schemaVersion makes this page stop pushing.
-  const SCHEMA_VERSION = 1;
+  // Wire compatibility. Fields this page does not know pass through every push; `rev` and `writer` are the per-push stamp
+  // (control/vdo-rev.js) and are never copied into the config. A saved config with a higher schemaVersion makes this page stop pushing.
+  const SCHEMA_VERSION = GRRev.SCHEMA_VERSION;
   const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
-    'directoryAutoAdd', 'directoryIgnored', 'schemaVersion', 'rev', 'writer']);
+    'directoryAutoAdd', 'directoryIgnored', 'alwaysOnDirector', 'schemaVersion', 'rev', 'writer']);
+  // This page's stamping and echo tracking: every push is stamped, every incoming vdo.state is judged (own echo, older, newer).
+  const revs = GRRev.create();
+  window.__GR_WRITER = revs.writer; // (a test hook: which page wrote a push)
   const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId', 'pushID']);
   let schemaTooNew = false;
 
@@ -428,7 +435,10 @@
     return out;
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: DEFAULT_VIEWFLAGS, slots: defaultSlots(),
-    invite: defaultInvite(), directory: [], directoryAutoAdd: true, directoryIgnored: [], extra: {} };
+    invite: defaultInvite(), directory: [], directoryAutoAdd: true, directoryIgnored: [], alwaysOnDirector: '', extra: {} };
+  // Who sends the roster-driven pushes (decision 14 A): with "director-min.html is my always-on director" ticked, director-min is the
+  // designated director and this page sends only the operator's own edits; otherwise this page is the designated one.
+  const isDesignated = () => cfg.alwaysOnDirector !== 'director-min';
   // The director iframe's loop (control/director-loop.js): poll from a Worker tick, accept replies only from the frame itself
   // and the allowed origins, say when it goes quiet, reload it with a backoff, and keep the settle session.
   const directorLoop = GRDirector.create({
@@ -446,14 +456,18 @@
         roster = r; // defensive: [] on any malformed shape
         hasRoster = true;
         const unl = VdoParse.countUnlabeled(raw); // guests with a stream and no label: they cannot be bound to a slot
-        setPill(els.vdoStatus, `director: connected · ${roster.length} guest${roster.length === 1 ? '' : 's'}${unl ? ' · ' + unl + ' unlabeled' : ''}`, 'live');
+        // (not the room's owner: another director holds the room, which is expected beside a director-min that claimed it first)
+        setPill(els.vdoStatus, `director: connected${directorNotOwner ? ' (not room owner, another director holds the room)' : ''} · ${roster.length} guest${roster.length === 1 ? '' : 's'}${unl ? ' · ' + unl + ' unlabeled' : ''}`, 'live');
         renderSlots();
         runAutoAdd(); // new label in the room → placeholder directory entry
         renderDirectory(); // live-label picker options + live dots
         assembleAndPush(true); // auto-follow: re-resolve every poll
+        renderDesignation();
       },
+      owner: (isOwner) => { directorNotOwner = !isOwner; },
     },
   });
+  let directorNotOwner = false; // vdo.ninja said another director holds the room (information only, GRN-94)
   let roster = [];          // live [{label, streamID}] from the director iframe
   let hasRoster = false;    // at least one director reply this session
   let discord = null;       // last discordVoice payload
@@ -472,7 +486,14 @@
   let syncError = '';           // a saved config Streamer.bot reported as unreadable, while the page is not yet synced
   let syncPhase = 0;            // 0 quiet · 1 'has not answered' · 2 names both causes
   let syncTimer = null;
-  let lastPushedSig = '';   // serialized payload we last pushed OR hydrated from
+  // The signature (GRRev.sigOf: the state without rev, writer and schemaVersion) of the newest state this page believes Streamer.bot
+  // holds or will hold: what it last pushed, or what it just adopted. A push goes out only when the state differs from it.
+  let lastPushedSig = '';
+  let unsent = false;         // a push could not be sent (Streamer.bot unreachable): the edit is kept, and sent after the reconnect (GRN-11)
+  let lostPossible = false;   // the socket closed with a push still waiting for its echo: it may not have arrived
+  const MSG_UNSENT = 'SB offline, changes will be sent on reconnect';
+  let adoptedForeign = false; // another writer's state was just adopted: a difference in stream IDs alone is corrected after two polls (GRN-64)
+  let corrSig = '', corrPolls = 0;
   let pushSeq = 0;          // pushes actually sent (a gesture asks whether a push already left)
   let slotsSig = '';
   let dirSig = '';
@@ -546,6 +567,7 @@
       directory: sanitizeDirectory(v.directory),
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
+      alwaysOnDirector: v.alwaysOnDirector === 'director-min' ? 'director-min' : '',
       extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
     legacyNoAV = !!(v.invite && typeof v.invite === 'object' && !('askName' in v.invite) && (v.invite.noVideo || v.invite.noAudio));
@@ -763,8 +785,10 @@
             if (req.name === PUSH_ACTION) {
               // Streamer.bot did not save it, so it is not "pushed": it is offered again after REFUSED_RETRY_MS
               // (an operator Save always sends at once).
-              if (req.payload && req.payload === lastPushedSig) lastPushedSig = '';
-              refusedSig = req.payload || '';
+              const refusedState = GRRev.sigOf(req.payload);
+              revs.refused(GRRev.revOf(req.payload)); // it will never come back as an echo
+              if (req.payload && refusedState === lastPushedSig) lastPushedSig = '';
+              refusedSig = refusedState;
               refusedAt = Date.now();
               cfgRefused = true;
               setCfgStatus('Not accepted: Streamer.bot refused "' + PUSH_ACTION + '" (' + refusalText(m) + ').');
@@ -795,7 +819,12 @@
       pendingActions.clear();
       connFault = !!(authHello && !healthy); // (the sync line stays quiet under an authentication notice)
       if (authHello && !healthy) showFault('auth', MSG_AUTH); // hung up on after an authentication Hello
-      else { pillFault = ''; setPill(els.sbStatus, 'SB: offline — retrying', 'error'); }
+      else {
+        pillFault = '';
+        // A push still waiting for its echo may not have reached Streamer.bot: if the reconnect replay does not show it, it is sent again.
+        lostPossible = revs.inflight.length > 0;
+        setPill(els.sbStatus, unsent || lostPossible ? MSG_UNSENT : 'SB: offline — retrying', 'error');
+      }
       renderSyncStatus();
       scheduleReconnect();
     };
@@ -806,11 +835,21 @@
     if (d.type === 'vdoninja:update') {
       const v = frameState(d, 'vdoninja', 'vdoninjaJson');
       if (!v) return; // no usable state in the frame: drop it, never mark the page synced
-      const sig = JSON.stringify(v);
-      if (sig === lastPushedSig) { // our own echo: a real config is in this page
+      // What is this? Its rev and writer say (control/vdo-rev.js): this page's own push coming back, something older than a state this
+      // page already holds, or a newer (or legacy, rev-less) write to adopt.
+      const cls = revs.receive(v);
+      if (cls.kind === 'echo') { // our own push, or an older one of ours: never adopted. Matched by writer and rev, not by the text (GRN-149)
+        if (!revs.inflight.length) { lostPossible = false; if (pillFault === 'unconfirmed') clearFault(); }
         gotConfig = true; syncedByMarker = false;
         renderExportButton();
         markSynced();
+        return;
+      }
+      if (cls.kind === 'stale') return; // older than what this page already holds (GRN-04): a delayed replay, or the loser of an equal rev
+      if (synced && (unsent || (lostPossible && revs.inflight.length))) {
+        // An edit made while Streamer.bot was unreachable (or a push that may not have arrived) is not overwritten by the replay that
+        // comes with the reconnect: this page sends its own state, with a fresh rev (GRN-11).
+        assembleAndPush(false, true);
         return;
       }
       const firstSync = !synced;
@@ -833,14 +872,15 @@
       const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
       // Baseline so hydration alone never pushes: an unchanged re-assembly must
       // equal what we just adopted.
-      lastPushedSig = JSON.stringify(assemblePayload());
+      lastPushedSig = adoptionBaseline(v);
+      adoptedForeign = isDesignated(); corrSig = ''; corrPolls = 0;
       // Release a focused slot or directory control only now, synced and baselined: a pending edit it commits is then an ordinary push.
       if (firstSync) releaseFocusForAdoption();
       renderAll();
       if (heal) { cfg.slots.forEach((s) => { s.streamID = ''; }); hasRoster = false; renderSlots(true); }
       // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding here
       // could answer a rewrite of it with a push of our own (GRN-65).
-      if (heal) assembleAndPush(false);
+      if (heal) assembleAndPush(false, false, true);
     } else if (d.type === 'vdo:sync:empty') {
       // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
       if (!synced) syncedByMarker = true;
@@ -855,7 +895,7 @@
       // New face in the voice channel → placeholder directory entry (auto-add).
       const grew = runAutoAdd();
       renderDirectory(); // same options in the directory rows
-      if (grew) assembleAndPush(false);
+      if (grew) assembleAndPush(false, false, true);
     } else if (d.type === 'vdo:error' || d.type === 'discord:voice:error') {
       let text = 'SB action error: ' + (d.message || d.type);
       // A saved config the actions cannot read: say so on the sync line (not 'a fresh install').
@@ -910,28 +950,87 @@
       directory: sanitizeDirectory(cfg.directory),
       directoryAutoAdd: cfg.directoryAutoAdd !== false,
       directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored),
-      schemaVersion: SCHEMA_VERSION,
-    }, cfg.extra);
+    }, cfg.alwaysOnDirector ? { alwaysOnDirector: cfg.alwaysOnDirector } : {}, { schemaVersion: SCHEMA_VERSION }, cfg.extra);
+  }
+
+  // What this page compares its own state with right after it adopted `v` (another writer's push, a replay, an Import). A page that is
+  // not the designated director takes its own re-assembly as the baseline, so adopting alone never makes it push. The designated one
+  // takes its re-assembly with the stream IDs Streamer.bot holds, so a difference in IDs alone shows (and is corrected after two polls:
+  // GRN-64, GRN-169) while anything the page merely normalises (defaults filled in, key order) is not a difference at all.
+  function adoptionBaseline(v) {
+    const mine = assemblePayload();
+    if (isDesignated()) {
+      const held = Array.isArray(v.slots) ? v.slots : [];
+      mine.slots = mine.slots.map((s) => { const h = held.find((x) => x && Number(x.slot) === s.slot); return Object.assign({}, s, { streamID: String((h && h.streamID) ?? '') }); });
+    }
+    return GRRev.sigOf(mine);
   }
 
   // fromRoster: pushes triggered by director polls also require a roster this
   // session — a page that has never heard from its director must not blank the
   // slots another director resolved (the anti-ping-pong gate).
+  // auto: a push made because auto-add added someone. Both kinds are the designated director's to send: beside a designated
+  // director-min this page sends only the operator's own edits (decision 14 A, GRN-04).
   // Nothing goes out before the page is synced (GRN-24), except from inside a
   // confirmed operatorAction. force skips only the identical-payload dedupe (GRN-192).
-  function assembleAndPush(fromRoster, force) {
+  function assembleAndPush(fromRoster, force, auto) {
     if (schemaTooNew) return false; // a newer Greenroom saved this config: never push over it
     if (!synced && !unsyncedOverride) return false;
     if (fromRoster && !hasRoster) return false;
-    const payload = JSON.stringify(assemblePayload());
-    if (payload === lastPushedSig && !force && !unsyncedOverride) return false;
-    if (payload === refusedSig && !force && !unsyncedOverride && Date.now() - refusedAt < REFUSED_RETRY_MS) return false;
-    // Record it as pushed only if it was sent: with the socket down the next poll must retry,
-    // and a status line must not claim a push that never left.
-    if (!doAction(PUSH_ACTION, { payload })) return false;
-    lastPushedSig = payload;
+    if ((fromRoster || auto) && !isDesignated()) return false;
+    const state = assemblePayload();
+    const sig = GRRev.sigOf(state);
+    if (sig === lastPushedSig && !force && !unsyncedOverride) { adoptedForeign = false; corrPolls = 0; return false; }
+    if (sig === refusedSig && !force && !unsyncedOverride && Date.now() - refusedAt < REFUSED_RETRY_MS) return false;
+    // Right after another writer's state was adopted, a difference in stream IDs alone (this page's director sees other IDs than the
+    // saved ones) has to hold for two polls before it is corrected, and then once.
+    if (fromRoster && adoptedForeign && !force && !unsyncedOverride && GRRev.diffKind(sig, lastPushedSig) === 'ids') {
+      corrPolls = corrSig === sig ? corrPolls + 1 : 1;
+      corrSig = sig;
+      if (corrPolls < 2) return false;
+    }
+    // Stamp it (rev, writer, schemaVersion) and record it as pushed only if it was sent: with the socket down the next poll must
+    // retry, the edit is kept as unsent, and a status line must not claim a push that never left.
+    const stamped = revs.stamp(state);
+    if (!doAction(PUSH_ACTION, { payload: stamped.text })) {
+      unsent = true;
+      setPill(els.sbStatus, MSG_UNSENT, 'error');
+      return false;
+    }
+    revs.sent(stamped.rev);
+    lastPushedSig = sig;
+    unsent = false; lostPossible = false; adoptedForeign = false; corrPolls = 0;
     pushSeq++;
+    watchUnconfirmed(stamped.rev);
     return true;
+  }
+
+  // A push whose echo does not come back is not saved (the action may not be compiled): say so after a few seconds (GRN-149).
+  function watchUnconfirmed(rev) {
+    setTimeout(() => {
+      if (revs.pending(rev) && ws && ws.readyState === 1) showFault('unconfirmed', 'SB: push not confirmed by Streamer.bot: is VDO Push compiled?');
+    }, window.__UNCONFIRMED_MS || 5000);
+  }
+
+  // The designated director is director-min.html when "always-on director" is ticked. A dock that then has not seen its own view of
+  // the stream IDs taken over by the saved ones for a while says director-min is not correcting (GRN-04, decision 14 A).
+  let disagreeSince = 0;
+  function renderDesignation() {
+    const el = els.designationNote;
+    if (!el) return;
+    let warn = false;
+    if (!isDesignated() && synced && hasRoster && cfg.enabled && cfg.room) {
+      const nowMs = Date.now();
+      const settle = window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS;
+      const differs = cfg.slots.some((s) => s.label && VdoParse.resolveStream(roster, s.label, s.streamID, String(s.pushID || ''), directorLoop.sess, nowMs, settle) !== String(s.streamID || ''));
+      if (!differs) disagreeSince = 0;
+      else {
+        if (!disagreeSince) disagreeSince = nowMs;
+        warn = nowMs - disagreeSince >= (window.__DESIGNATION_WARN_MS || 30000);
+      }
+    } else disagreeSince = 0;
+    el.hidden = !warn;
+    el.textContent = warn ? 'director-min is designated but not correcting: is its OBS source visible? Its saved stream IDs differ from what this page\'s director sees.' : '';
   }
 
   // ── Director iframe + enumeration loop ────────────────────────────────────
@@ -993,6 +1092,8 @@
     if (!dirty.has('viewFlags')) setIfNotFocused(els.viewFlags, cfg.viewFlags);
     setCheck(els.enabled, cfg.enabled);
     setCheck(els.dirAutoAdd, cfg.directoryAutoAdd);
+    setCheck(els.alwaysOn, cfg.alwaysOnDirector === 'director-min');
+    renderDesignation();
     renderSlots(true);
     renderDirectory(true);
     renderInvite();
@@ -2007,6 +2108,18 @@
     els.viewFlags.dispatchEvent(new Event('input', { bubbles: true })); // marks it unsaved; Save stores it
   });
   els.enabled.addEventListener('change', saveEnabled);
+  // "director-min.html is my always-on director" (decision 14 A): saved with the config at once, like any other edit. Ticked, this page
+  // sends only the operator's own edits; the follow and the auto-add pushes are director-min's.
+  els.alwaysOn.addEventListener('change', () => {
+    const prev = cfg.alwaysOnDirector;
+    const ran = operatorAction(() => {
+      cfg.alwaysOnDirector = els.alwaysOn.checked ? 'director-min' : '';
+      adoptedForeign = false; corrPolls = 0;
+      assembleAndPush(false, true);
+    });
+    if (!ran) els.alwaysOn.checked = prev === 'director-min';
+    renderDesignation();
+  });
 
   // ── Invite + director-link builder (vdo.ninja's exact &hash= algorithm) ────
   let hashCache = { pw: null, hash: '' };
