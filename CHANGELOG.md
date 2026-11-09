@@ -9,6 +9,29 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.59] — 2026-11-09
+
+Guests are matched to directory entries by one identity rule in every place that looks them up, and a stranger in the voice channel is never bound to an entry you named yourself.
+
+### Fixed
+
+- **A Discord user can no longer take over an entry you named.** Auto-add used to write a Discord user's ID into any entry whose name matched, so a stranger who called themselves "Bob" was bound to your curated "Bob" (and the plate and chip followed them). Now only an auto-added placeholder takes the ID silently. A row you named yourself shows **link Bob (id)?** with **link** and **not them**: link sets the ID, "not them" remembers the Discord user as ignored. Each button acts only on the Discord user it was drawn for (if the offer has changed, nothing is linked and the row is redrawn), and when two or more Discord users have the name the row offers nothing and says so. Until you accept, that guest's roster chip shows their Discord name and a discord-mode slot bound to them shows no plate.
+- **One comparison rule for labels, everywhere.** The dock, `director-min`, the guest overlay's lower-third and the standalone nameplate now share the same lookup text (checked by `verify`): vdo.ninja's doubled HTML escaping is decoded (a guest called `Tom & Jerry` was shown as `Tom &amp;amp; Jerry` and never matched), `_` reads as a space (`Guest_One` is `Guest One`, including the live dot in the dock), invisible characters are ignored, and when several entries match the exact-case one wins, then one you named over an auto-added one. A new auto entry for an escaped label is named by the decoded label.
+- **Labels that differ only in case are separate guests** (`ALPHA` and `alpha` get their own entries, and the dock says so under the directory), the same in any roster order. A lone `alpha` still matches your `ALPHA` entry.
+- **No twin when a guest joins the voice channel first.** Their auto entry takes the label when they join the VDO room instead of a second entry being appended (this now also happens in the dock, which used to leave the entry without its label).
+- **Labels that draw nothing** (zero-width characters, the Braille blank, the Hangul filler) are never auto-added, and the lists show invisible characters as `<U+200B>` (an emoji's own joiners, as in a family or a flag, stay as they are). The label pick of a guest slot now does the same and marks two live labels that are the same once case, spacing and hidden characters are ignored, so a guest who adds an invisible character to the name of a guest you have named can be told apart. A label made only of invisible characters matches an entry with the same text, and nothing else. A Discord user whose name has not arrived yet is added once it does, not named after their ID.
+- **Auto entries are capped at 50.** At the limit the dock says "auto-add limit reached"; entries for guests who left, and are in no slot, make way first; entries you named are never dropped. An auto entry whose Discord namesake is in the channel counts as present, and a guest who was dropped and comes back is added again (both pages forget what they had added for them). Turning auto-add off clears the offers and the limit note.
+- **Two rows with the same label or Discord ID are flagged** ("shared label", "shared Discord ID"). With **live only** ticked, a row that is waiting for a link answer stays in the list.
+- **Socials:** a tab or a non-breaking space between the platform and the handle works, a line that cannot be read says so on the row ("1 line ignored - use "platform handle", e.g. twitch bob", with the list of platforms; the list is also the box's tooltip), and `x`, `yt`, `ig`, `bsky` and `tt` pick the right icon. Unknown platform names (and names like `constructor`) fall back to the globe.
+- **The roster overlay orders chips by the name it shows** (a curated name beats the Discord name; an auto placeholder no longer freezes a renamed member's name).
+- Ignore keys use the same comparison, so a removed guest saved under an old key (`vdo:guest_one`) is still not re-added.
+
+### Added
+
+- Tests: `verify` gains the identity vectors, `autoPopulate` cases (suggestions, linking, the merge, case twins, the cap and eviction, empty names, order independence) and the parity of the two lookup copies over the same inputs; `verify:render` has a new section R18 (the suggestion accept and reject, underscore and escaped labels, case twins, the nameplate's markup vectors, the cap, the socials hint, the roster order). `RENDER_ONLY=identity` runs it alone, `R18_ONLY=a,b` picks sections.
+
+**Deploy:** copy the `control/` and `overlay/` folders. Reload the dock and `director-min`, and refresh the nameplate, guest-slot and roster sources together, so both lookup copies match. Nothing to re-paste. `verify` 302/302, `verify:render` 322/322.
+
 ## [1.0.55] — 2026-11-08
 
 The invite builder now produces links whose options do what their labels say, each guest is asked for a name by default, and a slot can be pinned to one guest.
@@ -365,6 +388,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.59]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.55...v1.0.59
 [1.0.55]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.52...v1.0.55
 [1.0.52]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.49...v1.0.52
 [1.0.49]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.46...v1.0.49
