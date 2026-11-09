@@ -1525,6 +1525,7 @@ async function main() {
         const env = { SB_WS_URL: sb.url, DISCORD_BRIDGE_CONFIG: resolve(s12, `cfg${n}.json`), DISCORD_BRIDGE_TOKENS: resolve(s12, `tok${n}.json`),
           GREENROOM_GUARD_PORT: String(guardPort), GREENROOM_TEST_HOOKS: '1', ...(opts.env || {}) };
         if (opts.token) await writeFile(env.DISCORD_BRIDGE_TOKENS, JSON.stringify({ botToken: opts.token, enabled: false }));
+        if (opts.cfgText !== undefined) await writeFile(env.DISCORD_BRIDGE_CONFIG, opts.cfgText);
         const got = []; // every discordVoice payload, in order
         const watcher = new WebSocket(sb.url);
         await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
@@ -1609,14 +1610,34 @@ async function main() {
         a.close();
 
         // signals and the quit command: one exit, a clearing push first, code 0, no rpc.error (GRN-129, GRN-128, GRN-110)
-        for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'quit']) {
+        for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK', 'quit']) {
           const b = await rig();
           if (sig === 'quit') b.cmd('quit'); else b.cmd('test-signal', sig);
           const gone = await b.exited(5000);
           const last = b.last || {};
           check('GRN-129/128/110: ' + sig + ' → the bridge pushes ONE clearing state (stopped, hb 0, no users, offline, no error) and exits 0',
-            gone && b.code === 0 && last.stopped === true && last.hb === 0 && last.connected === false && last.hostInChannel === false && Object.keys(last.users || {}).length === 0 && !(last.rpc && last.rpc.error), JSON.stringify({ gone, code: b.code, stopped: last.stopped, hb: last.hb, err: last.rpc && last.rpc.error }));
+            gone && b.code === 0 && last.stopped === true && b.got.filter((p) => p.stopped === true).length === 1 && last.hb === 0 && last.connected === false && last.hostInChannel === false && Object.keys(last.users || {}).length === 0 && !(last.rpc && last.rpc.error), JSON.stringify({ gone, code: b.code, stopped: last.stopped, frames: b.got.filter((p) => p.stopped === true).length, hb: last.hb, err: last.rpc && last.rpc.error }));
           b.close();
+        }
+        // a console that stops draining (QuickEdit) must not stall the bridge or its exit (GRN-69, GRN-129): the log worker is blocked on purpose
+        {
+          const f = await rig();
+          f.cmd('test-block-log'); await nap(300);
+          f.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+          const pushedWhileBlocked = await f.waitFor((p) => p.settings && p.settings.accent === 'magenta', 4000);
+          const logged = f.out.length;
+          f.cmd('set-settings', JSON.stringify({ accent: 'neon-green' })); await nap(500);
+          check('GRN-69: with the log worker blocked (a frozen console) the bridge keeps pushing, and its log lines just stop appearing', !!pushedWhileBlocked && f.code === null && f.out.length === logged, JSON.stringify({ pushed: !!pushedWhileBlocked, code: f.code, grew: f.out.length - logged }));
+          f.cmd('test-signal', 'SIGINT');
+          const fGone = await f.exited(5000);
+          check('GRN-129: …and the exit does not wait for the frozen console: the clearing state is sent and the process ends within 5 s', fGone && f.last && f.last.stopped === true, JSON.stringify({ fGone, stopped: f.last && f.last.stopped }));
+          f.close();
+          const f2 = await rig();
+          f2.cmd('test-block-log'); await nap(300);
+          f2.cmd('test-throw', 'crash while the console is frozen');
+          const f2Gone = await f2.exited(5000);
+          check('GRN-129: a crash with a frozen console still pushes the clearing state with the error and ends the process', f2Gone && f2.code !== 0 && f2.last && f2.last.stopped === true && /crash while the console is frozen/.test((f2.last.rpc && f2.last.rpc.error) || ''), JSON.stringify({ f2Gone, code: f2.code, err: f2.last && f2.last.rpc && f2.last.rpc.error }));
+          f2.close();
         }
         // a crash: exit code 1, the same clearing push, the error text without a secret (GRN-129, GRN-16)
         const secret = 'MTIzNDU2Nzg5.AbCdEf.SECRETSECRETSECRET';
@@ -1627,6 +1648,28 @@ async function main() {
         check('GRN-129: an uncaught exception pushes the clearing state with an error and exits 1', crashed && c.code === 1 && cl.stopped === true && cl.hb === 0 && /boom/.test((cl.rpc && cl.rpc.error) || ''), JSON.stringify({ code: c.code, err: cl.rpc && cl.rpc.error }));
         check('GRN-16: the bot token never appears in the log or in the pushed error', !c.out.includes(secret) && !JSON.stringify(c.got).includes(secret), c.out.slice(-200));
         c.close();
+        // a token that straddles the cut of a long error text is still not shown, not even in part (the text is cut AFTER the token is removed)
+        const c2 = await rig({ token: secret });
+        c2.cmd('test-throw', 'y'.repeat(280) + secret);
+        await c2.exited(5000);
+        check('GRN-16: a token that would be cut in half by the length limit does not leak its first characters into the pushed error or the log', !(c2.last && JSON.stringify(c2.last.rpc).includes(secret.slice(0, 8))) && !c2.out.includes(secret.slice(0, 8)), JSON.stringify(c2.last && c2.last.rpc).slice(-120));
+        c2.close();
+        // a config file that cannot be read is kept (renamed), not silently replaced by the example (this predates the sprint)
+        const bad = await rig({ cfgText: '{ "favorites": [ ' });
+        await nap(300);
+        const kept = (await readdir(s12)).filter((n) => /\.bad-/.test(n));
+        check('the bridge keeps a config file it cannot read (renamed to .bad-<time>) and says so, instead of overwriting it with the example', kept.length === 1 && /could not be read/i.test((bad.last.rpc && bad.last.rpc.error) || ''), JSON.stringify({ kept, err: bad.last && bad.last.rpc && bad.last.rpc.error }));
+        bad.close();
+        // an address that is not a ws:// URL is said at once, not retried forever in silence
+        const badUrl = await rig({ args: ['--sb-ws-url=127.0.0.1:8080'], noWait: true });
+        const badUrlGone = await badUrl.exited(5000);
+        check('GRN-142: --sb-ws-url without a ws:// scheme → the bridge says so and exits non-zero (it does not retry in silence)', badUrlGone && badUrl.code !== 0 && /ws:\/\//.test(badUrl.out), JSON.stringify({ badUrlGone, code: badUrl.code, out: badUrl.out.slice(-200) }));
+        badUrl.close();
+        // a guard port that cannot be bound is a reason to stop, with the way out (GRN-22: never run without the guard)
+        const noBind = await rig({ args: ['--guard-port=70000'], noWait: true });
+        const noBindGone = await noBind.exited(5000);
+        check('GRN-22: a guard port that cannot be used → the bridge names the port and the --guard-port / GREENROOM_GUARD_PORT way out and exits non-zero', noBindGone && noBind.code !== 0 && /guard port/i.test(noBind.out) && /GREENROOM_GUARD_PORT/.test(noBind.out), JSON.stringify({ code: noBind.code, out: noBind.out.slice(-250) }));
+        noBind.close();
 
         // the guard: a program that holds the port and says nothing, and takeover by a newer build (GRN-22, GRN-110)
         const foreign = createServer((s) => s.on('error', () => {}));
@@ -1636,15 +1679,39 @@ async function main() {
         const dGone = await d.exited(6000);
         check('GRN-22: a guard port held by a program that sends no banner → the bridge says so and exits non-zero (it never runs without the guard)', dGone && d.code !== 0 && /another program|older than this release/i.test(d.out), JSON.stringify({ code: d.code, out: d.out.slice(-200) }));
         foreign.close(); d.close();
-        const old = await rig({ env: { GREENROOM_BRIDGE_VERSION: '1.0.1' } });
+        const old = await rig({ env: { GREENROOM_BRIDGE_VERSION: '1.0.9' } });
         const neu = await rig({ sb: old.sb, guardPort: old.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.10' }, noWait: true });
         const oldGone = await old.exited(8000);
         const neuUp = await until(() => /Connected to Streamer.bot/.test(neu.out), 8000);
-        check('GRN-110: a newer build (1.0.10) replaces an older one (1.0.1: numeric, not text order): the old one quits cleanly and the new one runs', oldGone && old.code === 0 && neuUp && neu.code === null && /taking over|replac/i.test(neu.out), JSON.stringify({ oldGone, oldCode: old.code, neuCode: neu.code, out: neu.out.slice(-200) }));
+        check('GRN-110: a newer build (1.0.10) replaces an older one (1.0.9: numeric, not text order): the old one quits cleanly and the new one runs', oldGone && old.code === 0 && neuUp && neu.code === null && /taking over|replac/i.test(neu.out), JSON.stringify({ oldGone, oldCode: old.code, neuCode: neu.code, out: neu.out.slice(-200) }));
         const same = await rig({ sb: old.sb, guardPort: old.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.9' }, noWait: true });
         const sameGone = await same.exited(6000);
-        check('GRN-110: a build that is older than the one running exits and says so; the running one is left alone', sameGone && neu.code === null && /already running|newer|same version/i.test(same.out), JSON.stringify({ sameGone, out: same.out.slice(-200) }));
-        old.close(); neu.close(); same.close();
+        check('GRN-110: a build that is older than the one running exits 0 and says so; the running one is left alone', sameGone && same.code === 0 && neu.code === null && /already running|newer|same version/i.test(same.out), JSON.stringify({ sameGone, code: same.code, out: same.out.slice(-200) }));
+        const equal = await rig({ sb: old.sb, guardPort: old.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.10' }, noWait: true });
+        const equalGone = await equal.exited(6000);
+        check('GRN-110: a build of the SAME version as the one running exits 0 and says so (a double launch is harmless)', equalGone && equal.code === 0 && neu.code === null && /already running/i.test(equal.out), JSON.stringify({ equalGone, code: equal.code }));
+        old.close(); neu.close(); same.close(); equal.close();
+        // two newer builds start at once: one takes over, the other finds it running and exits 0 (it does not tell the user to kill node.exe)
+        const holder = await rig({ env: { GREENROOM_BRIDGE_VERSION: '1.0.1' } });
+        const [n1, n2] = await Promise.all([
+          rig({ sb: holder.sb, guardPort: holder.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.10' }, noWait: true }),
+          rig({ sb: holder.sb, guardPort: holder.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.11' }, noWait: true }),
+        ]);
+        await holder.exited(8000);
+        await nap(9000);
+        const alive = [n1, n2].filter((x) => x.code === null).length;
+        const losers = [n1, n2].filter((x) => x.code !== null);
+        check('GRN-110: two newer builds racing for the same older holder: exactly one runs, the other exits 0 with "already running" (not 1 with advice to kill node.exe)', holder.code === 0 && alive === 1 && losers.length === 1 && losers[0].code === 0 && /already running|asked this one/i.test(losers[0].out), JSON.stringify({ holder: holder.code, alive, losers: losers.map((x) => [x.code, x.out.slice(-120)]) }));
+        holder.close(); n1.close(); n2.close();
+        // a peer that keeps writing is dropped when the guard's 1 s are up (an absolute lifetime, not only an idle timeout)
+        const lifeRig = await rig();
+        const dropped = await new Promise((res) => {
+          const s = connectTcp(lifeRig.guardPort); let t0 = Date.now(); s.on('error', () => {}); s.on('close', () => res(Date.now() - t0));
+          s.on('connect', () => { t0 = Date.now(); const iv = setInterval(() => { try { s.write('x'); } catch { /* gone */ } }, 250); s.on('close', () => clearInterval(iv)); });
+          setTimeout(() => { s.destroy(); res(99999); }, 4000);
+        });
+        check('GRN-105: a peer on the guard port that keeps writing is dropped about 1 s after it connected', dropped < 2200, String(dropped));
+        lifeRig.close();
 
         // command-line arguments win over the environment, and the guard port is the one asked for (GRN-142)
         const sbArg = await startMockWith({});
@@ -1665,10 +1732,11 @@ async function main() {
         const sbE = await startMockWith({});
         const h = await rig({ sb: sbE, env: { GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_SB_EXIT_GRACE_MS: '2500' } });
         sbE.child.kill();
-        await nap(1300);
+        await nap(1000);
         const sbBack = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(sbE.httpPort), SB_WS_PORT: String(sbE.wsPort) });
-        await nap(3500);
-        check('GRN-180: Streamer.bot back inside the grace window (grace 2.5 s, back after about 1.6 s) keeps the bridge running (it retries about once a second while the countdown runs)', h.code === null && /reconnected/i.test(h.out), JSON.stringify({ code: h.code, out: h.out.slice(-250) }));
+        await nap(4200);
+        check('GRN-180: Streamer.bot back inside the grace window (grace 2.5 s, up again at about 1.5 s) is found by the quick retries (about every 750 ms) and cancels the shutdown: it does not take the last attempt, and no new countdown is logged',
+          h.code === null && /cancelling shutdown/i.test(h.out) && !/last attempt/i.test(h.out) && (h.out.match(/will leave voice and exit/g) || []).length === 1, JSON.stringify({ code: h.code, out: h.out.slice(-350) }));
         h.close(); try { sbBack.kill(); } catch {}
 
         // Connect, Reset auth and Stop during a gateway dial (GRN-76, GRN-130) against a mock Discord
@@ -1723,6 +1791,51 @@ async function main() {
           dr.code === null && dr.got.filter((p) => p.connected === true).length === connectedBefore && newConns.length >= 1 && newConns.every((r) => r.closed), JSON.stringify({ code: dr.code, conns: newConns.length, closed: newConns.map((r) => r.closed) }));
         dr.close();
         await new Promise((res) => gateway.close(res)); restHttp.close();
+
+        // A gateway that drops a logged-in bot and makes it re-dial; Connect or Reset auth while the re-dial is in flight (GRN-76, GRN-130).
+        // The login has settled by then, so the client is destroyed at once: its re-dial must neither crash the bridge when it fails nor
+        // bring a hidden session back when it succeeds.
+        for (const endWith of ['fail', 'ok']) {
+          let dials = 0;
+          const ops = []; // { op, at } for every IDENTIFY (2) or RESUME (6) the bridge's bot sends
+          const fg = new WebSocketServer({
+            port: 0, host: '127.0.0.1',
+            verifyClient: (info, cb) => { const i = ++dials; if (i === 1) return cb(true); setTimeout(() => (endWith === 'fail' ? cb(false, 503, 'down') : cb(true)), 2500); },
+          });
+          fg.on('connection', (ws) => {
+            const idx = dials; ws.on('error', () => {});
+            try { ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45000 } })); } catch { /* gone */ }
+            ws.on('message', (raw) => {
+              let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+              if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
+              if (m.op === 2 || m.op === 6) {
+                ops.push({ op: m.op, at: Date.now() });
+                const port = fg.address().port;
+                ws.send(JSON.stringify(m.op === 2
+                  ? { op: 0, t: 'READY', s: 1, d: { v: 10, user: { id: '1000', username: 'mockbot', discriminator: '0', avatar: null, bot: true }, guilds: [], session_id: 'mock', resume_gateway_url: `ws://127.0.0.1:${port}`, application: { id: '1000', flags: 0 } } }
+                  : { op: 0, t: 'RESUMED', s: 2, d: {} }));
+                if (idx === 1) setTimeout(() => { try { ws.close(4000, 'flaky'); } catch { /* gone */ } }, 1200);
+              }
+            });
+          });
+          await new Promise((res) => fg.once('listening', res));
+          const fgPort = fg.address().port;
+          const fr = createHttp((req, res) => { res.setHeader('content-type', 'application/json'); res.end(/gateway\/bot/.test(req.url) ? JSON.stringify({ url: `ws://127.0.0.1:${fgPort}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }) : '{}'); });
+          await new Promise((res) => fr.listen(0, '127.0.0.1', res));
+          const fx = await rig({ token: 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC', env: { DISCORD_BRIDGE_API: `http://127.0.0.1:${fr.address().port}/api` } });
+          fx.cmd('connect');
+          await fx.waitFor((p) => p.connected === true, 6000);
+          await until(() => dials >= 2, 6000); // the gateway dropped the bot and the shard is re-dialing (held 2.5 s)
+          await nap(400);
+          const tStop = Date.now();
+          fx.cmd('reset-auth');
+          await nap(endWith === 'fail' ? 4200 : 5200);
+          const late = ops.filter((o) => o.at > tStop);
+          check('GRN-76: Reset auth while a dropped bot re-dials (' + (endWith === 'fail' ? 'the dial then fails' : 'the dial then succeeds') + '): the bridge does not crash' + (endWith === 'ok' ? ' and no IDENTIFY or RESUME reaches the gateway afterwards (no hidden session)' : ''),
+            fx.code === null && !/Bridge crashed/.test(JSON.stringify(fx.last && fx.last.rpc)) && (endWith === 'fail' || late.length === 0), JSON.stringify({ code: fx.code, late: late.length, dials, out: fx.out.slice(-200) }));
+          fx.close();
+          await new Promise((res) => fg.close(res)); fr.close();
+        }
       } finally {
         for (const r of live) { r.close(); try { r.sb.child.kill(); } catch {} }
       }

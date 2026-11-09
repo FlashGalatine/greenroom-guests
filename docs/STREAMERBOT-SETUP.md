@@ -270,7 +270,9 @@ exits. That covers Ctrl+C, Ctrl+Break, closing its window, the `quit` command an
 exit-on-close, and a crash (exit code 1, the error in the pushed `rpc.error`).
 **Ending `node.exe` in Task Manager** (the hidden instance the SB action starts
 included) cannot leave cleanly: the bot stays in the call until Discord times it
-out, so use exit-on-close or the `quit` command for that setup. A rejected promise
+out, so use exit-on-close or the `quit` command for that setup (until the control
+page has a Stop button, send it from a Streamer.bot action that runs `Discord Voice
+Command` with `command` = `quit`). A rejected promise
 is logged and the bridge keeps running. The bot token is never written to the log or to
 `rpc.error`.
 
@@ -332,10 +334,10 @@ exercised on a live rig. Outcomes, faithfully:
   release"): check with `netstat -ano | findstr 7495`, end that `node.exe`, or set
   `--guard-port=` / `GREENROOM_GUARD_PORT`. A running bridge of the same or a newer
   version says so and exits; Node older than 22.12 says "Node >= 22.12 required".
-- **The bridge window froze, pushes stopped** → a click in the console window starts
-  a text selection (QuickEdit) and Windows pauses the program that writes to it; the
-  bridge writes its log from a worker thread so pushes continue, but the window still
-  shows "Select" in its title: press Esc. To avoid it, untick QuickEdit Mode in the
+- **The bridge window shows "Select" in its title and stops scrolling** → a click in
+  the console window starts a text selection (QuickEdit) and Windows pauses the
+  program that writes to it. The bridge writes its log from a worker thread, so its
+  pushes and its exit are not held up (the log lines just stop until you press Esc). To avoid it, untick QuickEdit Mode in the
   window's Properties, use Windows Terminal, or start the bridge hidden with the
   `Discord Bridge Start` action.
 - **`in voice` but no speaking glow** → the bot must join with `selfDeaf: false`

@@ -39,7 +39,7 @@
 // callback (not sooner than 300 ms, not later than 1.5 s). An unhandled rejection is logged and the bridge goes on;
 // an uncaught exception shuts down with code 1 and the error in rpc.error.
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename } from 'node:fs/promises';
 import { readFileSync, writeSync } from 'node:fs';
 import { createServer, connect as netConnect } from 'node:net';
 import { resolve, dirname } from 'node:path';
@@ -141,6 +141,7 @@ let sbReconnectTimer = null;
 let sbMsgId = 0;
 let sbEverConnected = false;  // gate exit-on-close on having actually reached SB
 let sbGoneTimer = null;       // grace countdown to graceful shutdown after SB drops
+let sbLastTry = false;        // the one last connect at the end of the exit grace window is running
 let sbLost = false;           // the SB socket closed after having been open, and has not been open again
 
 // Throttle the voice feed: leading-edge push + ~100ms trailing coalesce.
@@ -162,7 +163,13 @@ async function init() {
     loaded = true;
     log(`Loaded ${state.favorites.length} favorite(s)`);
   } catch (err) {
-    if (err.code !== 'ENOENT') log(`Could not load config: ${err.message}`);
+    if (err.code !== 'ENOENT') {
+      // A file that exists but cannot be read (a trailing comma after a hand edit): keep it, do not replace it with the example.
+      const kept = `${CONFIG_PATH}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      log(`Could not load config: ${err.message}`);
+      try { await rename(CONFIG_PATH, kept); rpc.error = `The saved config could not be read (${clean(err.message, 80)}); it was kept as ${kept} and the example is used instead.`; }
+      catch { rpc.error = `The saved config could not be read (${clean(err.message, 80)}).`; }
+    }
   }
   if (!loaded) {
     // First run: seed the gitignored config from the tracked example.
@@ -387,16 +394,31 @@ function startBot() {
   });
 }
 
-// A gateway socket that is still being dialed raises an 'error' when it is closed: listen for it so it can never be uncaught (GRN-76).
-function hushGateway(b) {
+// The gateway shards of a discord.js client (@discordjs/ws 1.2.3 keeps them at client.ws._ws.strategy.shards, a Map).
+function gatewayShards(b) {
   try {
-    const shards = b.ws && b.ws.manager && b.ws.manager.shards;
-    if (shards && typeof shards.forEach === 'function') shards.forEach((sh) => { const c = sh && sh.connection; if (c && typeof c.on === 'function') c.on('error', () => {}); });
-  } catch { /* internals differ: the destroy below is still guarded */ }
+    const m = b.ws && b.ws._ws && b.ws._ws.strategy && b.ws._ws.strategy.shards;
+    return m && typeof m.values === 'function' ? [...m.values()] : [];
+  } catch { return []; }
 }
+// Destroying a client is not the end of its gateway: a shard that is re-dialing when destroy() runs has its error handler removed
+// (a dial that fails afterwards is an uncaught 'error', GRN-76) and may still finish its connection and send IDENTIFY or RESUME with
+// the token (a session nobody owns). So the sockets get a quiet error listener first, and the shard is closed again for good the
+// moment it says hello, ready or resumed. The destroy itself stays guarded.
 function destroyClient(b) {
-  hushGateway(b);
+  const shards = gatewayShards(b);
+  for (const sh of shards) {
+    try { if (sh.connection && typeof sh.connection.on === 'function') sh.connection.on('error', () => {}); } catch { /* gone */ }
+  }
   try { b.destroy(); } catch { /* already gone */ }
+  for (const sh of shards) {
+    const again = () => { try { sh.destroy({ code: 1000, reason: 'bridge stopped' }); } catch { /* gone */ } };
+    try {
+      if (sh.connection && typeof sh.connection.on === 'function') sh.connection.on('error', () => {});
+      for (const ev of ['hello', 'ready', 'resumed']) sh.on(ev, again);
+      sh.on('error', () => {});
+    } catch { /* an unknown shard shape: nothing more to do */ }
+  }
 }
 
 function stopBot() {
@@ -596,7 +618,7 @@ function connectSb() {
       pushPending = false;
       schedulePush();
     });
-    sock.on('close', () => { if (sbWs === sock) sbWs = null; if (sbEverConnected) sbLost = true; scheduleSbReconnect(); armSbGoneTimer(); });
+    sock.on('close', () => { if (sbWs === sock) sbWs = null; if (sbEverConnected) sbLost = true; armSbGoneTimer(); scheduleSbReconnect(); });
     sock.on('error', (e) => { log(`SB WS error: ${e.message} — is SB's WebSocket Server on ${SB_WS_URL} with auth OFF?`); });
     sock.on('message', (raw) => {
       try {
@@ -618,7 +640,8 @@ function connectSb() {
         dispatch(d.command, d.value == null ? '' : d.value);
       } catch (e) { log(`message handler: ${e && e.message}`); }
     });
-  } catch {
+  } catch (e) {
+    log(`could not connect to ${SB_WS_URL}: ${e && e.message}`);
     scheduleSbReconnect();
   }
 }
@@ -646,7 +669,7 @@ function shouldExitOnSbClose() {
 // handler); if it fires, SB is gone for good — disconnect from voice and exit
 // so the bot doesn't linger in the channel.
 function armSbGoneTimer() {
-  if (stopping || !shouldExitOnSbClose() || !sbEverConnected || sbGoneTimer) return;
+  if (stopping || sbLastTry || !shouldExitOnSbClose() || !sbEverConnected || sbGoneTimer) return;
   log(`Streamer.bot connection lost — will leave voice and exit in ${SB_EXIT_GRACE_MS}ms if it doesn't return (exitOnSbClose).`);
   sbGoneTimer = setTimeout(() => {
     sbGoneTimer = null;
@@ -654,8 +677,10 @@ function armSbGoneTimer() {
     // One last attempt before giving up: a Streamer.bot that is back but not yet found keeps the bridge alive (GRN-180).
     log('Streamer.bot has not returned within the grace window — one last attempt.');
     if (sbReconnectTimer) { clearTimeout(sbReconnectTimer); sbReconnectTimer = null; }
+    sbLastTry = true; // (the close of this attempt must not start a new countdown)
     connectSb();
     setTimeout(() => {
+      sbLastTry = false;
       if (stopping || sbOpen()) return;
       log('Streamer.bot did not return — disconnecting from voice and shutting down.');
       shutdown(0, 'Streamer.bot closed');
@@ -688,6 +713,7 @@ function dispatch(command, value) {
         // Test hooks (GREENROOM_TEST_HOOKS=1 only): the crash policy is exercised on the real process.
         if (TEST_HOOKS && command === 'test-throw-sync') throw new Error('forced synchronous throw');
         if (TEST_HOOKS && command === 'test-throw') { setTimeout(() => { throw new Error(value || 'forced throw from a timer'); }, 10); return; }
+        if (TEST_HOOKS && command === 'test-block-log') { if (logWorker) logWorker.postMessage({ block: true }); return; }
         if (TEST_HOOKS && command === 'test-reject') { Promise.reject(new Error('forced rejection')); return; }
         if (TEST_HOOKS && command === 'test-signal') { process.emit(String(value), String(value)); return; }
         log(`unknown command "${clean(command, 40)}" — ignored`); // mock-burst etc. are mock-only
@@ -718,7 +744,7 @@ function payloadOut() {
     // Superset fields (overlays ignore them; the control page + roster overlay
     // consume them): renderer settings, bot status, and the channel book-keeping.
     settings: { ...state.settings },
-    rpc: { enabled: creds.enabled, hasToken: !!creds.botToken, error: redact(clean(rpc.error, 300)) },
+    rpc: { enabled: creds.enabled, hasToken: !!creds.botToken, error: clean(rpc.error, 300) },
     favorites: state.favorites.map((f) => ({ ...f })),
     current: state.current ? { ...state.current } : null,
     // Liveness and identity (additive; docs/PROTOCOL.md): a push every `hb` ms while the bridge runs (0 once it is stopping),
@@ -747,38 +773,40 @@ function pushNow() {
 // A console window in QuickEdit mode freezes the process that writes to it as soon as someone clicks in it. The lines go to a
 // worker thread that does the (blocking) fd write; if that blocks, the bridge keeps pushing. Control characters are replaced and
 // the bot token is never written (GRN-16).
-const clean = (s, n) => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, n);
+// The token is removed BEFORE the text is cut or cleaned, so a limit that falls inside it cannot leave a piece of it.
 const redact = (s) => {
   const t = creds && creds.botToken;
-  return t && String(t).length >= 8 ? String(s).split(String(t)).join('[bot token]') : String(s);
+  return t && String(t).length >= 8 ? String(s ?? '').split(String(t)).join('[bot token]') : String(s ?? '');
 };
+const clean = (s, n) => redact(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, n);
 let logWorker = null;
 try {
   logWorker = new Worker(
     "const { parentPort } = require('node:worker_threads'); const fs = require('node:fs');" +
-    "parentPort.on('message', (m) => { if (typeof m === 'string') { try { fs.writeSync(1, m); } catch (e) {} } else if (m && m.flush) parentPort.postMessage(m.flush); });",
+    "parentPort.on('message', (m) => { if (typeof m === 'string') { try { fs.writeSync(1, m); } catch (e) {} }" +
+    " else if (m && m.flush) { parentPort.postMessage(m.flush); }" +
+    " else if (m && m.block) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); } });", // (m.block: a test hook that freezes the writer like a console in QuickEdit)
     { eval: true });
   logWorker.on('error', () => { logWorker = null; });
+  logWorker.on('exit', () => { logWorker = null; }); // a worker that is gone: the lines go straight to the console
   logWorker.unref();
 } catch { logWorker = null; }
 
 function log(msg) {
-  const line = `[${new Date().toISOString()}] [discord-bridge] ${redact(clean(msg, 2000))}\n`;
+  const line = `[${new Date().toISOString()}] [discord-bridge] ${clean(msg, 2000)}\n`;
   if (logWorker) { try { logWorker.postMessage(line); return; } catch { /* fall through */ } }
   try { writeSync(1, line); } catch { /* no console */ }
 }
-// Wait (at most `ms`) until the worker has written everything posted so far. A blocked console never answers: the caller goes on.
+// Wait (at most `ms`) until the worker has written everything posted so far; resolves true if it did. A blocked console never answers
+// (false): the caller goes on without it.
 function flushLog(ms) {
   return new Promise((res) => {
-    if (!logWorker) return res();
+    if (!logWorker) return res(true);
     const id = Math.random();
-    const t = setTimeout(res, ms);
-    const onMsg = (m) => { if (m === id) { clearTimeout(t); logWorker && logWorker.off('message', onMsg); res(); } };
-    try { logWorker.on('message', onMsg); logWorker.postMessage({ flush: id }); } catch { clearTimeout(t); res(); }
+    const t = setTimeout(() => res(false), ms);
+    const onMsg = (m) => { if (m === id) { clearTimeout(t); logWorker && logWorker.off('message', onMsg); res(true); } };
+    try { logWorker.on('message', onMsg); logWorker.postMessage({ flush: id }); } catch { clearTimeout(t); res(true); }
   });
-}
-function logNow(msg) { // main thread, for the last lines before an exit (a crash stack)
-  try { writeSync(2, `[${new Date().toISOString()}] [discord-bridge] ${redact(clean(msg, 2000))}\n`); } catch { /* no console */ }
 }
 
 // ── One way out (GRN-129) ─────────────────────────────────────────────────────
@@ -804,12 +832,15 @@ function shutdown(code, why) {
     pushPending = false;
     stopBot();                                   // leaves voice once; schedulePush() is a no-op from here on
     voiceUsers = {}; rpc.connected = false; rpc.hostInChannel = false; currentChannelId = null;
-  } catch (e) { logNow(`shutdown: ${e && e.message}`); }
+  } catch (e) { log(`shutdown: ${e && e.message}`); }
   let finished = false;
   const finish = () => {
     if (finished) return;
     finished = true;
-    flushLog(250).then(() => process.exit(code), () => process.exit(code));
+    // process.exit() waits for the log worker; a console that stopped draining (QuickEdit) never lets it go. If the worker does not
+    // answer in 250 ms the process is ended outright: the final state has been sent by now.
+    const die = (ok) => { if (!ok) { try { process.kill(process.pid, 'SIGKILL'); } catch { /* fall through to exit */ } } process.exit(code); };
+    flushLog(250).then(die, () => die(false));
   };
   setTimeout(finish, 1500).unref?.();            // never later than 1.5 s
   pushFinal(() => setTimeout(finish, Math.max(0, 300 - (Date.now() - t0)))); // never sooner than 300 ms: the leave frames flush
@@ -830,6 +861,7 @@ function guardConnection(s) {
   s.on('error', () => {});
   s.on('close', () => guardSockets.delete(s));
   s.setTimeout(1000, () => s.destroy());
+  setTimeout(() => s.destroy(), 1000).unref?.(); // an absolute lifetime too: a peer that keeps writing does not keep its socket
   try { s.write(JSON.stringify({ name: 'greenroom-bridge', pid: process.pid, version: VERSION }) + '\n'); } catch { /* peer gone */ }
   s.setEncoding('utf8');
   let buf = '';
@@ -848,7 +880,7 @@ function guardConnection(s) {
 }
 
 // Who holds the guard port? Connects, reads the banner (a line of JSON), gives up after ~500 ms. null = no Greenroom banner.
-function readBanner(port) {
+function readBanner(port, mayAskToQuit = true) {
   return new Promise((res) => {
     let done = false, buf = '';
     const s = netConnect(port, '127.0.0.1');
@@ -863,7 +895,7 @@ function readBanner(port) {
       let b = null; try { b = JSON.parse(buf.slice(0, nl < 0 ? buf.length : nl)); } catch { /* not ours */ }
       if (b && b.name === 'greenroom-bridge' && typeof b.version === 'string') {
         // a newer build asks the older holder to quit on this same socket (GRN-110)
-        if (cmpVersion(VERSION, b.version) > 0) { s.removeAllListeners('data'); end(b, `quit ${VERSION}`); } else end(b);
+        if (mayAskToQuit && cmpVersion(VERSION, b.version) > 0) { s.removeAllListeners('data'); end(b, `quit ${VERSION}`); } else end(b);
       } else end(null);
     });
   });
@@ -872,15 +904,18 @@ function readBanner(port) {
 const listenGuard = () => new Promise((res) => {
   const server = createServer(guardConnection);
   server.once('error', (err) => res({ err }));
-  server.listen(GUARD_PORT, '127.0.0.1', () => { server.removeAllListeners('error'); server.on('error', () => {}); res({ server }); });
+  try { server.listen(GUARD_PORT, '127.0.0.1', () => { server.removeAllListeners('error'); server.on('error', () => {}); res({ server }); }); }
+  catch (err) { res({ err }); } // (a port number that is out of range throws instead of raising 'error')
 });
 
 async function acquireGuard() {
   let got = await listenGuard();
   if (got.server) { guardServer = got.server; return; }
   if (got.err.code !== 'EADDRINUSE') {
-    log(`guard port error: ${got.err.message} — continuing without the single-instance guard`);
-    return;
+    // Never run without the guard: a second bridge on the same bot token would double-push and fight over voice.
+    log(`guard port :${GUARD_PORT} cannot be used (${got.err.code || got.err.message}). The bridge will not run without its single-instance guard: choose another port with --guard-port= or GREENROOM_GUARD_PORT.`);
+    await flushLog(300);
+    process.exit(1);
   }
   const holder = await readBanner(GUARD_PORT);
   if (!holder) {
@@ -898,6 +933,14 @@ async function acquireGuard() {
     await new Promise((r) => setTimeout(r, 250));
     got = await listenGuard();
     if (got.server) { guardServer = got.server; return; }
+    // Someone else took the port meanwhile (two newer builds started together): if that one is as new as this build, it stays; if it is
+    // older, readBanner asks it to quit as well.
+    const now = await readBanner(GUARD_PORT);
+    if (now && now.pid !== holder.pid && cmpVersion(VERSION, now.version) <= 0) {
+      log(`a Greenroom bridge (version ${now.version}, pid ${now.pid}) is already running and is the same version or newer than this one (${VERSION}) — exiting.`);
+      await flushLog(300);
+      process.exit(0);
+    }
   }
   log(`the bridge ${holder.version} on guard port :${GUARD_PORT} did not quit — stop it (end node.exe) and start again.`);
   await flushLog(300);
@@ -909,16 +952,25 @@ async function main() {
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, () => shutdown(0, sig));
   process.on('unhandledRejection', (reason) => { log(`unhandled rejection: ${reason && reason.message ? reason.message : reason}`); });
   process.on('uncaughtException', (err) => {
-    logNow(`uncaught exception: ${(err && err.stack) || err}`);
-    rpc.error = 'Bridge crashed: ' + ((err && err.message) || err);
+    // The way out first (the clearing state must not wait for a console), the stack through the log after it.
+    rpc.error = 'Bridge crashed: ' + clean((err && err.message) || err, 300);
     shutdown(1, 'uncaught exception');
-    setTimeout(() => process.exit(1), 2000).unref?.(); // belt and braces
+    log(`uncaught exception: ${(err && err.stack) || err}`);
+    setTimeout(() => { try { process.kill(process.pid, 'SIGKILL'); } catch { /* fall through */ } process.exit(1); }, 2500).unref?.(); // belt and braces
   });
   log(`Greenroom Discord bridge ${VERSION} starting (config: ${CONFIG_PATH})`);
+  try {
+    const u = new URL(SB_WS_URL);
+    if (u.protocol !== 'ws:' && u.protocol !== 'wss:') throw new Error('the scheme must be ws:// or wss://');
+  } catch (e) {
+    log(`SB_WS_URL / --sb-ws-url "${clean(SB_WS_URL, 100)}" is not a valid ws:// URL (${e.message}): e.g. --sb-ws-url=ws://127.0.0.1:8080/`);
+    await flushLog(300);
+    process.exit(1);
+  }
   await acquireGuard();
   await init();
   connectSb();
   heartbeatTimer = setInterval(schedulePush, HEARTBEAT_MS);
 }
 
-main().catch((e) => { rpc.error = 'Bridge failed to start: ' + ((e && e.message) || e); logNow(`startup failed: ${(e && e.stack) || e}`); shutdown(1, 'startup failed'); });
+main().catch((e) => { rpc.error = 'Bridge failed to start: ' + ((e && e.message) || e); log(`startup failed: ${(e && e.stack) || e}`); shutdown(1, 'startup failed'); });

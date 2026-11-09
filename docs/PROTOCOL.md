@@ -305,7 +305,8 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   the voice call and exits once Streamer.bot's WebSocket stays down past a grace
   window (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms) — so the bot doesn't
   linger in the channel after you close SB. The env var
-  `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set.
+  `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set, and the argument
+  `--exit-on-sb-close=1/0` overrides both. The grace window is never shorter than 1 s.
 - `hb`, `stopped` and `bridgeVersion` are additive (a consumer that does not know
   them ignores them). The bridge pushes at least every `hb` ms (5000) even when
   nothing changed, so a consumer can tell a live bridge from one that died with
