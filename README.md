@@ -104,6 +104,7 @@ control/    control.html (director + slot editor + invite builder + Discord sect
               by both pages so the 1×1 director auto-populates on its own)
             vdo-url.js (the vdo.ninja URL rules: password encoding, view flags; an identical
               copy lives in overlay/)
+            vdo-rev.js (rev / writer stamps and echo tracking for vdo.state, shared by both pages)
 overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|grid)
             nameplate.html (?slot=N standalone nameplate) · nameplate-shared.js
             panel-client-sb.js (SB transport shim) · vdo-url.js (copy of control/vdo-url.js)
@@ -136,7 +137,9 @@ to keep a file copy:
   ```
   `restore` checks the file the way the control page checks an import (a Greenroom snapshot, a text room,
   slots and a directory, Discord IDs in quotes, nothing from a newer Greenroom), saves the current config to
-  `backups/pre-restore-<time>.json`, pushes the snapshot, and says whether Streamer.bot confirmed it. `--force`
+  `backups/pre-restore-<time>.json`, pushes the snapshot as a new write (with the slots' stream IDs blanked, since
+  they were true on the day the file was saved: a running director puts the live ones back within a few seconds, so
+  have the dock open, or the `director-min` source running), and says whether Streamer.bot confirmed it. `--force`
   accepts a raw `vdo.state` payload with no `kind` (and `save` over an existing file). A snapshot saved as UTF-16
   by Notepad or PowerShell is read too.
   Put flags after a `--` (npm swallows a bare `--url`; the tool refuses to run when it sees that):

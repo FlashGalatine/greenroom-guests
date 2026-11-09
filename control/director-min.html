@@ -182,7 +182,7 @@
   let lastPushedSig = '';
   let unsent = false;         // a push could not be sent (Streamer.bot unreachable); the next poll after the reconnect re-pushes (GRN-11)
   let adoptedForeign = false; // another writer's state was just adopted: a difference in stream IDs alone is corrected after two polls (GRN-64)
-  let corrSig = '', corrPolls = 0;
+  let corrSig = '', corrPolls = 0, lastCorrectionAt = 0;
   const MSG_UNSENT = 'SB offline, changes will be sent on reconnect';
   let frameUrl = '';
   let discordUsers = {};    // last discord:voice:update users map (auto-add input only)
@@ -289,6 +289,16 @@
   // Per-session record of what this page has auto-added (GRN-65): a label or user is appended once, so a label that Streamer.bot
   // rewrites on the way back cannot look new on every poll and loop.
   const autoAdded = new Set();
+  // After adopting another writer's state while something was unsent: the keys this page auto-added that the adopted directory
+  // does not hold are forgotten, or the entries would never be added again.
+  function forgetMissingAuto() {
+    const have = new Set();
+    for (const e of cfg.directory) {
+      if (e.vdoLabel) have.add(GRDir.labelExactKey(e.vdoLabel));
+      if (e.discordUserId) have.add(GRDir.userKey(e.discordUserId));
+    }
+    for (const k of [...autoAdded]) if (!have.has(k)) autoAdded.delete(k);
+  }
   function runAutoAdd() {
     if (!synced || !cfg.directoryAutoAdd) return false;
     const res = GRDir.autoPopulate({
@@ -349,11 +359,13 @@
     cfg.alwaysOnDirector ? { alwaysOnDirector: cfg.alwaysOnDirector } : {}, { schemaVersion: SCHEMA_VERSION }, cfg.extra);
   }
 
-  // What this page compares its own state with right after it adopted `v` (see control.html): its own re-assembly, and for the
-  // designated director that with the stream IDs Streamer.bot holds, so a difference in IDs alone shows and gets corrected.
-  function adoptionBaseline(v) {
+  // What this page compares its own state with right after it adopted `v` (see control.html): its own re-assembly, and, when `held`,
+  // that with the stream IDs Streamer.bot holds, so a difference in IDs alone shows and gets corrected after two polls. `held` is
+  // asked for by the designated director, by a restore (the backup tool asks every director to put the live IDs back) and by a page
+  // that had something it could not send.
+  function adoptionBaseline(v, held) {
     const mine = assemblePayload();
-    if (isDesignated()) {
+    if (held) {
       const held = Array.isArray(v.slots) ? v.slots : [];
       mine.slots = mine.slots.map((s) => { const h = held.find((x) => x && Number(x.slot) === s.slot); return Object.assign({}, s, { streamID: String((h && h.streamID) ?? '') }); });
     }
@@ -375,10 +387,14 @@
     if (sig === refusedSig && Date.now() - refusedAt < REFUSED_RETRY_MS) return;
     // Right after another writer's state was adopted, a difference in stream IDs alone (the designated director sees other IDs than the
     // saved ones) has to hold for two polls before it is corrected, and then once (GRN-64).
+    let isCorrection = false;
     if (fromRoster && adoptedForeign && GRRev.diffKind(sig, lastPushedSig) === 'ids') {
       corrPolls = corrSig === sig ? corrPolls + 1 : 1;
       corrSig = sig;
       if (corrPolls < 2) return;
+      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds.
+      if (Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return;
+      isCorrection = true;
     }
     // Record it as pushed only if it was sent: with the socket down the next poll must retry. This page has no flush of its own
     // after a reconnect: it adopts the replay and its next poll re-pushes what differs.
@@ -387,6 +403,7 @@
     revs.sent(stamped.rev);
     lastPushedSig = sig;
     unsent = false; adoptedForeign = false; corrPolls = 0;
+    if (isCorrection) lastCorrectionAt = Date.now();
     show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + ' · pushed');
   }
 
@@ -530,13 +547,22 @@
         if (cls.kind === 'echo') { markSynced(); showSteady(); return; }
         if (cls.kind === 'stale') return;
         const firstSync = !synced;
+        // Something this page could not send (Streamer.bot was down), or a push that may have been lost with the socket: it has no
+        // flush of its own, so after adopting the replay it takes the held IDs as its baseline and its next polls re-push what differs.
+        const hadUnsent = synced && (unsent || revs.inflight.length > 0);
         if (!adoptCfg(v)) return; // not config-shaped: drop it
         markSynced();
         // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
         // disable. The first page to read it blanks it, once (GRN-48).
         const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
-        lastPushedSig = adoptionBaseline(v);
-        adoptedForeign = isDesignated(); corrSig = ''; corrPolls = 0;
+        // The IDs are put back by the designated director, after a restore (the backup tool asks every director to), and by a page
+        // that had something it could not send.
+        adoptedForeign = isDesignated() || GRRev.writerOf(v) === 'backup' || hadUnsent;
+        lastPushedSig = adoptionBaseline(v, adoptedForeign);
+        corrSig = ''; corrPolls = 0;
+        if (hadUnsent) forgetMissingAuto(); // what auto-add added meanwhile and the adopted state lacks is added again
+        revs.clearThrough(cls.rev);
+        unsent = false;
         if (heal) lastPushedSig = GRRev.sigOf(v); // the adopted state, IDs and all: the blank copy differs from it, so it goes out (once)
         syncDirectorFrame();
         // syncDirectorFrame says nothing when the frame URL did not change, so a late

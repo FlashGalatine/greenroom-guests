@@ -282,6 +282,7 @@
         <a id="btnVdoInviteOpen" class="btn-open" href="#" target="_blank" rel="noreferrer">Open</a>
       </span>
     </div>
+    <div class="hint">A Manage page opened while a Greenroom director is running does not own the room and has limited control (docs/STREAMERBOT-SETUP.md, section 4).</div>
     <div class="linkrow">
       <textarea id="vdoManageLink" readonly rows="2" placeholder="director / manage link"></textarea>
       <span class="btns">
@@ -467,7 +468,10 @@
         assembleAndPush(true); // auto-follow: re-resolve every poll
         renderDesignation();
       },
-      owner: (isOwner) => { directorNotOwner = !isOwner; },
+      owner: (isOwner) => {
+        if (directorNotOwner === isOwner) console.info(isOwner ? '[control] this director owns the room' : '[control] vdo.ninja says another director holds the room: this one does not own it');
+        directorNotOwner = !isOwner;
+      },
     },
   });
   let directorNotOwner = false; // vdo.ninja said another director holds the room (information only, GRN-94)
@@ -496,7 +500,7 @@
   let lostPossible = false;   // the socket closed with a push still waiting for its echo: it may not have arrived
   const MSG_UNSENT = 'SB offline, changes will be sent on reconnect';
   let adoptedForeign = false; // another writer's state was just adopted: a difference in stream IDs alone is corrected after two polls (GRN-64)
-  let corrSig = '', corrPolls = 0;
+  let corrSig = '', corrPolls = 0, lastCorrectionAt = 0;
   let pushSeq = 0;          // pushes actually sent (a gesture asks whether a push already left)
   let slotsSig = '';
   let dirSig = '';
@@ -740,7 +744,7 @@
     };
     sock.onopen = () => {
       // (an authentication notice from the last connection stays until a healthy session replaces it)
-      if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, 'SB: connected', 'live'); }
+      if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, unsent || lostPossible ? MSG_UNSENT : 'SB: connected', unsent || lostPossible ? 'error' : 'live'); }
       refusedSig = '';
       subId = String(++msgId);
       // Lowercase `general` — the SB Subscribe case gotcha.
@@ -846,16 +850,13 @@
         gotConfig = true; syncedByMarker = false;
         renderExportButton();
         markSynced();
+        flushUnsent(v, cls); // (the replay after a reconnect can be this page's own last push: an edit made meanwhile still goes out)
         return;
       }
-      if (cls.kind === 'stale') return; // older than what this page already holds (GRN-04): a delayed replay, or the loser of an equal rev
-      if (synced && (unsent || (lostPossible && revs.inflight.length))) {
-        // An edit made while Streamer.bot was unreachable (or a push that may not have arrived) is not overwritten by the replay that
-        // comes with the reconnect: this page sends its own state, with a fresh rev (GRN-11).
-        assembleAndPush(false, true);
-        return;
-      }
+      if (cls.kind === 'stale') { flushUnsent(v, cls); return; } // older than what this page already holds (GRN-04): a delayed replay, or the loser of an equal rev
+      if (flushUnsent(v, cls)) return; // an edit made while Streamer.bot was unreachable is not overwritten by the replay: this page sends its own state (GRN-11)
       const firstSync = !synced;
+      if (firstSync) dropUnsent(); // the form is replaced by the saved config: an edit that could not be sent before it arrived goes with the form
       const oldDir = cfg.directory;
       const drafts = oldDir.filter(isDraft); // this page's unfinished rows (GRN-96)
       if (!adoptCfg(v)) return; // not config-shaped: drop it
@@ -877,9 +878,14 @@
       // equal what we just adopted.
       lastPushedSig = adoptionBaseline(v);
       adoptedForeign = isDesignated(); corrSig = ''; corrPolls = 0;
+      revs.clearThrough(cls.rev); // the replay shows the pushes up to its rev: they are not waiting for an echo any more
+      if (!revs.inflight.length) lostPossible = false;
       // Release a focused slot or directory control only now, synced and baselined: a pending edit it commits is then an ordinary push.
       if (firstSync) releaseFocusForAdoption();
       renderAll();
+      // A checkbox that has the focus is not redrawn by renderAll: it follows the saved config all the same (GRN-149).
+      els.enabled.checked = cfg.enabled;
+      els.alwaysOn.checked = cfg.alwaysOnDirector === 'director-min';
       if (heal) { cfg.slots.forEach((s) => { s.streamID = ''; }); hasRoster = false; renderSlots(true); }
       // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding here
       // could answer a rewrite of it with a push of our own (GRN-65).
@@ -931,6 +937,9 @@
       // settling; one seen and lost blanks at once). With no current roster the held resolution is preserved.
       let streamID;
       if (!s.label) streamID = '';
+      // Beside a designated director-min the stream IDs are its to resolve: this page shows and sends the ones Streamer.bot holds
+      // (its own resolution only drives the "not correcting" warning), so an edit never carries a view that is a poll behind (GRN-04).
+      else if (!isDesignated()) streamID = String(s.streamID || '');
       else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, String(s.pushID || ''), directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
       else streamID = String(s.streamID || '');
       s.streamID = streamID;
@@ -954,6 +963,22 @@
       directoryAutoAdd: cfg.directoryAutoAdd !== false,
       directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored),
     }, cfg.alwaysOnDirector ? { alwaysOnDirector: cfg.alwaysOnDirector } : {}, { schemaVersion: SCHEMA_VERSION }, cfg.extra);
+  }
+
+  // An edit that could not be sent while Streamer.bot was unreachable (unsent), or a push that may have been lost with the socket
+  // (lostPossible), goes out after the reconnect instead of being overwritten by the replay that comes with it (GRN-11). A possibly
+  // lost push is sent again only when the replay does not show a write that Streamer.bot ran after it; a config saved by a newer
+  // Greenroom is never written over (GRN-75). Returns whether it pushed.
+  function flushUnsent(v, cls) {
+    if (!synced || Number(v && v.schemaVersion) > SCHEMA_VERSION) return false;
+    const lost = lostPossible && revs.inflight.length > 0 && (cls.rev === 0 || cls.rev < revs.oldestInflightRev());
+    if (!unsent && !lost) return false;
+    return assembleAndPush(false, true);
+  }
+  // The saved config replaces the form: whatever could not be sent before it arrived is gone with the form.
+  function dropUnsent() {
+    unsent = false; lostPossible = false;
+    if (els.sbStatus.textContent === MSG_UNSENT) setPill(els.sbStatus, 'SB: connected', 'live');
   }
 
   // What this page compares its own state with right after it adopted `v` (another writer's push, a replay, an Import). A page that is
@@ -987,10 +1012,14 @@
     if (sig === refusedSig && !force && !unsyncedOverride && Date.now() - refusedAt < REFUSED_RETRY_MS) return false;
     // Right after another writer's state was adopted, a difference in stream IDs alone (this page's director sees other IDs than the
     // saved ones) has to hold for two polls before it is corrected, and then once.
+    let isCorrection = false;
     if (fromRoster && adoptedForeign && !force && !unsyncedOverride && GRRev.diffKind(sig, lastPushedSig) === 'ids') {
       corrPolls = corrSig === sig ? corrPolls + 1 : 1;
       corrSig = sig;
       if (corrPolls < 2) return false;
+      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds.
+      if (Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return false;
+      isCorrection = true;
     }
     // Stamp it (rev, writer, schemaVersion) and record it as pushed only if it was sent: with the socket down the next poll must
     // retry, the edit is kept as unsent, and a status line must not claim a push that never left.
@@ -1003,6 +1032,8 @@
     revs.sent(stamped.rev);
     lastPushedSig = sig;
     unsent = false; lostPossible = false; adoptedForeign = false; corrPolls = 0;
+    if (isCorrection) lastCorrectionAt = Date.now();
+    if (els.sbStatus.textContent === MSG_UNSENT) setPill(els.sbStatus, 'SB: connected', 'live');
     pushSeq++;
     watchUnconfirmed(stamped.rev);
     return true;

@@ -3430,7 +3430,7 @@ async function main() {
     // ── R19: revisions, echoes and one director (GRN-64, 04, 149, 11, 169, 94, 39) ──
     if (!ONLY || ONLY === 'revision') {
       console.log('\n[R19] revision: rev/writer/schemaVersion 2 on every push, echoes by rev, the newer state wins, offline edits kept, one designated director');
-      const R19_SECTIONS = 'abcdefghijklmn'.split('');
+      const R19_SECTIONS = 'abcdefghijklmnoqrstuvwxyz'.split('');
       for (const k of (process.env.R19_ONLY || '').split(',').filter(Boolean)) if (!R19_SECTIONS.includes(k)) throw new Error('R19_ONLY=' + k + ': the sections are ' + R19_SECTIONS.join(', '));
       const want = (k) => !process.env.R19_ONLY || process.env.R19_ONLY.split(',').includes(k);
       const OLD = () => ({ schemaVersion: 2, rev: Date.now() - 100000, writer: 'wOld' }); // a state some page saved a while ago
@@ -3577,16 +3577,23 @@ async function main() {
       if (want('g')) {
         const seed = mkSeed({ alwaysOnDirector: 'director-min' });
         const x = await seededMock(seed);
+        const ov = await newPage(browser, { width: 640, height: 360 });
+        await ov.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
         const p = await openMin(x, FIXED);
         await sleep(2500);
         await fetch(x.api.base + '/mock/drop?ms=4000').then((r) => r.arrayBuffer());
         await sleep(500);
         const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
         await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa999', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } }));
+        await sleep(2500);
+        const during = await p.evaluate(() => document.getElementById('status')?.textContent || '');
         const ok = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa999'; }, 22000);
+        const ovOk = await wait(ov, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa999'), null, 8000);
+        await sleep(2500);
         const ps = await payloads(x);
-        check('R19g: ALPHA got a new stream ID while Streamer.bot was down; after the reconnect and the replay of the old saved state the designated director-min corrects it, once', ok && ps.length >= 1 && ps.length <= 2, JSON.stringify({ ok, pushes: ps.length }));
-        await p.close();
+        check('R19g: ALPHA got a new stream ID while Streamer.bot was down; director-min says "SB offline, changes will be sent on reconnect" meanwhile, the designated director-min corrects it ONCE after the reconnect, and the slot overlay ends on the new ID',
+          ok && ovOk && ps.length === 1 && /changes will be sent on reconnect/.test(during), JSON.stringify({ ok, ovOk, pushes: ps.length, during }));
+        await ov.close(); await p.close();
       }
       // (h) The designation (decision 14 A): the setting, and a dock that then pushes only operator edits.
       if (want('h')) {
@@ -3605,10 +3612,13 @@ async function main() {
         const q = await openDock(y, '', seed2); // the mock director's own timeline: ALPHA, BRAVO, a leave and a rejoin with a new ID
         await sleep(12500);
         const quiet = await payloads(y);
+        y.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ users: { '300000000000000077': { speaking: false, username: 'NewVoice', avatarUrl: embed(1), mute: false, deaf: false } } }) }); // a new face in the voice channel: auto-add
+        await sleep(1800);
+        const quiet2 = await payloads(y);
         await setMirror1(q, true); await sleep(1500);
         const edit = await payloads(y);
-        check('R19h2: with director-min designated, the dock pushes nothing on its own over 12 s of roster changes (no follow, no auto-add), and an operator edit still pushes',
-          quiet.length === 0 && edit.length === 1 && edit[0].slots[0].mirror === true, JSON.stringify({ quiet: quiet.length, edit: edit.length }));
+        check('R19h2: with director-min designated, the dock pushes nothing on its own over 12 s of roster changes and a new voice user (no follow, no auto-add), and an operator edit still pushes',
+          quiet.length === 0 && quiet2.length === 0 && edit.length === 1 && edit[0].slots[0].mirror === true, JSON.stringify({ quiet: quiet.length, quiet2: quiet2.length, edit: edit.length }));
         await q.close();
       }
       // (i) The correction after adopting someone else's state: the designated director sends it, once, and nobody else does (GRN-64, GRN-169).
@@ -3646,17 +3656,26 @@ async function main() {
         check('R19i3: with the designated director-min running beside the dock, the saved IDs converge to the live ones, every push is the director-min\'s, and the dock shows no warning',
           done && pz.length >= 1 && pz.every((q) => q.writer === wm) && wm !== wd && note2 === '', JSON.stringify({ done, pushes: pz.length, writers: [...new Set(pz.map((q) => q.writer))], wm, wd, note2 }));
         await d.close(); await m.close();
+        // the difference has to hold for two polls: ALPHA's ID changes between poll 1 and poll 2 and only the settled one is sent
+        const w = await seededMock(mkSeed(stale));
+        const f = await openDock(w, '?flip=1', mkSeed(stale));
+        await until(async () => (await payloads(w)).length >= 1, 16000);
+        await sleep(3000);
+        const pf = await payloads(w);
+        check('R19i4: the difference in stream IDs must hold for two polls in a row: when ALPHA\'s ID changes between poll 1 and poll 2, ONE correction is sent, with the settled ID', pf.length === 1 && pf[0].slots[0].streamID === 'aaa222', JSON.stringify(pf.map((q) => q.slots.slice(0, 2).map((x) => x.streamID))));
+        await f.close();
       }
       // (j) GRN-169's two render tests: a forged reply is ignored, and a malformed one changes nothing.
       if (want('j')) {
         const seed = mkSeed();
         const x = await seededMock(seed);
         const p = await openDock(x, QUIET, seed);
-        await p.evaluate(() => window.postMessage({ guestList: { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'evil999', label: 'ALPHA' } } }, '*'));
-        await sleep(3500);
+        const forge = () => p.evaluate(() => window.postMessage({ guestList: { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'evil999', label: 'ALPHA' } } }, '*'));
+        await forge(); await sleep(3000); await forge(); await sleep(3000);
         const ids = await p.evaluate(() => [...document.querySelectorAll('#vdoSlots .vdo-slot-row .vdo-id')].map((e) => e.textContent));
+        const stat = await p.evaluate(() => document.getElementById('vdoStatus')?.textContent || '');
         const ps = await payloads(x);
-        check('R19j: a guestList posted by the page itself (not by the director frame) is ignored: the slots keep their stream IDs and nothing is pushed', ids[0] === 'aaa111' && ids[1] === 'bbb222' && ps.length === 0, JSON.stringify({ ids, pushes: ps.length }));
+        check('R19j: a guestList posted by the page itself (not by the director frame) is ignored, twice: the director is still "connecting", the slots keep their stream IDs and nothing is pushed', !/director: connected/.test(stat) && ids[0] === 'aaa111' && ids[1] === 'bbb222' && ps.length === 0, JSON.stringify({ stat, ids, pushes: ps.length }));
         await p.close();
         const y = await seededMock(seed);
         const q = await openDock(y, '?fixed=1&malformed=1', seed);
@@ -3713,6 +3732,225 @@ async function main() {
         const ps = await payloads(x);
         check('R19n: director-min\'s pushes carry schemaVersion 2, a rev and its own writer id', ps.length >= 1 && ps.every((q) => q.schemaVersion === 2 && Number.isInteger(q.rev) && q.writer === w) && !!w, JSON.stringify(ps.map((q) => [q.schemaVersion, q.rev, q.writer])));
         await p.close();
+      }
+      // ── the review round (Sprint 11): each section is named for the finding it pins ──
+      const MIRROR2 = '#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-mirror-cb';
+      const BLANK = [slot(1, { label: 'ALPHA' }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)];
+      const restoreLike = (extra) => Object.assign(mkSeed({ slots: BLANK }), { schemaVersion: 2, rev: Date.now() + 1000, writer: 'backup' }, extra || {});
+      const connected = (p, ms) => wait(p, () => /SB: connected/.test(document.getElementById('sbStatus')?.textContent || ''), null, ms || 15000);
+      const offline = (p) => wait(p, () => /offline/i.test(document.getElementById('sbStatus')?.textContent || ''), null, 6000);
+
+      // (o) An edit made offline is sent even when the replay after the reconnect is this page's own last push.
+      if (want('o')) {
+        for (const ticked of [false, true]) {
+          const seed = mkSeed(ticked ? { alwaysOnDirector: 'director-min' } : {});
+          const x = await seededMock(seed);
+          const p = await openDock(x, ticked ? FIXED : QUIET, seed);
+          await setMirror1(p, true); await sleep(1300); // pushed and echoed: Streamer.bot now holds this page's own push
+          await fetch(x.api.base + '/mock/drop?ms=4500').then((r) => r.arrayBuffer());
+          await offline(p);
+          await p.setChecked(MIRROR2, true); await sleep(800);
+          await connected(p);
+          await sleep(3500);
+          const st = await x.api.state();
+          const note = await sbText(p);
+          check('R19o' + (ticked ? 'b' : 'a') + ': an edit made while Streamer.bot is down is sent after the reconnect although the replay is the dock\'s own last push (' + (ticked ? 'beside a designated director-min' : 'dock with no roster') + '), and the "offline" notice is gone',
+            !!st.vdo && st.vdo.slots[1].mirror === true && !/offline/i.test(note), JSON.stringify({ stored: st.vdo && st.vdo.slots[1].mirror, note }));
+          await p.close();
+        }
+      }
+      // (q) A frame older than this page's push, landing between the push and its echo, is not adopted.
+      if (want('q')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed, { SB_PUSH_DELAY_MS: '1500' });
+        const p = await openDock(x, QUIET, seed);
+        await p.evaluate((s) => { const c = document.querySelector(s); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); }, MIRROR1); // one change event
+        await sleep(400);
+        await send(x, seed); // the saved state again (a Sync replay), before the dock's echo
+        await sleep(3000);
+        const m = await mirror1(p);
+        const st = await x.api.state();
+        check('R19q: a replay of the older saved state that arrives between the dock\'s push and its echo is not adopted: the box stays ticked and the saved state has the edit', m === true && !!st.vdo && st.vdo.slots[0].mirror === true, JSON.stringify({ m, stored: st.vdo && st.vdo.slots[0].mirror }));
+        await p.close();
+      }
+      // (r) A dock beside a designated director-min keeps the stream IDs Streamer.bot holds: it shows them, warns when they are not on air, and sends them in its edits.
+      if (want('r')) {
+        const seed = mkSeed({ alwaysOnDirector: 'director-min' });
+        const x = await seededMock(seed);
+        const p = await openDock(x, FIXED, seed, 'window.__DESIGNATION_WARN_MS = 2000;');
+        await send(x, restoreLike({ alwaysOnDirector: 'director-min' })); // a restore: the IDs blanked
+        await sleep(4500);
+        const ids = await p.evaluate(() => [...document.querySelectorAll('#vdoSlots .vdo-slot-row .vdo-id')].map((e) => e.textContent));
+        const note = await p.evaluate(() => { const e = document.getElementById('designationNote'); return e && !e.hidden ? e.textContent : ''; });
+        await x.api.clear();
+        await setMirror1(p, true); await sleep(1400);
+        const ps = await payloads(x);
+        check('R19r: after a restore blanked the IDs, the dock beside a designated director-min that is not running shows them blank, warns "not correcting", and its own edit sends them blank (not its own live ones)',
+          ids[0] !== 'aaa111' && ids[1] !== 'bbb222' && /not correcting/.test(note) && ps.length === 1 && ps[0].slots[0].streamID === '' && ps[0].slots[1].streamID === '', JSON.stringify({ ids, note, pushes: ps.map((q) => q.slots.slice(0, 2).map((s) => s.streamID)) }));
+        await p.close();
+      }
+      // (s) Two corrections are at least the gap apart.
+      if (want('s')) {
+        const seed = mkSeed({ slots: BLANK });
+        const x = await seededMock(seed);
+        const p = await openDock(x, FIXED, seed, 'window.__CORRECTION_GAP_MS = 9000;');
+        await until(async () => (await payloads(x)).length >= 1, 14000);
+        const t1 = Date.now();
+        await send(x, restoreLike({ rev: Date.now() + 500 })); // a second restore right after
+        await x.api.clear();
+        await sleep(4000);
+        const early = await payloads(x);
+        await until(async () => (await payloads(x)).length >= 1, 14000);
+        const elapsed = Date.now() - t1;
+        check('R19s: a second restore within the gap is corrected only once the gap since the last correction has passed (two directors that disagree cannot flip the slots every few seconds)', early.length === 0 && elapsed >= 8000, JSON.stringify({ early: early.length, elapsed }));
+        await p.close();
+      }
+      // (t) A push that may be lost is sent again only when the replay does not show a newer write.
+      if (want('t')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await fetch(x.api.base + '/mock/mode?push=drop').then((r) => r.arrayBuffer()); // acked, stored and broadcast by nobody
+        await setMirror1(p, true); await sleep(800);
+        await fetch(x.api.base + '/mock/mode?push=ok').then((r) => r.arrayBuffer());
+        await fetch(x.api.base + '/mock/drop?ms=2500').then((r) => r.arrayBuffer());
+        await connected(p, 20000); await sleep(3000);
+        const st1 = await x.api.state();
+        check('R19t: a push that never reached Streamer.bot (the socket dropped with it still unconfirmed) is sent again after the reconnect', !!st1.vdo && st1.vdo.slots[0].mirror === true, JSON.stringify({ stored: st1.vdo && st1.vdo.slots[0].mirror }));
+        await p.close();
+        const y = await seededMock(seed);
+        const q = await openDock(y, QUIET, seed);
+        await fetch(y.api.base + '/mock/mode?push=drop').then((r) => r.arrayBuffer());
+        await setMirror1(q, true); await sleep(800);
+        await fetch(y.api.base + '/mock/mode?push=ok').then((r) => r.arrayBuffer());
+        await fetch(y.api.base + '/mock/drop?ms=3000').then((r) => r.arrayBuffer());
+        await fetch(y.api.base + '/mock/setcache', { method: 'POST', body: JSON.stringify({ vdo: JSON.stringify(Object.assign(mkSeed({ slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222', mirror: true }), slot(3), slot(4)] }), { schemaVersion: 2, rev: Date.now() + 100000, writer: 'wOther' })) }) }).then((r) => r.arrayBuffer());
+        await y.api.clear();
+        await connected(q, 20000); await sleep(3000);
+        const m2 = await q.evaluate((s) => document.querySelector(s)?.checked, MIRROR2);
+        const pf = await payloads(y);
+        check('R19t2: …but when Streamer.bot has since run a NEWER write by someone else, the dock adopts it and does not push over it', m2 === true && pf.length === 0, JSON.stringify({ m2, pushes: pf.length }));
+        await q.close();
+      }
+      // (u) An edit confirmed before the first sync, while Streamer.bot was unreachable, is not kept as "unsent" after the saved config arrives.
+      if (want('u')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        await fetch(x.api.base + '/mock/drop?ms=3500').then((r) => r.arrayBuffer());
+        const p = await newPage(browser, { width: 920, height: 1500 }, mockDir(x, QUIET));
+        p.on('dialog', (d) => d.accept());
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await sleep(1200);
+        await p.fill('#vdoViewFlags', '&solo&unsynced-edit'); await p.click('#btnVdoSave'); // confirmed, but there is no connection to send it on
+        await connected(p, 20000); await sleep(2500); // the saved config arrives and replaces the form
+        await x.api.clear();
+        await send(x, Object.assign(mkSeed({ slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111', mirror: true }), slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)] }), { schemaVersion: 2, rev: Date.now() + 5000, writer: 'wOther' }));
+        await sleep(2000);
+        const m = await mirror1(p);
+        const pf = await payloads(x);
+        check('R19u: an edit that could not be sent before the first sync is dropped with the form when the saved config arrives; a later write by another page is then adopted, not overwritten', m === true && pf.length === 0, JSON.stringify({ m, pushes: pf.length }));
+        await p.close();
+      }
+      // (v) A checkbox that has focus still shows what the saved config says after another page changed it.
+      if (want('v')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await p.click('#vdoAlwaysOn'); // ticks it and keeps the focus
+        await until(async () => (await payloads(x)).some((q) => q.alwaysOnDirector === 'director-min'), 5000);
+        await send(x, Object.assign(mkSeed(), { schemaVersion: 2, rev: Date.now() + 5000, writer: 'wOther' })); // another dock unticked it
+        await sleep(1000);
+        const ticked = await p.evaluate(() => document.getElementById('vdoAlwaysOn').checked);
+        check('R19v: the always-on box follows the saved config even while it has the focus (it shows unticked once another page saved it unticked)', ticked === false, String(ticked));
+        await p.close();
+      }
+      // (w) director-min: a guest added while Streamer.bot was down is added again when the replay is someone else's state.
+      if (want('w')) {
+        const seed = mkSeed({ directoryAutoAdd: true, directory: [] });
+        const x = await seededMock(seed);
+        const p = await openMin(x, FIXED);
+        await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.directory.length >= 2; }, 12000);
+        const base = await x.api.state();
+        await fetch(x.api.base + '/mock/drop?ms=5000').then((r) => r.arrayBuffer());
+        await sleep(500);
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'ccc333', label: 'CHARLIE' } }));
+        await sleep(3500); // director-min adds CHARLIE; the push cannot go out
+        await fetch(x.api.base + '/mock/setcache', { method: 'POST', body: JSON.stringify({ vdo: JSON.stringify(Object.assign({}, base.vdo, { rev: Date.now() + 100000, writer: 'wOther' })) }) }).then((r) => r.arrayBuffer());
+        const ok = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.directory.some((e) => e.vdoLabel === 'CHARLIE'); }, 30000);
+        check('R19w: a label auto-added by director-min while Streamer.bot was down is added again after the reconnect, when the replay is another writer\'s state without it', ok, JSON.stringify({ ok }));
+        await p.close();
+      }
+      // (x) An undesignated director-min still puts the IDs back after a restore, and re-pushes what it could not send.
+      if (want('x')) {
+        const seed = mkSeed({ slots: BLANK });
+        const x = await seededMock(seed);
+        const p = await openMin(x, FIXED);
+        await sleep(2500);
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(restoreLike({ rev: Date.now() + 100 })) }); // what backup.mjs restore pushes
+        const ok = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222'; }, 16000);
+        check('R19x: director-min with the box unticked puts the live IDs back after a restore (a push from the backup tool asks every director to)', ok, JSON.stringify({ ok }));
+        await p.close();
+        const seed2 = mkSeed();
+        const y = await seededMock(seed2);
+        const q = await openMin(y, FIXED);
+        await sleep(2500);
+        await fetch(y.api.base + '/mock/drop?ms=4000').then((r) => r.arrayBuffer());
+        await sleep(500);
+        const fr = q.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa999', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } }));
+        const ok2 = await until(async () => { const st = await y.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === 'aaa999'; }, 24000);
+        check('R19x2: director-min with the box unticked sends the new stream ID that it could not send while Streamer.bot was down', ok2, JSON.stringify({ ok2 }));
+        await q.close();
+      }
+      // (y) An offline edit never overwrites a config saved by a newer Greenroom.
+      if (want('y')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, QUIET, seed);
+        await fetch(x.api.base + '/mock/drop?ms=4500').then((r) => r.arrayBuffer());
+        await offline(p);
+        await setMirror1(p, true); await sleep(600);
+        await fetch(x.api.base + '/mock/setcache', { method: 'POST', body: JSON.stringify({ vdo: JSON.stringify(Object.assign(mkSeed(), { schemaVersion: 3, rev: Date.now() + 100000, writer: 'wNew', futureField: { a: 1 } })) }) }).then((r) => r.arrayBuffer());
+        await connected(p, 20000); await sleep(3000);
+        const st = await x.api.state();
+        const pf = await payloads(x);
+        check('R19y: an edit made offline is not pushed over a saved config from a newer Greenroom (schemaVersion 3): nothing is pushed and the saved config keeps its fields', pf.length === 0 && !!st.vdo && st.vdo.schemaVersion === 3 && !!st.vdo.futureField, JSON.stringify({ pushes: pf.length, sv: st.vdo && st.vdo.schemaVersion }));
+        await p.close();
+      }
+      // (z) The plan's offline matrix: a guest leaves while Streamer.bot is down; both pages dirty; director-min adopts a legacy write.
+      if (want('z')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openDock(x, FIXED, seed);
+        await sleep(2500);
+        await fetch(x.api.base + '/mock/drop?ms=4500').then((r) => r.arrayBuffer());
+        await sleep(500);
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 2: { streamID: 'bbb222', label: 'BRAVO' } })); // ALPHA left
+        const okLeave = await until(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[0].streamID === '' && st.vdo.slots[1].streamID === 'bbb222'; }, 25000);
+        check('R19z: a guest who leaves while Streamer.bot is down is blank in the saved state after the reconnect (the dock sends what it saw)', okLeave, JSON.stringify({ okLeave }));
+        await p.close();
+        const seed2 = mkSeed({ alwaysOnDirector: 'director-min' });
+        const y = await seededMock(seed2);
+        const d = await openDock(y, QUIET, seed2);
+        const m = await openMin(y, FIXED);
+        await sleep(2500);
+        await fetch(y.api.base + '/mock/drop?ms=5000').then((r) => r.arrayBuffer());
+        await offline(d); await sleep(300);
+        await setMirror1(d, true); // the dock's edit, offline
+        const fr2 = m.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr2.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa999', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } })); // director-min's new ID, offline
+        const okBoth = await until(async () => { const st = await y.api.state(); return !!st.vdo && st.vdo.slots[0].mirror === true && st.vdo.slots[0].streamID === 'aaa999'; }, 30000);
+        check('R19z2: both pages dirty and reconnecting together (the dock\'s edit, director-min\'s new stream ID): the saved state ends with both', okBoth, JSON.stringify(await y.api.state().then((s) => s.vdo && s.vdo.slots[0])));
+        await d.close(); await m.close();
+        const z = await seededMock(seed);
+        const lm = await openMin(z, FIXED);
+        await sleep(2000);
+        await send(z, Object.assign(mkSeed({ room: 'legacyroom' }), { schemaVersion: undefined, rev: undefined, writer: undefined })); // no rev: a legacy write
+        const okLegacy = await wait(lm, () => /legacyroom/.test(document.getElementById('status')?.textContent || ''), null, 8000);
+        check('R19z3: director-min adopts a write that has no rev (a legacy write), as the dock does', okLegacy);
+        await lm.close();
       }
     }
 

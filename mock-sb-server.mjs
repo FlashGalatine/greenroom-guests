@@ -42,6 +42,8 @@
 //       SB_FILE_DELAY=<file>:<ms>[,<file>:<ms>]
 //                               serve a file (by name, e.g. nameplate-shared.js) that many
 //                               ms late, so a script lands after the page has connected
+//       SB_PUSH_DELAY_MS=<n>    a VDO Push is acked at once but broadcast (and cached) n ms later, so a frame can arrive between a
+//                               page's push and its echo
 //       SB_SUBSCRIBE=none|error Subscribe is never answered, or answered {status:'error'}
 //       SB_SUBSCRIBE_DELAY_MS=<n>  the Subscribe reply (ok or error) comes n ms late
 //       SB_DOACTION=error       every DoAction is answered {status:'error'} and not run
@@ -126,6 +128,7 @@ let refuseUntil = 0; // /mock/drop: WebSocket connections are refused until this
 // The actions the real install has (an action that is not one of these, or is listed in `missing`, is answered 'not found').
 const KNOWN_ACTIONS = new Set(['VDO Push', 'Discord Voice Push', 'VDO Sync', 'Discord Voice Command', 'Discord Bridge Start']);
 const SUBSCRIBE_DELAY_MS = Number(process.env.SB_SUBSCRIBE_DELAY_MS) || 0;
+const PUSH_DELAY_MS = Number(process.env.SB_PUSH_DELAY_MS) || 0;
 let syncDropsLeft = process.env.SB_SYNC_DROP === '1' ? 1 : 0;
 const DATA_STRING = process.env.SB_DATA === 'string';
 const DROP = process.env.SB_DROP === '1';
@@ -303,8 +306,11 @@ function push(name, args) {
   }
   const why = objectError(payload); // the strict check: one JSON object, no repeated key, nesting <= 32
   if (why) { console.log(`[mock] ${name}: payload rejected, NOT cached (${why})`); emitError(kind, `payload rejected, NOT cached: ${why}`); return; }
-  broadcastRaw(customEvent(updateData(kind, payload))); // broadcast first, then cache
-  caches[kind.key] = payload;
+  const deliver = () => {
+    broadcastRaw(customEvent(updateData(kind, payload))); // broadcast first, then cache
+    caches[kind.key] = payload;
+  };
+  if (PUSH_DELAY_MS > 0 && name === 'VDO Push') setTimeout(deliver, PUSH_DELAY_MS); else deliver();
 }
 
 // The VDO Sync replay for a snapshot of the two caches. Returns how many blobs went out.

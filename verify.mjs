@@ -1184,6 +1184,20 @@ async function main() {
       const d1 = D.nextRev(); D.sent(d1);
       D.receive({ rev: d1, writer: 'wD' });
       check('GRN-31: a delayed replay of an older state, arriving after this page\'s newer push, is dropped', D.receive({ rev: 29000, writer: 'wX' }).kind === 'stale' && D.receive({ rev: 28000, writer: 'wQ' }).kind === 'stale');
+      // a frame that is older than a push of this page still on its way (GRN-149): the page's own push is behind it in Streamer.bot's order
+      clock = 40000;
+      const F = mk('wF');
+      F.receive({ rev: 30000, writer: 'wX' });
+      F.sent(40000);
+      check('a foreign frame with a rev below this page\'s push still in flight is dropped (the push runs after it), and so is a re-broadcast of the held state; a higher rev is adopted',
+        F.receive({ rev: 35000, writer: 'wY' }).kind === 'stale' && F.receive({ rev: 30000, writer: 'wX' }).kind === 'stale' && F.receive({ rev: 40001, writer: 'wY' }).kind === 'newer' && F.oldestInflightRev() === 40000);
+      const G = mk('wM'); G.sent(50000);
+      check('…an equal rev from another writer: the larger writer id wins, so this page (wM) keeps its push against wA and gives way to wZ',
+        G.receive({ rev: 50000, writer: 'wA' }).kind === 'stale' && G.receive({ rev: 50000, writer: 'wZ' }).kind === 'newer');
+      const H = mk('wH'); H.sent(60000); H.sent(60005);
+      H.clearThrough(60000);
+      check('clearThrough(rev) forgets the pushes up to a rev (a replay that shows them) and keeps the newer ones; oldestInflightRev() is 0 with none',
+        H.inflight.length === 1 && H.oldestInflightRev() === 60005 && (H.clearThrough(99999), H.oldestInflightRev() === 0));
       check('create() with no options works (a random writer id, the real clock) and two pages differ',
         /^w[0-9a-f]{16}$/.test(RV.create().writer) && RV.create().writer !== RV.create().writer && Math.abs(RV.create().nextRev() - Date.now()) < 1000);
     }
@@ -1537,6 +1551,16 @@ async function main() {
       afterState.vdo && afterState.vdo.directoryAutoAdd === true
       && Array.isArray(afterState.vdo.directoryIgnored) && afterState.vdo.directoryIgnored.includes('vdo:leavemealone'),
       JSON.stringify(afterState.vdo && afterState.vdo.directoryIgnored));
+
+    // a stored rev that is AHEAD of the clock (a fast clock that was corrected): the restore must still be newer than it, or every page drops it
+    const futureRev = Date.now() + 3600000;
+    mutator.doAction('VDO Push', { payload: JSON.stringify({ ...VDO_PAYLOAD, room: 'AHEAD', schemaVersion: 2, rev: futureRev, writer: 'wFast' }) });
+    await new Promise((r) => setTimeout(r, 250));
+    const restoreAhead = await runNode(['backup.mjs', 'restore', backupFile, '--yes'], bkEnv);
+    await new Promise((r) => setTimeout(r, 250));
+    const aheadState = await (await fetch(`${BASE}/mock/state`)).json();
+    check('a restore over a saved state whose rev is ahead of the clock is stamped above it (else every page would drop it as stale), and says the live IDs are put back by the designated director',
+      restoreAhead.code === 0 && aheadState.vdo && aheadState.vdo.room === 'testroom' && Number(aheadState.vdo.rev) > futureRev && aheadState.vdo.writer === 'backup' && /designated|always-on|dock/i.test(restoreAhead.out), restoreAhead.out.trim().slice(0, 300) + ' | rev ' + (aheadState.vdo && aheadState.vdo.rev));
 
     const bogus = await runNode(['backup.mjs', 'restore', resolve(__dirname, '.verify-nope-missing.json'), '--yes'], bkEnv);
     check('restore of a missing/garbage file exits non-zero (refuses to push junk)', bogus.code !== 0, `code=${bogus.code}`);

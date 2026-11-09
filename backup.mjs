@@ -298,16 +298,17 @@ async function restore(file) {
   }
   const checked = checkSnapshot(parsed);
   if (checked.problem) return die(`${path}: ${checked.problem} Nothing was changed.`);
-  // The file is pushed as a NEW write (control/vdo-rev.js): stamped with the time as its rev and this tool as its writer, so the pages
-  // adopt it over what they hold (a file's own, older rev would be dropped as a stale replay), and with the slots' stream IDs blanked:
-  // they were true when the file was saved, not now, and the designated director puts the live ones back within two polls.
-  const { rev: _r, writer: _w, schemaVersion: _s, ...rest } = checked.payload;
-  const payload = { ...rest, slots: checked.payload.slots.map((s) => ({ ...s, streamID: '' })), schemaVersion: SUPPORTED_SCHEMA, rev: Date.now(), writer: 'backup' };
-
   console.log(`target: ${URL_ARG}`);
   const sb = await connect(URL_ARG);
   try {
     const cur = await readCurrent(sb);
+    // The file is pushed as a NEW write (control/vdo-rev.js): stamped as this tool's (writer "backup", which every director reads as a
+    // request to put the live IDs back), with a rev above BOTH the clock and the rev the saved state holds now (a stored rev can be
+    // ahead of a clock that was corrected, and every page would drop a lower one as stale), and with the slots' stream IDs blanked:
+    // they were true when the file was saved, not now.
+    const heldRev = cur.kind === 'state' ? Number(cur.state && cur.state.rev) || 0 : 0;
+    const { rev: _r, writer: _w, schemaVersion: _s, ...rest } = checked.payload;
+    const payload = { ...rest, slots: checked.payload.slots.map((s) => ({ ...s, streamID: '' })), schemaVersion: SUPPORTED_SCHEMA, rev: Math.max(Date.now(), heldRev + 1), writer: 'backup' };
     const curLine = cur.kind === 'state' ? summarize(cur.state)
       : cur.kind === 'empty' ? 'nothing saved yet'
       : cur.kind === 'error' ? `unreadable (Streamer.bot reported: ${cur.message})`
@@ -360,6 +361,8 @@ async function restore(file) {
     console.log(`restored ${path}`);
     console.log(`  Streamer.bot now holds: ${summarize(payload)}`);
     console.log('  Open overlays and control pages receive it as a broadcast; reload a control page that still shows the old config before you edit anything in it.');
+    console.log('  The slots\' stream IDs were blanked (they were true on the day the file was saved): a running director puts the live ones back within a few seconds.');
+    console.log('  That needs a director running: the dock open, or the director-min source (tick "director-min.html is my always-on director" in the dock if you use it).');
   } finally { sb.close(); }
 }
 

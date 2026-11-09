@@ -139,8 +139,9 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   the text, because Streamer.bot may rewrite the text (a lone surrogate comes back
   as U+FFFD); a `rev` **below the highest it has received** is dropped (a
   delayed `VDO Sync` replay of an older state, say); **equal** revs are broken by
-  the writer id (the larger wins) so every page picks the same winner; a higher
-  `rev` is adopted; a payload with **no `rev`** (a page from before this scheme,
+  the writer id (the larger wins) so every page picks the same winner; so is a
+  `rev` below a push of the page's own that is still on its way to Streamer.bot
+  (that push runs after the frame); a higher `rev` is adopted; a payload with **no `rev`** (a page from before this scheme,
   a hand-made restore) is a legacy write: adopted, never dropped as rev 0, and
   the page's next push stamps a rev. Every comparison (is this a change worth a
   push, is this my echo) is made over the state **without** these three fields
@@ -150,22 +151,36 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   voice user appears may need redoing.
 - **An edit made while Streamer.bot is unreachable** is kept. The dock says "SB
   offline, changes will be sent on reconnect"; when the connection is back and the
-  replay of the saved state arrives, the dock pushes its own state with a fresh
-  rev instead of adopting the replay. `director-min.html` adopts the replay and
-  re-pushes what differs on its next poll. A push whose echo does not come back
-  within about five seconds is reported ("not confirmed by Streamer.bot: is VDO
-  Push compiled?").
+  replay of the saved state arrives (whatever it is, the dock's own last push
+  included), the dock pushes its own state with a fresh rev instead of adopting
+  the replay, unless the replay was saved by a newer Greenroom (`schemaVersion`
+  above its own) or shows a write that Streamer.bot ran after the push that may
+  have been lost. An edit that could not be sent before the first sync is dropped
+  with the form when the saved config arrives. `director-min.html` has no flush of
+  its own: having had something it could not send, it adopts the replay, takes
+  the stream IDs the replay holds as its baseline, and re-pushes a difference in
+  them once it has held for two polls (an entry it auto-added meanwhile is added
+  again). A push whose echo does not come back within about five seconds is
+  reported ("not confirmed by Streamer.bot: is VDO Push compiled?").
 - **`alwaysOnDirector` (optional, `"director-min"` or absent).** The dock's
   "director-min.html is my always-on director" box. Ticked, director-min is the
   **designated director**: the dock sends only the operator's own edits (no
-  follow pushes, no auto-add pushes) and shows "director-min is designated but not
-  correcting" when its own director has seen different stream IDs than the saved
-  ones for about 30 s with no correction arriving. Not ticked, the dock is the
-  designated director. Only the designated director corrects stream IDs after
-  adopting another writer's state (a restore, say): when its own roster differs
-  from the adopted state in `slots[].streamID` alone for two polls in a row it
-  sends ONE correction. The fields travel inside `vdo.state`, so no action
-  changes and nothing is re-pasted.
+  follow pushes, no auto-add pushes), and those carry the stream IDs Streamer.bot
+  holds, not the dock's own resolution of them; it shows "director-min is
+  designated but not correcting" when its own director has seen different stream
+  IDs than the saved ones for about 30 s with no correction arriving. Not ticked,
+  the dock is the designated director. Only the designated director corrects
+  stream IDs after adopting another writer's state: it takes its own re-assembly
+  with the stream IDs the adopted state holds as its baseline, and when its roster
+  differs from that in `slots[].streamID` alone for two polls in a row it sends
+  ONE correction (at most one per 30 s per page, so two pages whose directors
+  disagree cannot flip the slots every few seconds). A page that is not
+  designated takes its own re-assembly as the baseline, so adopting alone never
+  makes it push; the exceptions are a write by `backup.mjs restore` (writer
+  `"backup"`: every director that follows the guests puts the live IDs back) and a `director-min` that
+  had something it could not send. The fields travel inside `vdo.state`, so no
+  action changes and nothing is re-pasted. Two docks both unticked are both
+  designated: run one.
 
 - Slots bind guests by **label** (stable across rejoins); `streamID` is the
   volatile live resolution the director loop refreshes every 2.5 s.

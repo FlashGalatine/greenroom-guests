@@ -165,7 +165,8 @@ Deployment options, best first:
    prefer to keep the director running without the dock open; open `control.html`
    only to edit, and **tick "director-min.html is my always-on director"** in the
    dock's Room & Director section (it is saved with the config). The dock then
-   sends only your own edits and leaves following the guests, and adding them to
+   sends only your own edits (carrying the stream IDs Streamer.bot holds, not
+   its own view of them) and leaves following the guests, and adding them to
    the directory, to director-min; it warns "director-min is designated but not
    correcting: is its OBS source visible?" if the saved stream IDs stay different
    from what its own director sees for about 30 s. **Never untick the shared
@@ -321,8 +322,8 @@ exercised on a live rig. Outcomes, faithfully:
 - **"SB offline, changes will be sent on reconnect"** → Streamer.bot's WebSocket is
   unreachable and the page holds an edit (or a push that may not have arrived).
   Nothing is lost: when the connection returns the dock sends its own state
-  instead of adopting the older saved one, and director-min re-pushes on its next
-  poll.
+  instead of adopting the older saved one, and director-min re-pushes a
+  difference in stream IDs after two polls.
 - **"not confirmed by Streamer.bot: is VDO Push compiled?"** → a push was sent but
   never came back as a broadcast within about five seconds. Open the **VDO Push**
   action in Streamer.bot and compile it; the dock stays as you left it, but the

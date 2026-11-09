@@ -35,6 +35,7 @@
   ?malformed=1 answers the first four polls with malformed shapes (null guestList,
   string guestList, entry missing streamID, numeric label/streamID) before going
   normal — the defensive-parser cases, live.
+  ?flip=1 answers the first poll with ALPHA aaa111 and every later poll with ALPHA aaa222 (a guest whose stream ID changes between two polls).
   ?notowner=1 also says {action:'director', value:false} on the first poll: another director holds the room and this one is not its owner.
   window.__setRoster({...}) overrides the timeline for hand-driven tests.
 -->
@@ -56,6 +57,8 @@
   const SPEED = P.get('fast') === '1' ? 2.5 : 1;
   const MALFORMED = P.get('malformed') === '1';
   const NOTOWNER = P.get('notowner') === '1';
+  const FLIP = P.get('flip') === '1';
+  let flipServed = 0;
   let notOwnerSaid = false;
   const FIXED = P.get('fixed') === '1';
   const ALPHA = P.get('label') || 'ALPHA'; // ?label=<text> renames ALPHA (every poll, whatever the timeline)
@@ -111,7 +114,7 @@
     } else if (RENAMED) {
       reply = { guestList: { 0: { stream: 'dIrEcToR00', name: '' }, 1: { stream: 'aaa111', name: 'ALPHA' }, 2: { stream: 'bbb222', name: 'BRAVO' } }, cib: d.cib };
     } else {
-      let gl = forcedRoster || rosterAt(Date.now() - t0);
+      let gl = forcedRoster || (FLIP ? { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: flipServed++ === 0 ? 'aaa111' : 'aaa222', label: ALPHA }, 2: { streamID: 'bbb222', label: 'BRAVO' } } : rosterAt(Date.now() - t0));
       if (LATE && Date.now() - t0 < LATE.ms) gl = Object.fromEntries(Object.entries(gl).filter(([, g]) => g.label !== LATE.label));
       reply = { guestList: gl, cib: d.cib };
     }

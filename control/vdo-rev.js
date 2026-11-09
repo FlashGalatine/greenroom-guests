@@ -13,8 +13,9 @@
 // What receive() answers for a vdo.state this page has just been sent:
 //   'echo'    this page's own push (or an older one of its own) coming back: never adopted. Matched by writer and rev, never by
 //             the bytes, because Streamer.bot may rewrite the text (a lone surrogate comes back as U+FFFD)
-//   'stale'   a rev below the highest this page has received: dropped (GRN-04). Equal revs are broken by the writer id (the
-//             larger id wins) so that two pages pick the same winner
+//   'stale'   a rev below the highest this page has received, or below a push of its own that is still on its way (that push runs
+//             in Streamer.bot after the frame): dropped (GRN-04). Equal revs are broken by the writer id (the larger id wins)
+//             so that two pages pick the same winner
 //   'newer'   a higher rev (or the winner of an equal one): adopt it
 //   'same'    the very payload this page already holds (same rev, same writer): adopt it, it changes nothing
 //   'legacy'  no rev: adopt it, and let the next push of this page stamp one
@@ -109,6 +110,10 @@
       refused(rev) { inflight = inflight.filter((e) => e.rev !== rev); },
       // The oldest push still waiting to come back, in ms (0 when none).
       oldestPendingMs() { return inflight.length ? now() - Math.min(...inflight.map((e) => e.at)) : 0; },
+      // The rev of the oldest push still waiting to come back (0 when none).
+      oldestInflightRev() { return inflight.length ? Math.min(...inflight.map((e) => e.rev)) : 0; },
+      // A replay that shows the state up to this rev: the pushes up to it are history, not waiting any more.
+      clearThrough(rev) { inflight = inflight.filter((e) => e.rev > rev); },
       pending(rev) { return inflight.some((e) => e.rev === rev); },
       // A vdo.state arrived (the parsed object). Updates what this page has seen and says what to do with it.
       receive(v) {
@@ -120,6 +125,10 @@
           if (rev > highest || (rev === highest && w > highestWriter)) { highest = rev; highestWriter = w; }
           return { kind: 'echo', rev, writer: w };
         }
+        // A push of this page that is still on its way runs in Streamer.bot AFTER a frame with a lower rev (or an equal one from a
+        // smaller writer id): such a frame, a replay say, is older than this page's state and is not adopted over it.
+        const top = inflight.length ? Math.max(...inflight.map((e) => e.rev)) : 0;
+        if (top && (rev < top || (rev === top && w < writer))) return { kind: 'stale', rev, writer: w };
         if (rev < highest) return { kind: 'stale', rev, writer: w };
         if (rev === highest) {
           if (w === highestWriter) return { kind: 'same', rev, writer: w };
