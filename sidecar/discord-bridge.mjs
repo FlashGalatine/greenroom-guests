@@ -55,7 +55,7 @@ import WebSocket from 'ws';
     process.exit(1);
   }
 }
-const { Client, GatewayIntentBits } = await import('discord.js');
+const { Client, GatewayIntentBits, ChannelType } = await import('discord.js');
 const { joinVoiceChannel, VoiceConnectionStatus, entersState } = await import('@discordjs/voice');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -240,20 +240,63 @@ async function updateFavorite(id, updates) {
 
 async function removeFavorite(id) {
   const before = state.favorites.length;
+  const gone = state.favorites.find((f) => f.id === String(id));
   state.favorites = state.favorites.filter((f) => f.id !== String(id));
   if (state.favorites.length === before) return false;
+  // Removing the favorite that is the current channel makes the bot leave it (GRN-153).
+  if (gone && state.current && state.current.serverId === gone.serverId && state.current.channelId === gone.channelId) {
+    state.current = null;
+    leaveVoice();
+  }
   await persist();
   return true;
 }
 
+// Can the bot watch this channel? A server it is in, a channel that exists, a regular voice channel (a Stage has speakers and an audience:
+// this bridge cannot read it, GRN-80) that it can join. Returns { guild, channel } or { error } (a message for the operator).
+async function checkTarget(serverId, channelId) {
+  try {
+    const guild = await bot.guilds.fetch(serverId);
+    const channel = await guild.channels.fetch(channelId);
+    if (!channel) return { error: 'Channel not found — check the Channel ID.' };
+    if (channel.type === ChannelType.GuildStageVoice) return { error: 'That is a Stage channel — pick a regular voice channel instead.' };
+    if (!channel.isVoiceBased()) return { error: 'That channel is not a voice channel.' };
+    if (!channel.joinable) return { error: 'The bot cannot join that channel — give it View Channel + Connect there (or the channel is full).' };
+    return { guild, channel };
+  } catch (e) { return { error: joinErrorText(e) }; }
+}
+function joinErrorText(e) {
+  const raw = e?.message || String(e);
+  const code = e?.code;
+  if (code === 10004 || /unknown guild/i.test(raw)) return "Bot isn't in that server — invite it there, or pick a channel in a server the bot has joined.";
+  if (code === 10003 || /unknown channel/i.test(raw)) return 'Channel not found — check the Channel ID.';
+  if (code === 50001 || /missing access/i.test(raw)) return 'Missing access — give the bot View Channel + Connect on that channel.';
+  if (code === 50013 || /missing permissions/i.test(raw)) return 'Missing permissions — the bot needs Connect on that voice channel.';
+  return 'Join failed: ' + raw;
+}
+
+// USE: while the bot is online the target is checked FIRST. A target that fails keeps the previous current channel, the voice connection
+// and the roster, and says why in rpc.error; it is saved and joined only after it passes (GRN-204). Offline, the pick is saved as before
+// and the same check runs when the bot logs in (joinCurrentChannel).
 async function setCurrent(serverId, channelId) {
   const sId = String(serverId ?? '').replace(/\D/g, '');
   const cId = String(channelId ?? '').replace(/\D/g, '');
-  state.current = sId && cId ? { serverId: sId, channelId: cId } : null;
-  if (state.current) wantVoice = true; // picking a channel means "be in voice"
+  const next = sId && cId ? { serverId: sId, channelId: cId } : null;
+  let checked = null;
+  if (next && bot && rpc.connected) {
+    checked = await checkTarget(sId, cId);
+    if (checked.error) {
+      rpc.error = checked.error;
+      log(`USE refused: ${checked.error}`);
+      schedulePush();
+      return state.current;
+    }
+  }
+  state.current = next;
+  if (next) { wantVoice = true; rpc.error = ''; } // picking a channel means "be in voice"
   await persist();
   // If the bot is live, move it to the newly-selected channel (or leave voice).
-  if (bot && rpc.connected) joinCurrentChannel().catch((e) => log(`rejoin failed: ${e.message}`));
+  if (bot && rpc.connected) joinCurrentChannel(checked).catch((e) => log(`rejoin failed: ${e.message}`));
   return state.current;
 }
 
@@ -367,6 +410,7 @@ function startBot() {
   // DeprecationWarning on every login.
   client.once('clientReady', () => { onBotReady().catch((e) => log(`ready handler: ${e.message}`)); });
   client.on('voiceStateUpdate', onVoiceStateUpdate);
+  client.on('raw', onRawPacket);
   client.on('error', (e) => log(`bot error: ${e.message}`));
   // discord.js auto-reconnects the gateway; just reflect the state.
   client.on('shardResume', () => { rpc.connected = true; schedulePush(); });
@@ -453,20 +497,23 @@ function destroyVoice() {
   rpc.hostInChannel = false;
 }
 
-async function joinCurrentChannel() {
+// `checked` is the result of checkTarget when the caller (USE) has already run it; at login it is run here.
+async function joinCurrentChannel(checked) {
   if (!bot) return;
   const target = state.current; // { serverId, channelId } | null
-  destroyVoice();
-  voiceUsers = {};
-  if (!target || !target.channelId) { schedulePush(); return; }
+  if (!target || !target.channelId) { destroyVoice(); voiceUsers = {}; schedulePush(); return; }
   try {
-    const guild = await bot.guilds.fetch(target.serverId);
-    const channel = await guild.channels.fetch(target.channelId);
-    if (!channel || !channel.isVoiceBased()) {
-      rpc.error = 'That channel is not a voice channel.';
+    const chk = checked && !checked.error ? checked : await checkTarget(target.serverId, target.channelId);
+    if (chk.error) { // (at login: nothing to keep; the error says why the saved channel cannot be watched)
+      if (!currentChannelId) voiceUsers = {};
+      rpc.error = chk.error;
+      log(rpc.error);
       schedulePush();
       return;
     }
+    const { guild, channel } = chk;
+    destroyVoice(); // only after the target has passed
+    voiceUsers = {};
     seedFromChannel(channel);
     const conn = joinVoiceChannel({
       channelId: channel.id,
@@ -494,19 +541,7 @@ async function joinCurrentChannel() {
     attachReceiver(conn);
     schedulePush();
   } catch (e) {
-    const raw = e?.message || String(e);
-    const code = e?.code;
-    if (code === 10004 || /unknown guild/i.test(raw)) {
-      rpc.error = "Bot isn't in that server — invite it there, or pick a channel in a server the bot has joined.";
-    } else if (code === 10003 || /unknown channel/i.test(raw)) {
-      rpc.error = 'Channel not found — check the Channel ID.';
-    } else if (code === 50001 || /missing access/i.test(raw)) {
-      rpc.error = 'Missing access — give the bot View Channel + Connect on that channel.';
-    } else if (code === 50013 || /missing permissions/i.test(raw)) {
-      rpc.error = 'Missing permissions — the bot needs Connect on that voice channel.';
-    } else {
-      rpc.error = 'Join failed: ' + raw;
-    }
+    rpc.error = joinErrorText(e);
     log(rpc.error);
     schedulePush();
   }
@@ -524,8 +559,9 @@ async function attachReceiver(conn) {
   rpc.hostInChannel = true;
   rpc.error = '';
   const speaking = conn.receiver.speaking;
-  speaking.on('start', (userId) => { try { setSpeaking(userId, true); schedulePush(); } catch (e) { log(`speaking start: ${e.message}`); } });
-  speaking.on('end', (userId) => { try { setSpeaking(userId, false); schedulePush(); } catch (e) { log(`speaking end: ${e.message}`); } });
+  // Bound to THIS connection: after a move or a leave an event from the old one changes nothing (GRN-12).
+  speaking.on('start', (userId) => { try { if (voiceConn !== conn) return; setSpeaking(userId, true); schedulePush(); } catch (e) { log(`speaking start: ${e.message}`); } });
+  speaking.on('end', (userId) => { try { if (voiceConn !== conn) return; setSpeaking(userId, false); schedulePush(); } catch (e) { log(`speaking end: ${e.message}`); } });
   log(`Joined voice channel ${currentChannelId} (${Object.keys(voiceUsers).length} present)`);
   schedulePush();
 }
@@ -541,15 +577,47 @@ function seedFromChannel(channel) {
 function onVoiceStateUpdate(oldState, newState) {
   try {
     if (!currentChannelId) return;
-    const member = newState.member || oldState.member;
-    if (!member || member.user?.bot) return; // ignore bots (incl. ourselves)
+    // Departures first, by user id: a guest who was invited into the call has no cached member (GRN-210).
+    const id = newState.id || oldState.id;
     const inNow = newState.channelId === currentChannelId;
     const wasIn = oldState.channelId === currentChannelId;
-    if (inNow) { upsertMember(member); schedulePush(); }
-    else if (wasIn) {
-      if (voiceUsers[member.id]) { delete voiceUsers[member.id]; schedulePush(); }
+    if (!inNow) {
+      if (id && voiceUsers[id]) { delete voiceUsers[id]; schedulePush(); }
+      return;
     }
+    const member = newState.member || oldState.member;
+    if (!member || member.user?.bot) return; // ignore bots (incl. ourselves)
+    upsertMember(member); schedulePush();
+    void wasIn;
   } catch (e) { log(`voice state update: ${e.message}`); }
+}
+
+// A guest invited into the call has no joined_at, so discord.js does not keep them as a member: the raw VOICE_STATE_UPDATE carries
+// the name, the avatar and the flags (GRN-210). Only for the working channel; bots are skipped. A full member is filled in properly
+// by onVoiceStateUpdate right after.
+function onRawPacket(packet) {
+  try {
+    if (!packet || packet.t !== 'VOICE_STATE_UPDATE' || !currentChannelId) return;
+    const d = packet.d;
+    if (!d || d.channel_id !== currentChannelId) return;
+    const u = d.member && d.member.user ? d.member.user : null;
+    const id = String((u && u.id) || d.user_id || '');
+    if (!id || (u && u.bot) || voiceUsers[id]) return;
+    const entry = {
+      speaking: false,
+      username: clean((d.member && d.member.nick) || (u && (u.global_name || u.username)) || '', 80),
+      avatarUrl: buildAvatarUrl(id, (u && u.avatar) || null),
+      mute: !!(d.mute || d.self_mute),
+      deaf: !!(d.deaf || d.self_deaf),
+    };
+    // After discord.js has handled the packet: a member it knows is filled in by onVoiceStateUpdate (with the right avatar); only a
+    // user it did not keep (a guest) is added here.
+    setImmediate(() => {
+      if (stopping || voiceUsers[id] || currentChannelId !== d.channel_id) return;
+      voiceUsers[id] = entry;
+      schedulePush();
+    });
+  } catch (e) { log(`raw voice state: ${e.message}`); }
 }
 
 function upsertMember(member) {
@@ -558,8 +626,12 @@ function upsertMember(member) {
   const id = user.id;
   const prev = voiceUsers[id] || {};
   let avatarUrl;
-  try { avatarUrl = user.displayAvatarURL({ extension: 'png', size: 256 }); }
-  catch { avatarUrl = buildAvatarUrl(id, user.avatar ?? null); }
+  // The member's own picture first (a per-server avatar), the account's after it.
+  try { avatarUrl = member.displayAvatarURL({ extension: 'png', size: 256 }); }
+  catch {
+    try { avatarUrl = user.displayAvatarURL({ extension: 'png', size: 256 }); }
+    catch { avatarUrl = buildAvatarUrl(id, user.avatar ?? null); }
+  }
   const vs = member.voice || {};
   voiceUsers[id] = {
     speaking: prev.speaking || false,
@@ -572,10 +644,7 @@ function upsertMember(member) {
 
 function setSpeaking(userId, val) {
   const id = String(userId ?? '');
-  if (!id) return;
-  if (!voiceUsers[id]) {
-    voiceUsers[id] = { speaking: false, username: '', avatarUrl: buildAvatarUrl(id, null), mute: false, deaf: false };
-  }
+  if (!id || !voiceUsers[id]) return; // only a member of the working channel has a speaking flag (GRN-12)
   voiceUsers[id].speaking = !!val;
 }
 
@@ -714,6 +783,7 @@ function dispatch(command, value) {
         if (TEST_HOOKS && command === 'test-throw-sync') throw new Error('forced synchronous throw');
         if (TEST_HOOKS && command === 'test-throw') { setTimeout(() => { throw new Error(value || 'forced throw from a timer'); }, 10); return; }
         if (TEST_HOOKS && command === 'test-block-log') { if (logWorker) logWorker.postMessage({ block: true }); return; }
+        if (TEST_HOOKS && command === 'test-speaking') { setSpeaking(value, true); schedulePush(); return; }
         if (TEST_HOOKS && command === 'test-reject') { Promise.reject(new Error('forced rejection')); return; }
         if (TEST_HOOKS && command === 'test-signal') { process.emit(String(value), String(value)); return; }
         log(`unknown command "${clean(command, 40)}" — ignored`); // mock-burst etc. are mock-only

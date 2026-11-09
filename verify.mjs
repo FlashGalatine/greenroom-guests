@@ -1836,6 +1836,115 @@ async function main() {
           fx.close();
           await new Promise((res) => fg.close(res)); fr.close();
         }
+
+        // ── 8c. the voice target is checked before the working channel is left (Sprint 13a) ──
+        // A mock Discord that completes identify, lists one guild in READY and dispatches GUILD_CREATE (voice, text, Stage and locked
+        // channels, the bot's own member, one member already in voice) and, on request, VOICE_STATE_UPDATE: all through the REAL
+        // discord.js handlers. The bridge dials it through DISCORD_BRIDGE_API (loopback only). Every Sprint 13a and 13b case runs on it.
+        console.log('\n[8c] voice target: validate before leaving the working channel, Stage, removed favorite, guests, avatars');
+        {
+          const GUILD = '900', ME = '1000';
+          const VIEW = 1n << 10n, CONNECT = 1n << 20n, SPEAK = 1n << 21n;
+          const userOf = (id, name, x = {}) => ({ id, username: name, discriminator: '0', avatar: x.avatar || null, bot: !!x.bot, global_name: x.global || null });
+          const memberOf = (id, name, x = {}) => ({ user: userOf(id, name, x), nick: x.nick || null, roles: [], joined_at: x.guest ? null : '2020-01-01T00:00:00.000000+00:00', deaf: false, mute: !!x.mute, ...(x.guildAvatar ? { avatar: x.guildAvatar } : {}) });
+          const vstate = (userId, channelId, x = {}) => ({ user_id: userId, channel_id: channelId, guild_id: GUILD, deaf: false, mute: false, self_deaf: false, self_mute: !!x.selfMute, session_id: 's' + userId, suppress: false, self_video: false, self_stream: false, request_to_speak_timestamp: null, ...(x.member ? { member: x.member } : {}) });
+          const chan = (id, type, name, pos, over = []) => ({ id, type, name, position: pos, permission_overwrites: over, bitrate: 64000, user_limit: 0, guild_id: GUILD });
+          const guildCreate = () => ({
+            id: GUILD, name: 'Mock Guild', icon: null, owner_id: '2000', afk_timeout: 300, verification_level: 0, default_message_notifications: 0, explicit_content_filter: 0,
+            roles: [{ id: GUILD, name: '@everyone', permissions: String(VIEW | CONNECT | SPEAK), position: 0, color: 0, hoist: false, managed: false, mentionable: false }],
+            emojis: [], features: [], mfa_level: 0, system_channel_id: null, premium_tier: 0, premium_subscription_count: 0, preferred_locale: 'en-US', nsfw_level: 0,
+            large: false, unavailable: false, member_count: 2, joined_at: '2020-01-01T00:00:00.000000+00:00', threads: [], stage_instances: [], guild_scheduled_events: [], presences: [],
+            channels: [chan('910', 2, 'voice-ok', 0), chan('911', 0, 'text', 1), chan('912', 13, 'stage', 2), chan('913', 2, 'locked', 3, [{ id: GUILD, type: 0, allow: '0', deny: String(VIEW | CONNECT) }]), chan('914', 2, 'second', 4)],
+            members: [memberOf(ME, 'mockbot', { bot: true }), memberOf('2001', 'Alice')],
+            voice_states: [vstate('2001', '910')],
+          });
+          const socks = new Set();
+          let seq = 0;
+          const send = (ws, t, d) => { try { ws.send(JSON.stringify({ op: 0, t, s: ++seq, d })); } catch { /* gone */ } };
+          const dispatchAll = (t, d) => { for (const ws of socks) send(ws, t, d); };
+          const gw = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+          gw.on('connection', (ws) => {
+            socks.add(ws); ws.on('close', () => socks.delete(ws)); ws.on('error', () => {});
+            ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45000 } }));
+            ws.on('message', (raw) => {
+              let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+              if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
+              if (m.op === 2) {
+                send(ws, 'READY', { v: 10, user: userOf(ME, 'mockbot', { bot: true }), guilds: [{ id: GUILD, unavailable: true }], session_id: 'mock', resume_gateway_url: `ws://127.0.0.1:${gw.address().port}`, application: { id: ME, flags: 0 } });
+                setTimeout(() => send(ws, 'GUILD_CREATE', guildCreate()), 50);
+              }
+            });
+          });
+          await new Promise((res) => gw.once('listening', res));
+          const restSrv = createHttp((req, res) => {
+            res.setHeader('content-type', 'application/json');
+            if (/gateway\/bot/.test(req.url)) return res.end(JSON.stringify({ url: `ws://127.0.0.1:${gw.address().port}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }));
+            res.statusCode = 404; res.end(JSON.stringify(/\/channels\//.test(req.url) ? { code: 10003, message: 'Unknown Channel' } : { code: 10004, message: 'Unknown Guild' })); // any guild/channel REST lookup: the guilds that exist came with GUILD_CREATE
+          });
+          await new Promise((res) => restSrv.listen(0, '127.0.0.1', res));
+          const cfgGood = JSON.stringify({ favorites: [{ id: 'f914', name: 'second', serverId: GUILD, channelId: '914' }], current: { serverId: GUILD, channelId: '910' }, settings: {} });
+          const t = await rig({ token: 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC', cfgText: cfgGood, env: { DISCORD_BRIDGE_API: `http://127.0.0.1:${restSrv.address().port}/api` } });
+          try {
+            t.cmd('connect');
+            const inGood = await t.waitFor((p) => p.connected === true && p.channelId === '910' && p.users['2001'], 8000);
+            check('GRN-204 (harness): on the mock Discord the bot identifies, receives GUILD_CREATE through the real handlers and joins the saved channel with its roster (Alice)', !!inGood && inGood.users['2001'].username === 'Alice', JSON.stringify(inGood && Object.keys(inGood.users)));
+            const mark = t.got.length;
+            const use = async (serverId, channelId) => { t.cmd('set-current', JSON.stringify({ serverId, channelId })); await nap(900); return t.got.slice(mark).pop() || t.last; };
+            const unchanged = (p) => p && p.current && p.current.serverId === GUILD && p.current.channelId === '910' && p.channelId === '910' && p.users['2001'] && p.users['2001'].username === 'Alice';
+            const savedCurrent = async () => JSON.parse(await readFile(t.env.DISCORD_BRIDGE_CONFIG, 'utf8')).current;
+            const bads = [
+              ['a guild the bot is not in', '999', '910', /isn.t in that server|unknown guild|not in/i],
+              ['a text channel', GUILD, '911', /not a voice channel/i],
+              ['a Stage channel', GUILD, '912', /regular voice channel/i],
+              ['a channel the bot cannot join', GUILD, '913', /cannot join|Connect|View Channel/i],
+              ['a channel that does not exist', GUILD, '999999', /not found|Unknown Channel/i],
+            ];
+            for (const [what, sId, cId, msg] of bads) {
+              const p = await use(sId, cId);
+              const saved = await savedCurrent();
+              check('GRN-204/80: USE on ' + what + ' is refused with a message, and the working channel, the roster and the saved current stay as they were',
+                unchanged(p) && msg.test((p.rpc && p.rpc.error) || '') && saved.channelId === '910', JSON.stringify({ current: p && p.current, channelId: p && p.channelId, users: p && Object.keys(p.users || {}), err: p && p.rpc && p.rpc.error, saved }));
+            }
+            const m2 = t.got.length;
+            t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '914' })); await nap(900);
+            const moved = t.got.slice(m2).pop() || t.last;
+            const saved2 = await savedCurrent();
+            check('GRN-204: USE on a valid channel is accepted: it becomes the current channel, is saved, the roster is that channel\'s (empty) and the old error is gone', moved.current.channelId === '914' && moved.channelId === '914' && Object.keys(moved.users).length === 0 && !(moved.rpc && moved.rpc.error) && saved2.channelId === '914', JSON.stringify({ current: moved.current, channelId: moved.channelId, saved2 }));
+            // removing the active favorite makes the bot leave (GRN-153)
+            t.cmd('favorite-remove', JSON.stringify({ id: 'f914' })); await nap(900);
+            const removed = t.last;
+            const saved3 = await savedCurrent();
+            check('GRN-153: removing the favorite that is the current channel clears the current channel and leaves voice', removed.current === null && removed.channelId === null && Object.keys(removed.users).length === 0 && !removed.favorites.some((f) => f.id === 'f914') && saved3 === null, JSON.stringify({ current: removed.current, channelId: removed.channelId, saved3 }));
+            // back to 910 for the roster cases
+            const waitAfter = async (mark, pred, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = t.got.slice(mark).find(pred); if (hit) return hit; await nap(100); } return null; };
+            const mkBack = t.got.length;
+            t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
+            await waitAfter(mkBack, (p) => p.channelId === '910' && p.users['2001'], 4000);
+            // a guest-invite user joins and leaves, a member with a per-server avatar joins, a member departs (GRN-210, 166)
+            const mkGuest = t.got.length;
+            dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '910', { member: memberOf('3001', 'guestuser', { guest: true, nick: 'GuestNick', global: 'Guest G' }) }));
+            const guestIn = await waitAfter(mkGuest, (p) => p.users['3001'], 3000);
+            check('GRN-210: a guest-invite user (no joined_at) who joins the working channel appears with their nickname', !!guestIn && guestIn.users['3001'].username === 'GuestNick', JSON.stringify(guestIn && guestIn.users['3001']));
+            dispatchAll('VOICE_STATE_UPDATE', vstate('3001', null, { member: memberOf('3001', 'guestuser', { guest: true, nick: 'GuestNick' }) }));
+            await nap(600);
+            check('GRN-210: …and is removed when they leave', !t.last.users['3001'], JSON.stringify(Object.keys(t.last.users)));
+            dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
+            const carol = await t.waitFor((p) => p.users['2002'] && /\/guilds\/900\//.test(p.users['2002'].avatarUrl), 3000) || t.last;
+            check('GRN-166: a member with a per-server avatar shows it (the guild avatar path), not the account avatar', !!carol && /\/guilds\/900\/users\/2002\/avatars\/abc123def/.test(carol.users['2002'].avatarUrl), JSON.stringify(carol && carol.users['2002']));
+            dispatchAll('VOICE_STATE_UPDATE', vstate('2001', '914'));
+            await nap(600);
+            check('GRN-210: a member who moves to another channel leaves the roster of the working channel', !t.last.users['2001'] && !!t.last.users['2002'], JSON.stringify(Object.keys(t.last.users)));
+            // only known members get a speaking flag (GRN-12)
+            t.cmd('test-speaking', '9999999');
+            await nap(500);
+            t.cmd('test-speaking', '2002');
+            const spk = await t.waitFor((p) => p.users['2002'] && p.users['2002'].speaking === true, 3000);
+            check('GRN-12: a speaking event for a user who is not in the roster does not add them; one for a member sets the flag', !t.last.users['9999999'] && !!spk, JSON.stringify(Object.keys(t.last.users)));
+          } finally {
+            t.close();
+            await new Promise((res) => gw.close(res)); restSrv.close();
+          }
+        }
       } finally {
         for (const r of live) { r.close(); try { r.sb.child.kill(); } catch {} }
       }

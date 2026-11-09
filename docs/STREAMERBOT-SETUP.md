@@ -243,6 +243,14 @@ Webcam-only users skip this whole section — nothing else depends on it.
    `GREENROOM_GUARD_PORT` and `GREENROOM_EXIT_ON_SB_CLOSE`. The `Discord Bridge
    Start` action cannot set environment variables: do not launch the bridge with
    a "Run a Program" sub-action that sets some, or waits for exit.
+   The channel must be a **regular voice channel (not a Stage)** in a server the bot
+   is in, and one the bot can join. **USE** checks that first: a channel that fails
+   (wrong server, a text channel, a Stage, no View Channel + Connect, a full
+   channel) shows the reason in the status line and changes nothing: the bot
+   stays in the channel it was in, with its roster. Removing the favorite that is
+   the current channel makes the bot leave it. Guests invited into a call (they
+   are not server members) appear in the roster by their nickname, and members
+   show their per-server avatar.
 5. In the control page: save a favorite (server ID / voice channel ID), press
    **USE**, then **Connect**. The pill should go `in voice · N present`.
 

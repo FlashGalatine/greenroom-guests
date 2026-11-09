@@ -331,10 +331,10 @@ absent, is dropped (only the types are logged): anyone on the bus can send any J
 | `connect` | — | (re)start the bot with the FILE token; visible error if none |
 | `leave` | — | leave voice gracefully, stay logged in, clear auto-rejoin intent |
 | `reset-auth` | — | forget the saved token (file keeps `enabled`) |
-| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live) |
+| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join. A target that fails is refused with a message in `rpc.error` and **changes nothing**: the current channel, the voice connection and the roster stay. Offline, the pick is saved and the same check runs when the bot logs in |
 | `favorite-add` | `{"name","serverId","channelId"}` | add favorite |
 | `favorite-update` | `{"id", …fields}` | edit favorite |
-| `favorite-remove` | `{"id"}` | remove favorite |
+| `favorite-remove` | `{"id"}` | remove favorite; removing the one that is the current channel clears the current channel and leaves voice |
 | `set-settings` | partial settings object | merge + clamp + persist |
 | `quit` | — | leave voice, send the clearing state and exit (code 0): the clean stop |
 
