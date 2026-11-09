@@ -912,7 +912,7 @@ async function main() {
     // skip (GRN-65 step 2): labels / users this page has already auto-added are not appended a second time, but a Discord id is still filled in
     const sk = D.autoPopulate({ directory: [{ vdoLabel: '', discordUserId: '', displayName: 'Ashe of Outland', socials: [], auto: true }], ignored: [],
       labels: ['BRAVO', 'CHARLIE'], users: { '110457699291906048': { username: 'Ashe of Outland' }, '200000000000000001': { username: 'Guest One' } },
-      skip: ['vdo:bravo', 'discord:200000000000000001'] });
+      skip: ['vdo:BRAVO', 'discord:200000000000000001'] });
     check('autoPopulate: a label or user in opts.skip is not appended again (a label Streamer.bot rewrites cannot loop)',
       !sk.directory.some((e) => /^bravo$/i.test(e.vdoLabel)) && !sk.directory.some((e) => e.discordUserId === '200000000000000001') && sk.directory.some((e) => e.vdoLabel === 'CHARLIE'), JSON.stringify(sk.directory));
     check('autoPopulate: …while skip leaves the fill of a Discord id on an existing entry alone',
@@ -995,6 +995,8 @@ async function main() {
       const tw4 = D.autoPopulate({ directory: [{ vdoLabel: 'alpha', displayName: 'A', auto: false }], ignored: [], labels: ['ALPHA'], users: {} });
       check('GRN-147: an exact entry is kept and only the case twin is added; a lone live label matches an entry ignoring case (no twin)',
         tw3.directory.length === 2 && tw3.directory[1].vdoLabel === 'alpha' && tw4.directory.length === 1 && tw4.changed === false);
+      const twSkip = D.autoPopulate({ directory: [], ignored: [], labels: ['ALPHA', 'alpha'], users: {}, skip: ['vdo:ALPHA'] });
+      check('GRN-147: the session skip key keeps case: an auto-added ALPHA does not stop the case twin alpha from being added', twSkip.directory.length === 1 && twSkip.directory[0].vdoLabel === 'alpha' && D.labelExactKey('ALPHA') === 'vdo:ALPHA');
       const esc = D.autoPopulate({ directory: [{ vdoLabel: 'Tom & Jerry', displayName: 'TJ', auto: false }], ignored: [], labels: ['Tom &amp;amp; Jerry'], users: {} });
       const esc2 = D.autoPopulate({ directory: [], ignored: [], labels: ['Tom &amp;amp; Jerry'], users: {} });
       check('GRN-205: a double-escaped label matches its entry; a new auto entry is named by the DECODED label while vdoLabel stays raw',

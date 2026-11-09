@@ -142,12 +142,25 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   plus `directory`, and ignores the rest.
 - **`directory` (guest directory → nameplates).** Each entry maps a guest to a
   preferred on-stream `displayName` + optional social handles. Match keys —
-  either or both: `vdoLabel` (compared against `slots[].label`, stored as typed
-  but matched **case-insensitively**) and `discordUserId` (exact snowflake
-  string, digits-only). Entries missing `displayName` or missing both keys are
+  either or both: `vdoLabel` (compared against `slots[].label`, stored as typed)
+  and `discordUserId` (exact snowflake string, digits-only). **Labels are
+  compared through one key** that both lookups (the control pages and the
+  overlays) build the same way: vdo.ninja's HTML escaping is decoded (it escapes
+  twice, `Tom &amp;amp; Jerry` is `Tom & Jerry`), `_` reads as a space, text is
+  NFC-normalised, invisible characters (zero-width joiners and spaces, the soft
+  hyphen) are dropped and whitespace is collapsed. Two labels are **exactly
+  equal** when that key is equal and **equal ignoring case** when its lower-case
+  form is. The key is used for comparing only: the label stays as typed, and a
+  slot keeps the raw label it was picked from. When several entries match a
+  label the lookup prefers the exact-case one, then a curated entry over an
+  auto one, then the first in the array; labels that differ only in case can have
+  separate entries. A Discord user id is matched on its digits, and a curated
+  entry beats an auto one. Entries missing `displayName` or missing both keys are
   dropped by the assemblers' sanitizers. `socials[].platform` is lowercase
   (`twitch` `discord` `twitter` `bluesky` `youtube` `instagram` `tiktok`
-  `website`; unknown → globe icon); `handle` is verbatim. Consumers: the guest
+  `website`; the short names `x` `yt` `ig` `bsky` `tt` are accepted; unknown → globe
+  icon); `handle` is verbatim. In the dock's textarea a social is one line, the
+  platform then the handle, split at the first whitespace (space, tab or NBSP). Consumers: the guest
   overlay's built-in lower-third, the standalone `nameplate.html?slot=N`
   source, and the roster overlay's chip-name override. A guest with **no
   matching entry gets no nameplate** (no raw-label fallback); a webcam slot's
@@ -164,15 +177,28 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   joins mid-stream has a nameplate without an operator present. `auto` means "this
   name is a placeholder"; the control page badges those rows and clears the flag
   the moment the operator edits any field of the entry. A Discord user whose username equals an
-  existing entry's `displayName` or `vdoLabel` fills that entry's empty
-  `discordUserId` instead of creating a twin. A page appends a given label or voice
+  existing **auto** entry's `displayName` or `vdoLabel` fills that entry's empty
+  `discordUserId` instead of creating a twin, and a guest who joined the voice
+  channel first takes the label of their auto entry when they join the VDO room
+  (merge in both directions, auto entries only). A **curated** entry is never
+  linked by name: Discord names are self-chosen, so anyone can be called "Bob".
+  The dock offers the link on the row ("link <name> (<id>)?"): accepting sets
+  the `discordUserId`, rejecting adds `discord:<id>` to `directoryIgnored`. Until
+  the operator accepts, the guest's roster chip shows the raw Discord name and a
+  discord-mode slot bound to them shows no plate. Auto entries are capped at 50:
+  at the cap the first auto entry that is not in the room and not in a slot is
+  dropped to make room, curated entries never are, and the dock says "auto-add
+  limit reached" when someone could not be added. A Discord user with no name
+  yet is added when the name arrives (never stored under the snowflake), and a
+  label that draws nothing (zero-width characters, U+2800) is not added. A page appends a given label or voice
   user at most once per page session (so a label that Streamer.bot rewrites on the
   way back cannot make the pages push at each other); **Un-ignore removed**,
   **Clear auto-added** and an Import reset that, and adopting another page's state
   runs no auto-add of its own (the next poll or voice update does).
   `directoryAutoAdd: false` disables the whole pass (absent → **on**, so
   pre-upgrade `vdo.state` blobs opt in). `directoryIgnored` is the
-  anti-resurrection list — sorted, deduped keys `vdo:<lowercased label>` /
+  anti-resurrection list — sorted, deduped keys `vdo:<label key>` (the comparison
+  key above, lower-cased, so `vdo:guest_one` and `vdo:guest one` are the same) /
   `discord:<snowflake>` that auto-add always skips; the control page adds a key
   when the operator removes an entry or clears one of its match keys, and its
   "Un-ignore removed" button empties the list. The pass is a **fixpoint** and

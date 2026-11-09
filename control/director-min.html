@@ -271,11 +271,12 @@
       labels: roster.map((g) => g.label),
       users: discordUsers,
       skip: [...autoAdded],
+      boundLabels: cfg.slots.map((s) => s.label).filter(Boolean), // a guest in a slot is never evicted from the auto entries
+      boundUsers: cfg.slots.map((s) => s.discordUserId).filter(Boolean),
     });
-    if (!res.changed) return false;
-    for (let i = cfg.directory.length; i < res.directory.length; i++) {
-      const e = res.directory[i];
-      if (e.vdoLabel) autoAdded.add(GRDir.labelKey(e.vdoLabel));
+    if (!res.changed) return false; // (suggestions are for the dock: this page only follows what changes the book)
+    for (const e of res.appended) {
+      if (e.vdoLabel) autoAdded.add(GRDir.labelExactKey(e.vdoLabel));
       if (e.discordUserId) autoAdded.add(GRDir.userKey(e.discordUserId));
     }
     cfg.directory = res.directory;

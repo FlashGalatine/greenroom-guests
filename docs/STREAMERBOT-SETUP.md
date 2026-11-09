@@ -172,6 +172,16 @@ drop the guest for good (undo with **Un-ignore removed**), or untick **auto-add
 guests** to stop inventing names at all — see docs/PROTOCOL.md for the
 `directoryAutoAdd` / `directoryIgnored` wire fields.
 
+Labels are matched ignoring case, `_` versus a space and vdo.ninja's HTML
+escaping (`Guest_One` is `Guest One`), and two labels that differ only in case
+can be two guests. A row you have **named yourself is never linked to a Discord
+user by name** (Discord names are self-chosen): when a voice user has the same
+name the row offers "link <name> (<id>)?" for you to accept or reject. Until you
+accept, that guest's roster chip shows the raw Discord name and a discord-mode
+slot bound to them shows no plate. At most 50 auto-added entries are kept; at
+the limit the dock says so (the ones for guests no longer in the room, and not
+in a slot, make way first; entries you named never do).
+
 ## 5. The Discord bridge sidecar (optional)
 
 Webcam-only users skip this whole section — nothing else depends on it.

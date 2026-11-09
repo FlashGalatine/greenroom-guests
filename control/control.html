@@ -109,7 +109,9 @@
   .dir-meta { flex: 2 1 18ch; min-width: 0; color: var(--dim); font-size: 11px;
     font-family: Consolas, monospace; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; cursor: pointer; }
-  .dir-hint { flex: none; font-size: 11px; color: var(--amber); }
+  .dir-hint, .dir-note, .dir-dup { flex: none; font-size: 11px; color: var(--amber); }
+  .dir-suggest { flex: none; font-size: 11px; color: var(--cyan); display: inline-flex; gap: 6px; align-items: center; }
+  .dir-suggest button { padding: 1px 8px; font-size: 11px; }
   .dir-badge { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
     padding: 2px 7px; border-radius: 99px; border: 1px solid var(--amber); color: var(--amber); }
   .vdo-dir-remove { border-color: var(--red); color: var(--red); padding: 3px 9px; flex: none; }
@@ -1189,7 +1191,7 @@
   // place, and while the operator is inside the editor the rows are not redrawn but
   // marked stale (dirStale) and redrawn when focus leaves.
   function entryLive(entry, liveSet, users) {
-    const vdo = !!(entry.vdoLabel && liveSet.has(String(entry.vdoLabel).trim().toLowerCase()));
+    const vdo = !!(entry.vdoLabel && liveSet.has(GRDir.fold(entry.vdoLabel))); // the same comparison key as the lookups: '_' is a space, escapes decode, case folds
     const disc = !!(entry.discordUserId && users[entry.discordUserId]);
     return { vdo, disc, any: vdo || disc };
   }
@@ -1271,10 +1273,13 @@
     } catch (_) { return []; }
   }
 
+  // Characters that draw nothing (zero-width, Braille blank, ...) are shown as <U+XXXX> where a label is listed, so two labels that look the
+  // same but are not can be told apart.
+  const showInvisible = (t) => String(t ?? '').replace(/[\p{Default_Ignorable_Code_Point}\u2800]/gu, (ch) => '<U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '>');
   const metaText = (entry, u) => {
     const bits = [];
     if (isDraft(entry)) bits.push(entry.displayName ? 'not saved: add a VDO label or Discord user' : 'not saved: add an on-stream name');
-    if (entry.vdoLabel) bits.push('label ' + entry.vdoLabel);
+    if (entry.vdoLabel) bits.push('label ' + showInvisible(entry.vdoLabel));
     if (entry.discordUserId) bits.push('discord ' + ((u && u.username) || entry.discordUserId));
     const nSoc = (entry.socials || []).length;
     if (nSoc) bits.push(nSoc + (nSoc === 1 ? ' social' : ' socials'));
@@ -1286,7 +1291,14 @@
     const l0 = document.createElement('option');
     l0.value = ''; l0.textContent = live.length ? 'live labels…' : '(no guests live)';
     sel.appendChild(l0);
-    for (const l of live) { const o = document.createElement('option'); o.value = l; o.textContent = l; sel.appendChild(o); }
+    const keyCount = new Map();
+    for (const l of live) keyCount.set(GRDir.fold(l), (keyCount.get(GRDir.fold(l)) || 0) + 1);
+    for (const l of live) {
+      const o = document.createElement('option');
+      o.value = l;
+      o.textContent = showInvisible(l) + (keyCount.get(GRDir.fold(l)) > 1 ? ' (same as another label ignoring case or spacing)' : '');
+      sel.appendChild(o);
+    }
   }
   function fillUserPick(sel, userOpts) {
     sel.replaceChildren();
@@ -1318,12 +1330,16 @@
   let dirStale = false; // a redraw held back because focus is inside the editor; it runs when focus leaves the container
   let dirLiveSig = '';
   const dirHints = new Set(); // entries whose row says "use × to remove" (a cleared name that was put back)
+  const dirNotes = new Map(); // entry id -> a note on its row (a socials line that could not be read)
+  const dirSuggest = new Map(); // entry id -> { id, username }: a Discord user whose name matches this CURATED entry (offered, never applied)
+  let autoLimitHit = false; // the last auto-add pass could not add everyone: AUTO_MAX auto entries already exist
+  const noteEl = (text, cls) => { const h = document.createElement('span'); h.className = cls || 'dir-note'; h.textContent = text; return h; };
   const hintEl = () => { const h = document.createElement('span'); h.className = 'dir-hint'; h.textContent = 'use × to remove'; return h; };
   // The counts, the pill and the footer buttons come from cfg, not the DOM, so they stay honest even when the rows are not redrawn
   // (focus is inside the editor) and can be refreshed after a commit without touching the rows under the operator.
   function renderDirectoryCounts() {
     const live = rosterLabels();
-    const liveSet = new Set(live.map((l) => l.toLowerCase()));
+    const liveSet = new Set(live.map((l) => GRDir.fold(l)));
     const users = (discord && discord.users) || {};
     const terms = els.dirSearch.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const liveOnly = els.dirLiveOnly.checked;
@@ -1340,7 +1356,10 @@
       visible.push({ entry, st });
     });
     const total = cfg.directory.length - unsaved; // saved guests; the drafts are counted on their own
-    const unsavedTxt = unsaved ? ` · ${unsaved} unsaved` : '';
+    const twinGroups = new Map();
+    for (const l of live) { const f = GRDir.fold(l); if (!twinGroups.has(f)) twinGroups.set(f, new Set()); twinGroups.get(f).add(GRDir.canon(l)); }
+    const twins = [...twinGroups.values()].filter((g) => g.size > 1).length;
+    const unsavedTxt = (unsaved ? ` · ${unsaved} unsaved` : '') + (twins ? ' · live labels differ only in case' : '') + (autoLimitHit ? ` · auto-add limit reached (${GRDir.AUTO_MAX})` : '');
     setPill(els.dirCount,
       (total === 0 && !unsaved) ? 'no guests'
         : (terms.length || liveOnly) ? `${visible.length} of ${total + unsaved} shown · ${liveCount} live${unsavedTxt}`
@@ -1357,7 +1376,7 @@
   function renderDirectory(force) {
     const { live, liveSet, users, terms, liveOnly, visible, total, unsaved } = renderDirectoryCounts();
 
-    const sig = JSON.stringify({ dir: cfg.directory, shown: visible.map((v) => v.entry[LID]), q: terms, liveOnly, open: [...dirOpen].sort((a, b) => a - b) });
+    const sig = JSON.stringify({ dir: cfg.directory, shown: visible.map((v) => v.entry[LID]), q: terms, liveOnly, open: [...dirOpen].sort((a, b) => a - b), sg: [...dirSuggest], nt: [...dirNotes] });
     const liveSig = JSON.stringify({ live, dusers: discordUsersSig() });
     if (!force && sig === dirSig && els.directory.childElementCount) {
       if (liveSig !== dirLiveSig) { dirLiveSig = liveSig; updateDirectoryLive(live, liveSet, users); } // membership only: in place
@@ -1392,6 +1411,14 @@
       f.append(l, ...controls);
       return f;
     };
+
+    // two rows with the same label (same key, same case) or the same Discord user are flagged: the lookups pick one of them (GRN-62)
+    const labelCount = new Map();
+    const idCount = new Map();
+    for (const e of cfg.directory) {
+      if (e.vdoLabel) labelCount.set(GRDir.canon(e.vdoLabel), (labelCount.get(GRDir.canon(e.vdoLabel)) || 0) + 1);
+      if (e.discordUserId) idCount.set(e.discordUserId, (idCount.get(e.discordUserId) || 0) + 1);
+    }
 
     for (const { entry, st } of visible) {
       const open = dirOpen.has(entry[LID]);
@@ -1442,6 +1469,22 @@
         head.appendChild(badge);
       }
       if (dirHints.has(entry[LID])) head.appendChild(hintEl());
+      if (dirNotes.has(entry[LID])) head.appendChild(noteEl(dirNotes.get(entry[LID])));
+      if (entry.vdoLabel && labelCount.get(GRDir.canon(entry.vdoLabel)) > 1) head.appendChild(noteEl('shared label', 'dir-dup'));
+      if (entry.discordUserId && idCount.get(entry.discordUserId) > 1) head.appendChild(noteEl('shared Discord ID', 'dir-dup'));
+      const sg = dirSuggest.get(entry[LID]);
+      if (sg && !entry.discordUserId) { // a Discord user with this entry's name: offered, never applied (anyone can pick any Discord name)
+        const box = document.createElement('span');
+        box.className = 'dir-suggest';
+        const q = document.createElement('span');
+        q.textContent = `link ${sg.username} (${sg.id})?`;
+        const yes = document.createElement('button');
+        yes.type = 'button'; yes.className = 'vdo-dir-link-yes'; yes.textContent = 'link';
+        const no = document.createElement('button');
+        no.type = 'button'; no.className = 'vdo-dir-link-no'; no.textContent = 'not them';
+        box.append(q, yes, no);
+        head.appendChild(box);
+      }
 
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
@@ -1470,7 +1513,7 @@
       socialsTa.className = 'vdo-dir-socials';
       socialsTa.rows = 2;
       socialsTa.spellcheck = false;
-      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social';
+      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social\n(one per line: platform, then handle. Platforms: twitch, youtube/yt, x/twitter, bluesky/bsky, instagram/ig, tiktok/tt, discord; anything else gets a globe)';
       socialsTa.value = GRDir.socialsToText(entry.socials);
 
       const body = document.createElement('div');
@@ -1600,9 +1643,19 @@
       touched = true;
     }
     if (raw.socials !== b.socials) {
-      e.socials = GRDir.carrySocialExtras(e.socials, GRDir.parseSocialsText(raw.socials));
+      const parsed = GRDir.parseSocialsText(raw.socials);
+      e.socials = GRDir.carrySocialExtras(e.socials, parsed);
       b.socials = raw.socials;
       touched = true;
+      // lines that are not "platform handle" are not saved: say so, and the box shows what was saved once the row is left
+      const lines = raw.socials.split(/\r?\n/).filter((l) => l.trim()).length;
+      const lost = lines - parsed.length;
+      row.querySelectorAll('.dir-note').forEach((n) => n.remove());
+      if (lost > 0) {
+        const msg = lost + (lost === 1 ? ' line' : ' lines') + ' ignored - use "platform handle", e.g. twitch bob';
+        dirNotes.set(e[LID], msg);
+        row.querySelector('.dir-head').insertBefore(noteEl(msg), row.querySelector('.vdo-dir-remove'));
+      } else dirNotes.delete(e[LID]);
     }
     if (touched) {
       e.auto = false; // naming or changing a guest yourself makes the entry yours; the placeholder badge goes at once
@@ -1622,7 +1675,7 @@
   // Per-session record of what this page has auto-added (GRN-65 step 2): a label or user is appended once. A label that Streamer.bot
   // rewrites on the way back would otherwise look new on every poll and loop.
   const autoAdded = new Set();
-  const addedKeys = (e) => [e.vdoLabel && GRDir.labelKey(e.vdoLabel), e.discordUserId && GRDir.userKey(e.discordUserId)].filter(Boolean);
+  const addedKeys = (e) => [e.vdoLabel && GRDir.labelExactKey(e.vdoLabel), e.discordUserId && GRDir.userKey(e.discordUserId)].filter(Boolean);
 
   // Append placeholder entries for whoever is live and unknown, and fill in Discord ids on existing entries; returns true when
   // cfg.directory changed (the caller pushes). It works on cfg.directory plus the keys each row on screen is showing right now
@@ -1643,20 +1696,35 @@
       labels: rosterLabels(),
       users: (discord && discord.users) || {},
       skip: [...autoAdded],
+      boundLabels: cfg.slots.map((s) => s.label).filter(Boolean), // a guest in a slot is never evicted from the auto entries
+      boundUsers: cfg.slots.map((s) => s.discordUserId).filter(Boolean),
     });
+    // A Discord user whose name matches a CURATED entry is only offered the link (the row shows 'link <name> (<id>)?').
+    const offers = new Map();
+    for (const sg of res.suggested) { const en = base[sg.index]; if (en) offers.set(lidOf(en), { id: sg.id, username: sg.username }); }
+    const offersChanged = JSON.stringify([...offers]) !== JSON.stringify([...dirSuggest]);
+    dirSuggest.clear();
+    offers.forEach((v, k) => dirSuggest.set(k, v));
+    const limitChanged = autoLimitHit !== (res.skipped > 0);
+    autoLimitHit = res.skipped > 0;
+    if (offersChanged || limitChanged) dirSig = '';
     if (!res.changed) return false;
     let changed = false;
-    for (let i = 0; i < base.length; i++) {
-      const n = res.directory[i];
-      if (n && !base[i].discordUserId && n.discordUserId) { base[i].discordUserId = n.discordUserId; changed = true; }
+    const linkedNames = [];
+    for (const lk of res.linked) { // an auto entry whose name matched takes the Discord id
+      const en = base[lk.index];
+      if (en && !en.discordUserId) { en.discordUserId = lk.id; changed = true; linkedNames.push(lk.username + ' with ' + lk.name); }
     }
-    for (let i = view.length; i < res.directory.length; i++) {
-      const added = res.directory[i];
+    for (const idx of res.evicted.slice().sort((a, b) => b - a)) { // auto entries that left the room made way for new ones
+      if (idx < base.length) { dirOpen.delete(base[idx][LID]); dirSuggest.delete(base[idx][LID]); base.splice(idx, 1); changed = true; }
+    }
+    for (const added of res.appended) {
       lidOf(added);
       base.push(added);
       addedKeys(added).forEach((k) => autoAdded.add(k));
       changed = true;
     }
+    if (linkedNames.length) setCfgStatus('Linked Discord: ' + linkedNames.join(', '));
     if (changed) dirSig = '';
     return changed;
   }
@@ -1689,6 +1757,22 @@
       // Leaving a field with a pending edit commits it first (its change event fires on blur), then the row is redrawn.
       if (document.activeElement && row.contains(document.activeElement)) document.activeElement.blur();
       renderDirectory(true);
+      return;
+    }
+
+    const yes = e.target.closest('.vdo-dir-link-yes');
+    const no = e.target.closest('.vdo-dir-link-no');
+    if (yes || no) {
+      const target = rowTarget(row);
+      const sg = target && dirSuggest.get(target[LID]);
+      (yes || no).blur();
+      if (!target || !sg) { dirSig = ''; renderDirectory(true); return; }
+      dirSuggest.delete(target[LID]);
+      if (yes) target.discordUserId = sg.id; // the operator said it is them
+      else ignoreKeys(GRDir.userKey(sg.id)); // not them: this Discord user is not offered (or added) again
+      dirSig = '';
+      renderDirectory(true);
+      operatorAction(() => assembleAndPush(false));
       return;
     }
 

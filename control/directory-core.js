@@ -147,7 +147,9 @@
   }
   // </guest-identity>
 
-  const labelKey = (label) => 'vdo:' + fold(label);
+  const labelKey = (label) => 'vdo:' + fold(label); // the ignore key: case does not matter
+  // The per-session "already auto-added" key keeps case: labels that differ only in case are separate guests, and adding one must not skip the other.
+  const labelExactKey = (label) => 'vdo:' + canon(label);
   const userKey = (id) => 'discord:' + String(id ?? '').replace(/\D/g, '');
 
   // Textarea grammar — one social per line: "platform handle", split on the FIRST
@@ -180,7 +182,7 @@
   // Turn "who is live right now" into directory entries.
   //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} }, skip: ['vdo:alpha', 'discord:1'],
   //            boundLabels: ['ALPHA'], boundUsers: ['<id>'] }
-  // `skip` lists keys the caller has already auto-added in this session: they are never appended again (a label that Streamer.bot
+  // `skip` lists keys (labelExactKey / userKey) the caller has already auto-added in this session: they are never appended again (a label that Streamer.bot
   // rewrites on the way back would otherwise look new on every pass). `boundLabels` / `boundUsers` name the guests that sit in a slot:
   // an auto entry for one of them is never evicted.
   //
@@ -244,7 +246,7 @@
     for (const label of labels) {
       const key = labelKey(label);
       const c = canon(label);
-      if (!hasGlyph(label) || isDateShaped(label) || ignored.has(key) || skip.has(key)) continue;
+      if (!hasGlyph(label) || isDateShaped(label) || ignored.has(key) || skip.has(labelExactKey(label))) continue;
       if (dir.some((e) => e && e.vdoLabel && canon(e.vdoLabel) === c)) continue; // an entry already has exactly this label
       // matched ignoring case, and no other live label collides with it by case: the same guest
       if (foldCount.get(fold(label)) === 1 && dir.some((e) => e && e.vdoLabel && fold(e.vdoLabel) === fold(label))) continue;
@@ -305,7 +307,7 @@
 
   globalThis.GRDir = {
     sanitizeSocials, sanitizeDirectory, sanitizeIgnored,
-    labelKey, userKey, findByLabel, findByUserId, canon, fold, hasGlyph, decodeHtml, AUTO_MAX,
+    labelKey, labelExactKey, userKey, findByLabel, findByUserId, canon, fold, hasGlyph, decodeHtml, AUTO_MAX,
     parseSocialsText, socialsToText, autoPopulate, isDateShaped,
     extraFields, carrySocialExtras, DIR_KEYS, SOCIAL_KEYS,
   };

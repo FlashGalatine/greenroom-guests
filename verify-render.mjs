@@ -174,8 +174,8 @@ async function main() {
 
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
-    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls' and 'invite' (or leave it unset)`);
+    // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18.
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite' and 'identity' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -3150,6 +3150,175 @@ async function main() {
         const gone = await p.evaluate(() => { const e = document.getElementById('vdoInvLegacy'); return !e || e.hidden; });
         check('R17k: a config saved by an older page with "no video" ticked gets a note that new links now stop the guest sending video; it goes once the box is changed', /stop the guest sending|stops the guest/i.test(note) && gone, JSON.stringify({ note, gone }));
         await p.close();
+      }
+    }
+
+    // ── R18: one guest identity rule (GRN-62, 13, 114, 147, 205, 206, 148, 173, 35, 113, 157) ──
+    if (!ONLY || ONLY === 'identity') {
+      console.log('\n[R18] identity: a stranger is never bound to a curated entry; underscores, escapes and case; the auto cap; the roster order');
+      const R18_SECTIONS = 'abcdefgh'.split('');
+      for (const k of (process.env.R18_ONLY || '').split(',').filter(Boolean)) if (!R18_SECTIONS.includes(k)) throw new Error('R18_ONLY=' + k + ': the sections are ' + R18_SECTIONS.join(', '));
+      const want = (k) => !process.env.R18_ONLY || process.env.R18_ONLY.split(',').includes(k);
+      const mkSeed = (extra) => Object.assign({ enabled: true, room: 'idroom', password: 'pw1', viewFlags: VIEWFLAGS, directoryAutoAdd: true,
+        slots: [slot(1), slot(2), slot(3), slot(4)], invite: { passwordMode: 'plaintext' }, directory: [] }, extra || {});
+      const QUIET = '?fixed=1&delay=600000';
+      const mockDir = (x, q) => x.api.base + '/mock/vdo-director.html' + q;
+      const pushPayloads = async (x) => pushesOf(await x.api.actions()).map((a) => { try { return JSON.parse(a.args.payload); } catch { return null; } }).filter(Boolean);
+      const seededMock = async (seed) => {
+        const x = await startExtra({});
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        await sleep(300);
+        await x.api.clear();
+        return x;
+      };
+      const openControl = async (x, q, seed) => {
+        const p = await newPage(browser, { width: 920, height: 1500 }, mockDir(x, q));
+        await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+        await wait(p, (r) => document.getElementById('vdoRoom')?.value === r, seed.room, 8000);
+        await sleep(700);
+        return p;
+      };
+      const voice = (x, users) => x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ users }) });
+      const U = (name, n) => ({ speaking: false, username: name, avatarUrl: embed(n || 1), mute: false, deaf: false });
+      const BOB_ID = '300000000000000001';
+      const curatedBob = () => mkSeed({ directory: [{ vdoLabel: 'bob', discordUserId: '', displayName: 'Bob Curated', socials: [] }] });
+
+      // (a) A stranger who picked the name "Bob" is offered the link, never given it (decision 6, GRN-13).
+      if (want('a')) {
+        const seed = curatedBob();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        voice(x, { [BOB_ID]: U('Bob') });
+        const shown = await wait(p, () => !!document.querySelector('#vdoDirectory .vdo-dir-row .dir-suggest'), null, 8000);
+        const txt = await p.evaluate(() => document.querySelector('#vdoDirectory .dir-suggest')?.textContent || '');
+        const idle = await pushPayloads(x);
+        check('R18a: a Discord user named "Bob" next to the curated entry "bob" is NOT linked on its own: the row offers "link Bob (id)?", the entry is untouched and no twin exists',
+          shown && /link Bob \(300000000000000001\)\?/.test(txt) && idle.every((q) => q.directory.length === 1 && q.directory[0].discordUserId === ''), JSON.stringify({ txt, pushes: idle.map((q) => q.directory) }));
+        await x.api.clear();
+        await p.click('#vdoDirectory .vdo-dir-link-yes');
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        check('R18a2: accepting the link sets the Discord ID on that one entry (still curated), pushes it once, and the offer goes', !!last && last.directory.length === 1 && last.directory[0].discordUserId === BOB_ID && !last.directory[0].auto
+          && !(await p.evaluate(() => !!document.querySelector('#vdoDirectory .dir-suggest'))), JSON.stringify(last && last.directory));
+        await p.close();
+      }
+      // (b) Rejecting the suggestion ignores that Discord user; it is not offered again.
+      if (want('b')) {
+        const seed = curatedBob();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        voice(x, { [BOB_ID]: U('Bob') });
+        await wait(p, () => !!document.querySelector('#vdoDirectory .dir-suggest'), null, 8000);
+        await x.api.clear();
+        await p.click('#vdoDirectory .vdo-dir-link-no');
+        await sleep(1200);
+        voice(x, { [BOB_ID]: U('Bob', 2) }); // another update of the same user
+        await sleep(1500);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        const offered = await p.evaluate(() => !!document.querySelector('#vdoDirectory .dir-suggest'));
+        check('R18b: "not them" records discord:<id> as ignored, nothing is linked, no twin appears, and the offer does not come back', !!last && last.directoryIgnored.includes('discord:' + BOB_ID) && last.directory.length === 1 && last.directory[0].discordUserId === '' && !offered, JSON.stringify({ ign: last && last.directoryIgnored, offered }));
+        await p.close();
+      }
+      // (c) Underscores, escapes and spacing are one label (GRN-206, GRN-205).
+      if (want('c')) {
+        const seed = mkSeed({ directory: [{ vdoLabel: 'Guest One', discordUserId: '', displayName: 'Guest One Curated', socials: [] }] });
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1&label=Guest_One', seed);
+        const live = await wait(p, () => document.querySelector('#vdoDirectory .vdo-dir-row .dir-dot')?.classList.contains('live'), null, 9000);
+        await sleep(3500);
+        const ps = await pushPayloads(x);
+        const dirs = ps.map((q) => q.directory.map((e) => e.displayName + '/' + e.vdoLabel));
+        check('R18c: a live label "Guest_One" lights the dot of the entry "Guest One" and makes no twin entry (the mock director renames ALPHA to Guest_One)', live && ps.every((q) => !q.directory.some((e) => e.auto && /guest/i.test(e.vdoLabel))), JSON.stringify(dirs));
+        await p.close();
+        const y = await seededMock(mkSeed());
+        const q = await openControl(y, '?fixed=1&label=' + encodeURIComponent('Tom &amp;amp; Jerry'), mkSeed());
+        await wait(q, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, null, 9000);
+        await sleep(800);
+        const ps2 = await pushPayloads(y);
+        const tj = ps2.map((r) => r.directory.find((e) => /Jerry/.test(e.vdoLabel))).filter(Boolean).pop();
+        check('R18c2: a double-escaped label becomes an auto entry named by the DECODED label while its vdoLabel stays raw (the plate no longer shows "Tom &amp;amp; Jerry")', !!tj && tj.displayName === 'Tom & Jerry' && tj.vdoLabel === 'Tom &amp;amp; Jerry', JSON.stringify(tj));
+        await q.close();
+      }
+      // (d) Labels that differ only in case are separate guests, and the dock says so (GRN-147).
+      if (want('d')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, '?fixed=1', seed);
+        await wait(p, () => /connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+        const fr = p.frames().find((f) => /vdo-director/.test(f.url()));
+        await fr.evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'aaa222', label: 'alpha' } }));
+        await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length >= 3, null, 9000); // ALPHA and BRAVO from the first poll, then the case twin
+        await sleep(600);
+        const labels = await p.evaluate(() => [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].map((r) => r.querySelector('input.vdo-dir-label').value).sort());
+        const pill = await p.evaluate(() => document.getElementById('dirCount').textContent);
+        check('R18d: live labels "ALPHA" and "alpha" are two entries (next to BRAVO from the first poll), and the directory pill says labels differ only in case', labels.join() === 'ALPHA,BRAVO,alpha' && /differ only in case/i.test(pill), JSON.stringify({ labels, pill }));
+        await p.close();
+      }
+      // (e) The nameplate shows markup as text (GRN-157).
+      if (want('e')) {
+        const seed = mkSeed({ slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2), slot(3), slot(4)],
+          directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: '<img src=x onerror=alert(1)>', socials: [{ platform: 'twitch', handle: '<b>x</b>' }] }] });
+        const x = await seededMock(seed);
+        const dlg = [];
+        const o = await newPage(browser, { width: 640, height: 360 });
+        o.on('dialog', (d) => { dlg.push(d.message()); d.dismiss(); });
+        await o.goto(x.api.base + '/overlay/vdoninja-guest.html?slot=1&sbport=' + x.ws, { waitUntil: 'load' });
+        const ok = await wait(o, () => (document.querySelector('.np-plate .np-name')?.textContent || '').includes('<img'), null, 8000);
+        await sleep(600);
+        const st = await o.evaluate(() => ({ nameKids: document.querySelector('.np-name')?.children.length, handleKids: document.querySelector('.np-handle')?.children.length, handle: document.querySelector('.np-handle')?.textContent }));
+        check('R18e: a display name "<img onerror>" and a handle "<b>x</b>" are plain text on the nameplate (no child elements, no script ran)', ok && st.nameKids === 0 && st.handleKids === 0 && st.handle === '<b>x</b>' && dlg.length === 0, JSON.stringify({ st, dlg }));
+        await o.close();
+      }
+      // (f) The auto-add cap (GRN-35).
+      if (want('f')) {
+        const seed = mkSeed();
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        const users = {};
+        for (let i = 0; i < 60; i++) users['4000000000000' + String(10000 + i)] = U('Member ' + String(i).padStart(2, '0'), (i % 5) + 1);
+        voice(x, users);
+        const capped = await wait(p, () => /auto-add limit reached/.test(document.getElementById('dirCount')?.textContent || ''), null, 9000);
+        await sleep(800);
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        check('R18f: 60 members joining add 50 auto entries (AUTO_MAX), and the pill says the auto-add limit was reached', capped && !!last && last.directory.filter((e) => e.auto).length === 50, JSON.stringify({ capped, autos: last && last.directory.filter((e) => e.auto).length }));
+        await p.close();
+      }
+      // (g) A socials line that cannot be read is said so (GRN-173).
+      if (want('g')) {
+        const seed = mkSeed({ directory: [{ vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime', socials: [] }] });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        await p.click('#vdoDirectory .vdo-dir-row:nth-child(1) .dir-toggle');
+        await p.fill('#vdoDirectory .vdo-dir-row:nth-child(1) textarea.vdo-dir-socials', 'twitch\tbob');
+        await p.focus('#vdoRoom');
+        await sleep(900);
+        const note = await p.evaluate(() => document.querySelector('#vdoDirectory .dir-note')?.textContent || '');
+        const ps = await pushPayloads(x);
+        const last = ps[ps.length - 1];
+        check('R18g: a social typed with a tab between platform and handle is read, and gets no hint',
+          !!last && last.directory[0].socials.length === 1 && last.directory[0].socials[0].platform === 'twitch' && last.directory[0].socials[0].handle === 'bob' && note === '', JSON.stringify({ socials: last && last.directory[0].socials, note }));
+        await p.fill('#vdoDirectory .vdo-dir-row:nth-child(1) textarea.vdo-dir-socials', 'twitch bob\nnohandle');
+        await p.focus('#vdoRoom');
+        await sleep(900);
+        const note2 = await p.evaluate(() => document.querySelector('#vdoDirectory .dir-note')?.textContent || '');
+        check('R18g2: a line that is not "platform handle" shows a hint on the row ("1 line ignored")', /1 line ignored/.test(note2), JSON.stringify({ note, note2 }));
+        await p.close();
+      }
+      // (h) The roster chips are named and ordered by the name they show (GRN-113, GRN-35).
+      if (want('h')) {
+        const seed = mkSeed({ directory: [{ vdoLabel: '', discordUserId: '300000000000000010', displayName: 'Zoe', socials: [], auto: false }] });
+        const x = await seededMock(seed);
+        const r = await newPage(browser, { width: 1000, height: 300 });
+        await r.goto(x.api.base + '/overlay/discord-roster.html?layout=row&sbport=' + x.ws, { waitUntil: 'load' });
+        voice(x, { '300000000000000010': U('Alice', 1), '300000000000000011': U('Bob', 2) });
+        await wait(r, () => document.querySelectorAll('.member').length === 2, null, 8000);
+        await sleep(500);
+        const st = await r.evaluate(() => [...document.querySelectorAll('.member')].map((m) => m.querySelector('.name')?.textContent));
+        check('R18h: a chip with a curated directory name shows it, and the chips are ordered by the shown names ("Bob" before "Zoe", although the member behind Zoe is named Alice)', st.join() === 'Bob,Zoe', JSON.stringify(st));
+        await r.close();
       }
     }
 

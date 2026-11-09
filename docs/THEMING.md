@@ -118,5 +118,6 @@ URL params — the guest overlay's built-in lower-third (`vdoninja-guest.html`):
 
 Social platform icons are inline SVGs tinted by the accent (`currentColor`):
 `twitch` `discord` `twitter` `bluesky` `youtube` `instagram` `tiktok` `website`
-— an unknown platform falls back to the `website` globe. One handle renders
+(the short names `x`, `yt`, `ig`, `bsky` and `tt` work too) — an unknown platform
+falls back to the `website` globe. One handle renders
 static; two or more rotate on a 5 s cycle.
