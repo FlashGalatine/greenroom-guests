@@ -243,16 +243,21 @@ Webcam-only users skip this whole section — nothing else depends on it.
    `GREENROOM_GUARD_PORT` and `GREENROOM_EXIT_ON_SB_CLOSE`. The `Discord Bridge
    Start` action cannot set environment variables: do not launch the bridge with
    a "Run a Program" sub-action that sets some, or waits for exit.
-   The channel must be a **regular voice channel (not a Stage)** in a server the bot
-   is in, and one the bot can join. **USE** checks that first: a channel that fails
-   (wrong server, a text channel, a Stage, no View Channel + Connect, a full
-   channel) shows the reason in the status line and changes nothing: the bot
-   stays in the channel it was in, with its roster. Removing the favorite that is
-   the current channel makes the bot leave it. Guests invited into a call (they
-   are not server members) appear in the roster by their nickname, and members
-   show their per-server avatar.
-5. In the control page: save a favorite (server ID / voice channel ID), press
-   **USE**, then **Connect**. The pill should go `in voice · N present`.
+5. In the control page: save a favorite (server ID / **regular voice channel (not a
+   Stage)** ID), press **USE**, then **Connect**. The pill should go
+   `in voice · N present`.
+   The channel must be in a server the bot is in, and one the bot can join (View
+   Channel + Connect, and room under its user limit). While the bot is online,
+   **USE** checks that first: a channel that fails (wrong server, a text channel, a
+   Stage, no View Channel + Connect, a full channel) shows the reason in the status
+   line for about a minute and changes nothing: the bot stays in the channel it was
+   in, with its roster. (Pressed before **Connect**, USE just saves the pick, and
+   the same check runs when the bot logs in: a saved channel that fails it is not
+   joined and its reason stays on the status line until you pick another channel.)
+   Removing the favorite that is the current channel makes the bot leave it, unless
+   another favorite names the same channel. Guests invited into a call (they are not
+   server members) appear in the roster by their nickname or Discord name, with
+   their mute and deafen state, and members show their per-server avatar.
 
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.

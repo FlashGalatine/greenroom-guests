@@ -31,7 +31,8 @@
 //       GREENROOM_SB_EXIT_GRACE_MS (default 8000, the leave-when-SB-closes window)
 //       DISCORD_BRIDGE_CONFIG / DISCORD_BRIDGE_TOKENS (test hooks: file paths)
 //       DISCORD_BRIDGE_API (test hook: a loopback http URL used as Discord's REST base)
-//       GREENROOM_TEST_HOOKS=1 (test hooks: the test-* commands, GREENROOM_BRIDGE_VERSION)
+//       GREENROOM_TEST_HOOKS=1 (test hooks: the test-* commands, GREENROOM_BRIDGE_VERSION,
+//       GREENROOM_REFUSAL_MS: how long the refusal of a USE stays on the status line)
 //
 // ONE POLICY FOR CRASHES AND EXITS (GRN-129): every way out goes through shutdown(code): signals, the quit
 // command, exit-on-SB-close and a crash. It sets `stopping` first (nothing else is pushed), closes the guard,
@@ -80,6 +81,9 @@ const VERSION = (() => {
   try { return String(JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')).version || '0.0.0'); } catch { return '0.0.0'; }
 })();
 const HEARTBEAT_MS = 5000;
+// How long the refusal of a USE stays on the status line: the bot is still working in its channel, so the message is news for a
+// minute, not for the rest of the stream (a refusal at login stays: nothing is joined).
+const REFUSAL_MS = (TEST_HOOKS && Number(process.env.GREENROOM_REFUSAL_MS)) || 60000;
 // Numeric, part by part: 1.0.9 is older than 1.0.10.
 const cmpVersion = (a, b) => {
   const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0), pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
@@ -134,6 +138,16 @@ let bot = null;              // discord.js Client
 let voiceConn = null;        // current @discordjs/voice VoiceConnection
 let wantVoice = true;        // operator intent: should the bot be in voice? (a
                              // manual Leave sets false so it won't auto-rejoin)
+let useSeq = 0;              // the newest USE: a check that finishes for an older one is dropped (GRN-204)
+let joinGen = 0;             // the newest join, leave or stop: an older join that is still waiting does nothing more
+let currentRefused = false;  // the saved current channel failed its check at login: not joined (payload `currentRefused`)
+let refusalText = '';        // the text of the refusal of the last USE while it is on the status line
+let refusalTimer = null;
+// Names and avatars seen on VOICE_STATE_UPDATE frames, by user id (GRN-210): a guest invited into the call has no cached GuildMember
+// in discord.js, so the frame is where their name comes from. Refreshed by every frame, bounded.
+const seenUsers = new Map();
+const SEEN_USERS_MAX = 300;
+const looking = new Set();   // guests whose name is being looked up (REST)
 
 // Streamer.bot WS client (replaces the old StreamService :7070 relay client).
 let sbWs = null;
@@ -243,25 +257,40 @@ async function removeFavorite(id) {
   const gone = state.favorites.find((f) => f.id === String(id));
   state.favorites = state.favorites.filter((f) => f.id !== String(id));
   if (state.favorites.length === before) return false;
-  // Removing the favorite that is the current channel makes the bot leave it (GRN-153).
-  if (gone && state.current && state.current.serverId === gone.serverId && state.current.channelId === gone.channelId) {
+  // Removing the favorite that is the current channel makes the bot leave it (GRN-153), unless another favorite (a duplicate) still names it.
+  const names = (f, c) => f.serverId === c.serverId && f.channelId === c.channelId;
+  if (gone && state.current && names(gone, state.current) && !state.favorites.some((f) => names(f, state.current))) {
     state.current = null;
+    currentRefused = false;
+    if (online()) rpc.error = ''; // the message was about the channel that is gone
     leaveVoice();
   }
   await persist();
   return true;
 }
 
+// The bot is logged in: a USE can be checked now.
+const online = () => !!(bot && rpc.connected);
+
 // Can the bot watch this channel? A server it is in, a channel that exists, a regular voice channel (a Stage has speakers and an audience:
 // this bridge cannot read it, GRN-80) that it can join. Returns { guild, channel } or { error } (a message for the operator).
 async function checkTarget(serverId, channelId) {
+  const b = bot; // (the bot can be stopped while a lookup is out)
+  if (!b) return { error: 'The bot is not logged in — press Connect.' };
   try {
-    const guild = await bot.guilds.fetch(serverId);
+    const guild = await b.guilds.fetch(serverId);
     const channel = await guild.channels.fetch(channelId);
     if (!channel) return { error: 'Channel not found — check the Channel ID.' };
     if (channel.type === ChannelType.GuildStageVoice) return { error: 'That is a Stage channel — pick a regular voice channel instead.' };
     if (!channel.isVoiceBased()) return { error: 'That channel is not a voice channel.' };
     if (!channel.joinable) return { error: 'The bot cannot join that channel — give it View Channel + Connect there (or the channel is full).' };
+    // discord.js counts only the members it has cached against the user limit, and a guest invited into the call is none: count the voice
+    // states. Someone with Move Members can join a full channel (like discord.js decides).
+    if (channel.userLimit > 0 && channel.id !== currentChannelId) {
+      let inside = 0;
+      for (const vs of guild.voiceStates.cache.values()) if (vs.channelId === channel.id && vs.id !== b.user.id) inside++;
+      if (inside >= channel.userLimit && !channel.permissionsFor(b.user)?.has('MoveMembers')) return { error: 'That voice channel is full (its user limit is reached) — pick another one, or give the bot Move Members.' };
+    }
     return { guild, channel };
   } catch (e) { return { error: joinErrorText(e) }; }
 }
@@ -275,28 +304,53 @@ function joinErrorText(e) {
   return 'Join failed: ' + raw;
 }
 
+// The refusal of a USE goes on the status line for a while (REFUSAL_MS), then clears itself if nothing replaced it.
+function refuse(text) {
+  rpc.error = text;
+  refusalText = text;
+  log(`USE refused: ${text}`);
+  if (refusalTimer) clearTimeout(refusalTimer);
+  refusalTimer = setTimeout(() => {
+    refusalTimer = null;
+    if (refusalText && rpc.error === refusalText) { rpc.error = ''; schedulePush(); }
+    refusalText = '';
+  }, REFUSAL_MS);
+  refusalTimer.unref();
+  schedulePush();
+}
+
 // USE: while the bot is online the target is checked FIRST. A target that fails keeps the previous current channel, the voice connection
 // and the roster, and says why in rpc.error; it is saved and joined only after it passes (GRN-204). Offline, the pick is saved as before
-// and the same check runs when the bot logs in (joinCurrentChannel).
+// (and the reason the bot is offline stays on the status line) and the same check runs when the bot logs in (joinCurrentChannel). The
+// newest USE decides: a check that finishes after a newer USE began is dropped. A pick that cannot be saved is not applied.
 async function setCurrent(serverId, channelId) {
   const sId = String(serverId ?? '').replace(/\D/g, '');
   const cId = String(channelId ?? '').replace(/\D/g, '');
   const next = sId && cId ? { serverId: sId, channelId: cId } : null;
+  const seq = ++useSeq;
   let checked = null;
-  if (next && bot && rpc.connected) {
+  if (next && online()) {
     checked = await checkTarget(sId, cId);
-    if (checked.error) {
-      rpc.error = checked.error;
-      log(`USE refused: ${checked.error}`);
-      schedulePush();
-      return state.current;
-    }
+    if (seq !== useSeq) return state.current;
+    if (checked.error) { refuse(checked.error); return state.current; }
   }
+  const prev = state.current, prevRefused = currentRefused;
   state.current = next;
-  if (next) { wantVoice = true; rpc.error = ''; } // picking a channel means "be in voice"
-  await persist();
+  currentRefused = false;
+  try { await persist(); }
+  catch (e) {
+    if (state.current === next) { state.current = prev; currentRefused = prevRefused; }
+    log(`config not saved: ${e.message}`);
+    rpc.error = 'Could not save the config (' + clean(e.message, 120) + ') — the channel was not changed.';
+    schedulePush();
+    return state.current;
+  }
+  if (next) wantVoice = true; // picking a channel means "be in voice"
   // If the bot is live, move it to the newly-selected channel (or leave voice).
-  if (bot && rpc.connected) joinCurrentChannel(checked).catch((e) => log(`rejoin failed: ${e.message}`));
+  if (online()) {
+    rpc.error = '';
+    joinCurrentChannel(checked).catch((e) => log(`rejoin failed: ${e.message}`));
+  }
   return state.current;
 }
 
@@ -343,8 +397,13 @@ function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-async function persist() {
-  await writeFile(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8');
+// One write at a time, each of the state as it is when the write starts: two commands that save together (two quick USEs, a USE and a
+// settings change) cannot interleave their writes into one file, and the last write is the newest state.
+let persistChain = Promise.resolve();
+function persist() {
+  const run = persistChain.then(() => writeFile(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8'));
+  persistChain = run.catch(() => {});
+  return run;
 }
 
 async function persistTokens() {
@@ -379,6 +438,7 @@ async function connectRpc() {
 // next login; USE/Connect brings it back.
 function leaveVoice() {
   wantVoice = false;
+  joinGen++; // a join that is still checking its target must not bring the bot back
   destroyVoice();
   voiceUsers = {};
   schedulePush();
@@ -466,6 +526,8 @@ function destroyClient(b) {
 }
 
 function stopBot() {
+  joinGen++;
+  currentRefused = false; // nothing is checked while the bot is out; the next login checks the saved pick again
   destroyVoice();
   if (bot) {
     const b = bot; bot = null;
@@ -497,20 +559,26 @@ function destroyVoice() {
   rpc.hostInChannel = false;
 }
 
-// `checked` is the result of checkTarget when the caller (USE) has already run it; at login it is run here.
+// `checked` is the result of checkTarget when the caller (USE) has already run it (and it is for the current channel); at login it is
+// run here. A newer join, a Leave or a stop that happens while this one is checking makes it do nothing more (joinGen).
 async function joinCurrentChannel(checked) {
   if (!bot) return;
+  const gen = ++joinGen;
   const target = state.current; // { serverId, channelId } | null
-  if (!target || !target.channelId) { destroyVoice(); voiceUsers = {}; schedulePush(); return; }
+  if (!target || !target.channelId) { currentRefused = false; destroyVoice(); voiceUsers = {}; schedulePush(); return; }
   try {
-    const chk = checked && !checked.error ? checked : await checkTarget(target.serverId, target.channelId);
+    const chk = checked && !checked.error && checked.channel.id === target.channelId && checked.guild.id === target.serverId ? checked : await checkTarget(target.serverId, target.channelId);
+    if (gen !== joinGen) return;
     if (chk.error) { // (at login: nothing to keep; the error says why the saved channel cannot be watched)
+      currentRefused = true;
       if (!currentChannelId) voiceUsers = {};
-      rpc.error = chk.error;
+      rpc.error = chk.error; // stays on the status line for as long as the saved pick is refused
+      refusalText = '';
       log(rpc.error);
       schedulePush();
       return;
     }
+    currentRefused = false;
     const { guild, channel } = chk;
     destroyVoice(); // only after the target has passed
     voiceUsers = {};
@@ -541,6 +609,7 @@ async function joinCurrentChannel(checked) {
     attachReceiver(conn);
     schedulePush();
   } catch (e) {
+    if (gen !== joinGen) return; // a newer join or a Leave took over: this one's failure is not news
     rpc.error = joinErrorText(e);
     log(rpc.error);
     schedulePush();
@@ -551,6 +620,7 @@ async function attachReceiver(conn) {
   try {
     await entersState(conn, VoiceConnectionStatus.Ready, 20000);
   } catch (e) {
+    if (voiceConn !== conn) return; // superseded (or destroyed) while connecting
     rpc.error = 'Voice connection not ready: ' + (e?.message || e);
     log(rpc.error);
     return;
@@ -566,12 +636,50 @@ async function attachReceiver(conn) {
   schedulePush();
 }
 
+const guestRow = (username, avatarUrl, vs, prev) => ({ speaking: !!(prev && prev.speaking), username, avatarUrl, mute: !!(vs && vs.mute), deaf: !!(vs && vs.deaf) });
+const userName = (u) => clean(u.globalName || u.username || '', 80);
+function userAvatar(u) {
+  try { return u.displayAvatarURL({ extension: 'png', size: 256 }); }
+  catch { return buildAvatarUrl(u.id, u.avatar ?? null); }
+}
+
 function seedFromChannel(channel) {
   voiceUsers = {};
   const members = channel.members; // Collection<id, GuildMember> currently in voice
   if (members && typeof members.forEach === 'function') {
     for (const [, member] of members) upsertMember(member);
   }
+  // A guest invited into the call is in discord.js's voice states but has no cached member, so channel.members leaves them out (GRN-210):
+  // they are listed from the names seen on earlier frames, from the users discord.js knows, or looked up.
+  const meId = bot && bot.user && bot.user.id;
+  for (const vs of channel.guild.voiceStates.cache.values()) {
+    if (vs.channelId !== channel.id || vs.member || vs.id === meId) continue;
+    const seen = seenUsers.get(vs.id);
+    const user = bot && bot.users.cache.get(vs.id);
+    if ((seen && seen.bot) || (user && user.bot)) continue;
+    if (seen) voiceUsers[vs.id] = guestRow(seen.username, seen.avatarUrl, vs);
+    else if (user) voiceUsers[vs.id] = guestRow(userName(user), userAvatar(user), vs);
+    else lookupGuest(vs.id, channel.guild.id); // nobody has said who this is: ask Discord; the row is added when it answers
+  }
+}
+
+// Who is this user? (a guest who was already in the call when the bridge joined: no frame has told us). The row is added when Discord
+// answers, if they are still in the working channel; a bot is never listed. If the lookup fails they are listed without a name (the
+// overlay shows the id), since they are in the call.
+async function lookupGuest(id, guildId) {
+  if (looking.has(id) || looking.size >= 25) return;
+  const b = bot;
+  looking.add(id);
+  let user = null;
+  try { user = await b.users.fetch(id); } catch (e) { log(`user lookup ${id} failed: ${clean(e && e.message, 80)}`); }
+  looking.delete(id);
+  if (stopping || bot !== b || !currentChannelId) return;
+  const vs = b.guilds.cache.get(guildId)?.voiceStates.cache.get(id);
+  if (!vs || vs.channelId !== currentChannelId || vs.member) return; // gone, moved, or a cached member by now
+  if (user && user.bot) { if (voiceUsers[id]) { delete voiceUsers[id]; schedulePush(); } return; }
+  if (voiceUsers[id] && voiceUsers[id].username) return; // a frame named them meanwhile
+  voiceUsers[id] = guestRow(user ? userName(user) : '', user ? userAvatar(user) : buildAvatarUrl(id, null), vs, voiceUsers[id]);
+  schedulePush();
 }
 
 function onVoiceStateUpdate(oldState, newState) {
@@ -579,44 +687,39 @@ function onVoiceStateUpdate(oldState, newState) {
     if (!currentChannelId) return;
     // Departures first, by user id: a guest who was invited into the call has no cached member (GRN-210).
     const id = newState.id || oldState.id;
-    const inNow = newState.channelId === currentChannelId;
-    const wasIn = oldState.channelId === currentChannelId;
-    if (!inNow) {
+    if (newState.channelId !== currentChannelId) {
       if (id && voiceUsers[id]) { delete voiceUsers[id]; schedulePush(); }
       return;
     }
     const member = newState.member || oldState.member;
-    if (!member || member.user?.bot) return; // ignore bots (incl. ourselves)
-    upsertMember(member); schedulePush();
-    void wasIn;
+    if (member) {
+      if (member.user?.bot) return; // ignore bots (incl. ourselves)
+      upsertMember(member); schedulePush();
+      return;
+    }
+    // A guest invited into the call: discord.js keeps no member for them (no joined_at). The name came from the raw frame (onRawPacket ran
+    // just before) and the flags are the voice state's own, so a mute or a new nickname shows. A frame that told us nothing about the
+    // user adds nobody (never a nameless row, never the bot).
+    const seen = id && seenUsers.get(id);
+    if (!seen || seen.bot || (bot && bot.user && id === bot.user.id)) return;
+    voiceUsers[id] = guestRow(seen.username, seen.avatarUrl, newState, voiceUsers[id]);
+    schedulePush();
   } catch (e) { log(`voice state update: ${e.message}`); }
 }
 
-// A guest invited into the call has no joined_at, so discord.js does not keep them as a member: the raw VOICE_STATE_UPDATE carries
-// the name, the avatar and the flags (GRN-210). Only for the working channel; bots are skipped. A full member is filled in properly
-// by onVoiceStateUpdate right after.
+// A guest invited into the call has no joined_at, so discord.js does not keep them as a member: the raw VOICE_STATE_UPDATE is where
+// their name and avatar are (GRN-210). It runs before discord.js handles the frame, so the name is on file when onVoiceStateUpdate (which
+// adds, updates and removes the row in the order the frames arrive) and seedFromChannel (a join, a move, a login) need it.
 function onRawPacket(packet) {
   try {
-    if (!packet || packet.t !== 'VOICE_STATE_UPDATE' || !currentChannelId) return;
+    if (!packet || packet.t !== 'VOICE_STATE_UPDATE') return;
     const d = packet.d;
-    if (!d || d.channel_id !== currentChannelId) return;
-    const u = d.member && d.member.user ? d.member.user : null;
-    const id = String((u && u.id) || d.user_id || '');
-    if (!id || (u && u.bot) || voiceUsers[id]) return;
-    const entry = {
-      speaking: false,
-      username: clean((d.member && d.member.nick) || (u && (u.global_name || u.username)) || '', 80),
-      avatarUrl: buildAvatarUrl(id, (u && u.avatar) || null),
-      mute: !!(d.mute || d.self_mute),
-      deaf: !!(d.deaf || d.self_deaf),
-    };
-    // After discord.js has handled the packet: a member it knows is filled in by onVoiceStateUpdate (with the right avatar); only a
-    // user it did not keep (a guest) is added here.
-    setImmediate(() => {
-      if (stopping || voiceUsers[id] || currentChannelId !== d.channel_id) return;
-      voiceUsers[id] = entry;
-      schedulePush();
-    });
+    const u = d && d.member && d.member.user;
+    if (!u || !u.id) return;
+    const id = String(u.id);
+    seenUsers.delete(id); // (re-inserted last: the oldest go first when the map is full)
+    seenUsers.set(id, { bot: !!u.bot, username: clean(d.member.nick || u.global_name || u.username || '', 80), avatarUrl: buildAvatarUrl(id, u.avatar || null) });
+    while (seenUsers.size > SEEN_USERS_MAX) seenUsers.delete(seenUsers.keys().next().value);
   } catch (e) { log(`raw voice state: ${e.message}`); }
 }
 
@@ -817,6 +920,9 @@ function payloadOut() {
     rpc: { enabled: creds.enabled, hasToken: !!creds.botToken, error: clean(rpc.error, 300) },
     favorites: state.favorites.map((f) => ({ ...f })),
     current: state.current ? { ...state.current } : null,
+    // The saved current channel failed its check at login (a Stage, a channel the bot cannot join, …), so it is not joined; false once the
+    // pick changes (additive).
+    currentRefused,
     // Liveness and identity (additive; docs/PROTOCOL.md): a push every `hb` ms while the bridge runs (0 once it is stopping),
     // `stopped` on the last frame it sends, and the build that sent it.
     hb: stopping ? 0 : HEARTBEAT_MS,

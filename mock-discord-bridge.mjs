@@ -84,6 +84,7 @@ function payloadOut() {
     rpc: state.rpc,
     favorites: state.favorites,
     current: state.current,
+    currentRefused: false, // the real bridge sets it when the saved channel fails its check at login
     // the same liveness fields as the real bridge (docs/PROTOCOL.md): a push every hb ms while it runs
     hb: HEARTBEAT_MS,
     stopped: false,

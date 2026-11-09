@@ -289,6 +289,7 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   "rpc": { "enabled": true, "hasToken": true, "error": "" },
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
   "current": { "serverId": "…", "channelId": "…" } | null,
+  "currentRefused": false,        // the saved `current` failed its check at login and is not joined (additive)
   "hb": 5000,                     // the bridge pushes at least every hb ms while it runs; 0 once it is stopping
   "stopped": false,               // true on the last frame a bridge sends before it exits
   "bridgeVersion": "1.0.63"       // the sidecar build that sent it
@@ -296,7 +297,11 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 ```
 
 - `users` is the original toolkit feed, unchanged — the guest overlay's discord
-  mode and the roster overlay read only it (+ `settings`).
+  mode and the roster overlay read only it (+ `settings`). It lists the members of
+  the working channel and the **guests** invited into the call (Discord keeps no
+  member for them, so the bridge names them from the voice-state frame, their
+  nickname or Discord name, and keeps their `mute`/`deaf` current); bots are not
+  listed.
 - `settings`/`rpc`/`favorites`/`current` are superset fields for the control
   page (status pill, favorites list) and the roster overlay's styling. The
   **token itself is never in any payload** — only `hasToken`.
@@ -331,10 +336,10 @@ absent, is dropped (only the types are logged): anyone on the bus can send any J
 | `connect` | — | (re)start the bot with the FILE token; visible error if none |
 | `leave` | — | leave voice gracefully, stay logged in, clear auto-rejoin intent |
 | `reset-auth` | — | forget the saved token (file keeps `enabled`) |
-| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join. A target that fails is refused with a message in `rpc.error` and **changes nothing**: the current channel, the voice connection and the roster stay. Offline, the pick is saved and the same check runs when the bot logs in |
+| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live; empty ids leave). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join (View Channel + Connect, room under the user limit; guests count). A target that fails is refused with a message in `rpc.error` (it clears itself after about a minute) and **changes nothing**: the current channel, the saved file, the voice connection and the roster stay. A pick that cannot be saved to the config file is not applied either (`rpc.error` says so). When USEs overlap, the newest decides. Offline, the pick is saved (the reason the bot is offline stays in `rpc.error`) and the same check runs when the bot logs in: a saved channel that fails it is not joined, stays `current`, and the payload says `currentRefused: true` until the pick changes |
 | `favorite-add` | `{"name","serverId","channelId"}` | add favorite |
 | `favorite-update` | `{"id", …fields}` | edit favorite |
-| `favorite-remove` | `{"id"}` | remove favorite; removing the one that is the current channel clears the current channel and leaves voice |
+| `favorite-remove` | `{"id"}` | remove favorite; removing the one that is the current channel clears the current channel and leaves voice (unless another favorite names the same channel) |
 | `set-settings` | partial settings object | merge + clamp + persist |
 | `quit` | — | leave voice, send the clearing state and exit (code 0): the clean stop |
 

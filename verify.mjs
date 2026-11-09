@@ -26,7 +26,7 @@ import { spawn } from 'node:child_process';
 import { createServer, connect as netConnect } from 'node:net';
 import { createServer as createHttp } from 'node:http';
 import { existsSync } from 'node:fs';
-import { readFile, rm, mkdtemp, writeFile, readdir } from 'node:fs/promises';
+import { readFile, rm, mkdtemp, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1554,6 +1554,54 @@ async function main() {
         if (!opts.noWait) await r.waitFor(() => true, 8000); // the first push
         return r;
       }
+      // A mock Discord for the real discord.js inside the bridge (DISCORD_BRIDGE_API, loopback only): a REST server and a gateway. The
+      // gateway answers heartbeats, identifies (READY, then GUILD_CREATE from guild()), RESUMEs (op 6 -> RESUMED) and records the
+      // voice-state requests (op 4: this mock has no voice server, so a voice connection never becomes ready). Controls: dispatchAll(t, d)
+      // sends a dispatch to every socket, dispatchBatch(frames) puts several in ONE TCP write (the bridge reads them in one turn),
+      // holdHelloMs delays the next Hello (an outage), dropAll(code) closes every gateway socket, restDelay['<url part>'] = ms delays a
+      // REST answer, `users` answers GET /users/:id; everything else is Unknown Channel / Unknown Guild (the guilds that exist came with
+      // GUILD_CREATE). Sprint 13b's gateway cases (re-identify, resume, leave while reconnecting) run on the same mock.
+      async function mockDiscord({ guild, users = {} }) {
+        const socks = new Set();
+        const st = { identifies: 0, resumes: 0, ops4: [], holdHelloMs: 0, seq: 0, restDelay: {} };
+        const send = (ws, t, d) => { try { ws.send(JSON.stringify({ op: 0, t, s: ++st.seq, d })); } catch { /* gone */ } };
+        const gw = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+        const me = guild().members.find((m) => m.user.bot).user;
+        gw.on('connection', async (ws) => {
+          socks.add(ws); ws.on('close', () => socks.delete(ws)); ws.on('error', () => {});
+          ws.on('message', (raw) => {
+            let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+            if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
+            else if (m.op === 2) {
+              st.identifies++;
+              send(ws, 'READY', { v: 10, user: me, guilds: [{ id: guild().id, unavailable: true }], session_id: 'mock' + st.identifies, resume_gateway_url: `ws://127.0.0.1:${gw.address().port}`, application: { id: me.id, flags: 0 } });
+              setTimeout(() => send(ws, 'GUILD_CREATE', guild()), 50);
+            } else if (m.op === 6) { st.resumes++; send(ws, 'RESUMED', {}); }
+            else if (m.op === 4) st.ops4.push(m.d);
+          });
+          if (st.holdHelloMs) { const h = st.holdHelloMs; st.holdHelloMs = 0; await nap(h); }
+          try { ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45000 } })); } catch { /* gone */ }
+        });
+        await new Promise((res) => gw.once('listening', res));
+        const rest = createHttp(async (req, res) => {
+          res.setHeader('content-type', 'application/json');
+          if (/gateway\/bot/.test(req.url)) return res.end(JSON.stringify({ url: `ws://127.0.0.1:${gw.address().port}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }));
+          const slow = Object.keys(st.restDelay).find((k) => req.url.includes(k));
+          if (slow) await nap(st.restDelay[slow]);
+          const um = /\/users\/(\d+)/.exec(req.url);
+          if (um && users[um[1]]) return res.end(JSON.stringify(users[um[1]]));
+          res.statusCode = 404;
+          res.end(JSON.stringify(/\/channels\//.test(req.url) ? { code: 10003, message: 'Unknown Channel' } : { code: 10004, message: 'Unknown Guild' }));
+        });
+        await new Promise((res) => rest.listen(0, '127.0.0.1', res));
+        return Object.assign(st, {
+          api: `http://127.0.0.1:${rest.address().port}/api`,
+          dispatchAll: (t, d) => { for (const ws of socks) send(ws, t, d); },
+          dispatchBatch: (frames) => { for (const ws of socks) { try { ws._socket.cork(); for (const [t, d] of frames) send(ws, t, d); process.nextTick(() => ws._socket.uncork()); } catch { /* gone */ } } },
+          dropAll: (code) => { for (const ws of socks) { try { ws.close(code); } catch { /* gone */ } } },
+          close: async () => { for (const ws of socks) { try { ws.terminate(); } catch { /* gone */ } } await new Promise((res) => gw.close(res)); rest.close(); },
+        });
+      }
       try {
         // hb / stopped / bridgeVersion, and the heartbeat (GRN-129)
         const a = await rig();
@@ -1838,59 +1886,42 @@ async function main() {
         }
 
         // ── 8c. the voice target is checked before the working channel is left (Sprint 13a) ──
-        // A mock Discord that completes identify, lists one guild in READY and dispatches GUILD_CREATE (voice, text, Stage and locked
-        // channels, the bot's own member, one member already in voice) and, on request, VOICE_STATE_UPDATE: all through the REAL
-        // discord.js handlers. The bridge dials it through DISCORD_BRIDGE_API (loopback only). Every Sprint 13a and 13b case runs on it.
-        console.log('\n[8c] voice target: validate before leaving the working channel, Stage, removed favorite, guests, avatars');
+        // The mock Discord (mockDiscord, above) identifies, lists one guild in READY and dispatches GUILD_CREATE (voice, text, Stage, locked
+        // and full channels, the bot's own member, one member and some guests already in voice) and, on request, VOICE_STATE_UPDATE: all
+        // through the REAL discord.js handlers. The bridge dials it through DISCORD_BRIDGE_API (loopback only). Sprint 13b's cases run on it too.
+        console.log('\n[8c] voice target: validate before leaving the working channel, Stage, full, removed favorite, guests, avatars');
         {
           const GUILD = '900', ME = '1000';
           const VIEW = 1n << 10n, CONNECT = 1n << 20n, SPEAK = 1n << 21n;
           const userOf = (id, name, x = {}) => ({ id, username: name, discriminator: '0', avatar: x.avatar || null, bot: !!x.bot, global_name: x.global || null });
           const memberOf = (id, name, x = {}) => ({ user: userOf(id, name, x), nick: x.nick || null, roles: [], joined_at: x.guest ? null : '2020-01-01T00:00:00.000000+00:00', deaf: false, mute: !!x.mute, ...(x.guildAvatar ? { avatar: x.guildAvatar } : {}) });
-          const vstate = (userId, channelId, x = {}) => ({ user_id: userId, channel_id: channelId, guild_id: GUILD, deaf: false, mute: false, self_deaf: false, self_mute: !!x.selfMute, session_id: 's' + userId, suppress: false, self_video: false, self_stream: false, request_to_speak_timestamp: null, ...(x.member ? { member: x.member } : {}) });
-          const chan = (id, type, name, pos, over = []) => ({ id, type, name, position: pos, permission_overwrites: over, bitrate: 64000, user_limit: 0, guild_id: GUILD });
+          const vstate = (userId, channelId, x = {}) => ({ user_id: userId, channel_id: channelId, guild_id: GUILD, deaf: false, mute: false, self_deaf: !!x.selfDeaf, self_mute: !!x.selfMute, session_id: 's' + userId, suppress: false, self_video: false, self_stream: false, request_to_speak_timestamp: null, ...(x.member ? { member: x.member } : {}) });
+          const chan = (id, type, name, pos, over = [], limit = 0) => ({ id, type, name, position: pos, permission_overwrites: over, bitrate: 64000, user_limit: limit, guild_id: GUILD });
           const guildCreate = () => ({
             id: GUILD, name: 'Mock Guild', icon: null, owner_id: '2000', afk_timeout: 300, verification_level: 0, default_message_notifications: 0, explicit_content_filter: 0,
             roles: [{ id: GUILD, name: '@everyone', permissions: String(VIEW | CONNECT | SPEAK), position: 0, color: 0, hoist: false, managed: false, mentionable: false }],
             emojis: [], features: [], mfa_level: 0, system_channel_id: null, premium_tier: 0, premium_subscription_count: 0, preferred_locale: 'en-US', nsfw_level: 0,
             large: false, unavailable: false, member_count: 2, joined_at: '2020-01-01T00:00:00.000000+00:00', threads: [], stage_instances: [], guild_scheduled_events: [], presences: [],
-            channels: [chan('910', 2, 'voice-ok', 0), chan('911', 0, 'text', 1), chan('912', 13, 'stage', 2), chan('913', 2, 'locked', 3, [{ id: GUILD, type: 0, allow: '0', deny: String(VIEW | CONNECT) }]), chan('914', 2, 'second', 4)],
+            channels: [chan('910', 2, 'voice-ok', 0), chan('911', 0, 'text', 1), chan('912', 13, 'stage', 2), chan('913', 2, 'locked', 3, [{ id: GUILD, type: 0, allow: '0', deny: String(VIEW | CONNECT) }]), chan('914', 2, 'second', 4), chan('915', 2, 'full', 5, [], 1)],
             members: [memberOf(ME, 'mockbot', { bot: true }), memberOf('2001', 'Alice')],
-            voice_states: [vstate('2001', '910')],
+            // already in voice when the bridge joins: Alice (a member), two users that are not cached members (a guest and a bot) in the working channel,
+            // and a guest in the channel whose user limit is 1
+            voice_states: [vstate('2001', '910'), vstate('3004', '910'), vstate('3005', '910'), vstate('3003', '915')],
           });
-          const socks = new Set();
-          let seq = 0;
-          const send = (ws, t, d) => { try { ws.send(JSON.stringify({ op: 0, t, s: ++seq, d })); } catch { /* gone */ } };
-          const dispatchAll = (t, d) => { for (const ws of socks) send(ws, t, d); };
-          const gw = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-          gw.on('connection', (ws) => {
-            socks.add(ws); ws.on('close', () => socks.delete(ws)); ws.on('error', () => {});
-            ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45000 } }));
-            ws.on('message', (raw) => {
-              let m; try { m = JSON.parse(raw.toString()); } catch { return; }
-              if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
-              if (m.op === 2) {
-                send(ws, 'READY', { v: 10, user: userOf(ME, 'mockbot', { bot: true }), guilds: [{ id: GUILD, unavailable: true }], session_id: 'mock', resume_gateway_url: `ws://127.0.0.1:${gw.address().port}`, application: { id: ME, flags: 0 } });
-                setTimeout(() => send(ws, 'GUILD_CREATE', guildCreate()), 50);
-              }
-            });
-          });
-          await new Promise((res) => gw.once('listening', res));
-          const restSrv = createHttp((req, res) => {
-            res.setHeader('content-type', 'application/json');
-            if (/gateway\/bot/.test(req.url)) return res.end(JSON.stringify({ url: `ws://127.0.0.1:${gw.address().port}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }));
-            res.statusCode = 404; res.end(JSON.stringify(/\/channels\//.test(req.url) ? { code: 10003, message: 'Unknown Channel' } : { code: 10004, message: 'Unknown Guild' })); // any guild/channel REST lookup: the guilds that exist came with GUILD_CREATE
-          });
-          await new Promise((res) => restSrv.listen(0, '127.0.0.1', res));
+          const md = await mockDiscord({ guild: guildCreate, users: { 3004: userOf('3004', 'latecomer', { global: 'Late Comer' }), 3005: userOf('3005', 'otherbot', { bot: true }) } });
+          const token = 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC';
           const cfgGood = JSON.stringify({ favorites: [{ id: 'f914', name: 'second', serverId: GUILD, channelId: '914' }], current: { serverId: GUILD, channelId: '910' }, settings: {} });
-          const t = await rig({ token: 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC', cfgText: cfgGood, env: { DISCORD_BRIDGE_API: `http://127.0.0.1:${restSrv.address().port}/api` } });
+          const t = await rig({ token, cfgText: cfgGood, env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '2500' } });
           try {
             t.cmd('connect');
             const inGood = await t.waitFor((p) => p.connected === true && p.channelId === '910' && p.users['2001'], 8000);
             check('GRN-204 (harness): on the mock Discord the bot identifies, receives GUILD_CREATE through the real handlers and joins the saved channel with its roster (Alice)', !!inGood && inGood.users['2001'].username === 'Alice', JSON.stringify(inGood && Object.keys(inGood.users)));
-            const mark = t.got.length;
-            const use = async (serverId, channelId) => { t.cmd('set-current', JSON.stringify({ serverId, channelId })); await nap(900); return t.got.slice(mark).pop() || t.last; };
-            const unchanged = (p) => p && p.current && p.current.serverId === GUILD && p.current.channelId === '910' && p.channelId === '910' && p.users['2001'] && p.users['2001'].username === 'Alice';
+            const late = await t.waitFor((p) => p.users['3004'] && p.users['3004'].username === 'Late Comer', 4000);
+            await nap(300);
+            check('GRN-210: a guest who is already in the working channel when the bridge joins (Discord keeps no member for them) is listed by the name Discord has for them, and a bot there is not listed', !!late && !t.last.users['3005'], JSON.stringify(t.last.users));
+            const use = async (serverId, channelId, ms = 900) => { const m = t.got.length; t.cmd('set-current', JSON.stringify({ serverId, channelId })); await nap(ms); return t.got.slice(m).pop() || t.last; };
+            const waitAfter = async (mark, pred, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = t.got.slice(mark).find(pred); if (hit) return hit; await nap(100); } return null; };
+            const unchanged = (p) => p && p.current && p.current.serverId === GUILD && p.current.channelId === '910' && p.channelId === '910' && p.users['2001'] && p.users['2001'].username === 'Alice' && !!p.users['3004'];
             const savedCurrent = async () => JSON.parse(await readFile(t.env.DISCORD_BRIDGE_CONFIG, 'utf8')).current;
             const bads = [
               ['a guild the bot is not in', '999', '910', /isn.t in that server|unknown guild|not in/i],
@@ -1898,6 +1929,7 @@ async function main() {
               ['a Stage channel', GUILD, '912', /regular voice channel/i],
               ['a channel the bot cannot join', GUILD, '913', /cannot join|Connect|View Channel/i],
               ['a channel that does not exist', GUILD, '999999', /not found|Unknown Channel/i],
+              ['a channel that is full of guests (discord.js counts only cached members, the guest is not one)', GUILD, '915', /is full|user limit/i],
             ];
             for (const [what, sId, cId, msg] of bads) {
               const p = await use(sId, cId);
@@ -1905,44 +1937,120 @@ async function main() {
               check('GRN-204/80: USE on ' + what + ' is refused with a message, and the working channel, the roster and the saved current stay as they were',
                 unchanged(p) && msg.test((p.rpc && p.rpc.error) || '') && saved.channelId === '910', JSON.stringify({ current: p && p.current, channelId: p && p.channelId, users: p && Object.keys(p.users || {}), err: p && p.rpc && p.rpc.error, saved }));
             }
-            const m2 = t.got.length;
-            t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '914' })); await nap(900);
-            const moved = t.got.slice(m2).pop() || t.last;
+            // A check that is still running when a newer USE finishes cannot overwrite it: the slow refusal of the older pick arrives late and is dropped.
+            md.restDelay['/channels/999999'] = 1000;
+            t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '999999' }));
+            await nap(150);
+            t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '914' }));
+            await nap(2000);
+            delete md.restDelay['/channels/999999'];
+            const moved = t.last;
             const saved2 = await savedCurrent();
-            check('GRN-204: USE on a valid channel is accepted: it becomes the current channel, is saved, the roster is that channel\'s (empty) and the old error is gone', moved.current.channelId === '914' && moved.channelId === '914' && Object.keys(moved.users).length === 0 && !(moved.rpc && moved.rpc.error) && saved2.channelId === '914', JSON.stringify({ current: moved.current, channelId: moved.channelId, saved2 }));
-            // removing the active favorite makes the bot leave (GRN-153)
+            check('GRN-204: USE on a valid channel is accepted: it becomes the current channel, is saved, the roster is that channel\'s (empty) and the old error is gone', !!moved.current && moved.current.channelId === '914' && moved.channelId === '914' && Object.keys(moved.users).length === 0 && !(moved.rpc && moved.rpc.error) && !!saved2 && saved2.channelId === '914', JSON.stringify({ current: moved.current, channelId: moved.channelId, saved2, err: moved.rpc && moved.rpc.error }));
+            check('GRN-204: a slow check for an OLDER pick (finishing after a newer USE was accepted) is dropped: no stale error on the status line, the newer pick stays', !(moved.rpc && moved.rpc.error) && moved.current.channelId === '914', JSON.stringify(moved.rpc));
+            // removing a duplicate of the active favorite does not make the bot leave; removing the last one does (GRN-153)
+            t.cmd('favorite-add', JSON.stringify({ name: 'dup', serverId: GUILD, channelId: '914' })); await nap(500);
+            const dupFav = (t.last.favorites || []).find((f) => f.name === 'dup');
+            t.cmd('favorite-remove', JSON.stringify({ id: dupFav && dupFav.id })); await nap(900);
+            const afterDup = t.last;
+            check('GRN-153: removing a DUPLICATE of the current channel\'s favorite keeps the bot in the channel (another favorite still names it)', !!dupFav && !!afterDup.current && afterDup.current.channelId === '914' && afterDup.channelId === '914' && !afterDup.favorites.some((f) => f.name === 'dup') && afterDup.favorites.some((f) => f.id === 'f914'), JSON.stringify({ dupFav, current: afterDup.current, channelId: afterDup.channelId }));
+            const stg = await use(GUILD, '912', 600);
             t.cmd('favorite-remove', JSON.stringify({ id: 'f914' })); await nap(900);
             const removed = t.last;
             const saved3 = await savedCurrent();
-            check('GRN-153: removing the favorite that is the current channel clears the current channel and leaves voice', removed.current === null && removed.channelId === null && Object.keys(removed.users).length === 0 && !removed.favorites.some((f) => f.id === 'f914') && saved3 === null, JSON.stringify({ current: removed.current, channelId: removed.channelId, saved3 }));
+            check('GRN-153: removing the last favorite for the current channel clears the current channel and leaves voice, and the refusal that was on the status line is gone', /regular voice channel/.test((stg.rpc && stg.rpc.error) || '') && removed.current === null && removed.channelId === null && Object.keys(removed.users).length === 0 && !removed.favorites.some((f) => f.id === 'f914') && saved3 === null && !(removed.rpc && removed.rpc.error), JSON.stringify({ current: removed.current, channelId: removed.channelId, saved3, err: removed.rpc && removed.rpc.error }));
             // back to 910 for the roster cases
-            const waitAfter = async (mark, pred, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = t.got.slice(mark).find(pred); if (hit) return hit; await nap(100); } return null; };
             const mkBack = t.got.length;
             t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
-            await waitAfter(mkBack, (p) => p.channelId === '910' && p.users['2001'], 4000);
-            // a guest-invite user joins and leaves, a member with a per-server avatar joins, a member departs (GRN-210, 166)
+            const back = await waitAfter(mkBack, (p) => p.channelId === '910' && p.users['2001'] && p.users['3004'], 5000);
+            check('GRN-210: a guest named once (looked up) is on the roster again when the bridge joins the channel a second time', !!back && back.users['3004'].username === 'Late Comer', JSON.stringify(back && back.users));
+            // a guest-invite user joins, mutes, is re-seeded, leaves, moves (GRN-210)
+            const guestM = (x = {}) => memberOf('3001', 'guestuser', { guest: true, nick: 'GuestNick', global: 'Guest G', ...x });
             const mkGuest = t.got.length;
-            dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '910', { member: memberOf('3001', 'guestuser', { guest: true, nick: 'GuestNick', global: 'Guest G' }) }));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '910', { member: guestM() }));
             const guestIn = await waitAfter(mkGuest, (p) => p.users['3001'], 3000);
-            check('GRN-210: a guest-invite user (no joined_at) who joins the working channel appears with their nickname', !!guestIn && guestIn.users['3001'].username === 'GuestNick', JSON.stringify(guestIn && guestIn.users['3001']));
-            dispatchAll('VOICE_STATE_UPDATE', vstate('3001', null, { member: memberOf('3001', 'guestuser', { guest: true, nick: 'GuestNick' }) }));
+            check('GRN-210: a guest-invite user (no joined_at) who joins the working channel appears with their nickname, not muted', !!guestIn && guestIn.users['3001'].username === 'GuestNick' && guestIn.users['3001'].mute === false && guestIn.users['3001'].deaf === false, JSON.stringify(guestIn && guestIn.users['3001']));
+            const mkMute = t.got.length;
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '910', { selfMute: true, selfDeaf: true, member: guestM({ nick: 'RenamedGuest' }) }));
+            const guestMuted = await waitAfter(mkMute, (p) => p.users['3001'] && p.users['3001'].mute === true, 3000);
+            check('GRN-210: a guest who mutes and deafens (and changes their nickname) shows it: the roster\'s flags and name follow their voice state', !!guestMuted && guestMuted.users['3001'].deaf === true && guestMuted.users['3001'].username === 'RenamedGuest', JSON.stringify(guestMuted && guestMuted.users['3001']));
+            const again = await use(GUILD, '910', 1100);
+            check('GRN-210: a guest in the call stays on the roster, with their flags, when the bridge joins the channel again (USE on the channel it is already in)', !!again.users['3001'] && again.users['3001'].username === 'RenamedGuest' && again.users['3001'].mute === true && !!again.users['2001'] && !!again.users['3004'], JSON.stringify(again.users));
+            await use(GUILD, '914', 600);
+            const there = await use(GUILD, '910', 1100);
+            check('GRN-210: …and after the bridge moved away and back', !!there.users['3001'] && !!there.users['2001'], JSON.stringify(Object.keys(there.users)));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3001', null, { member: guestM() }));
             await nap(600);
-            check('GRN-210: …and is removed when they leave', !t.last.users['3001'], JSON.stringify(Object.keys(t.last.users)));
-            dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
+            check('GRN-210: …and is removed when they leave', !!guestIn && !t.last.users['3001'] && !!t.last.users['2001'], JSON.stringify(Object.keys(t.last.users)));
+            const mkRe = t.got.length;
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '910', { member: guestM() }));
+            await waitAfter(mkRe, (p) => p.users['3001'], 3000);
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3001', '914', { member: guestM() }));
+            await nap(600);
+            check('GRN-210: a guest who moves to another channel leaves the roster of the working channel', !t.last.users['3001'], JSON.stringify(Object.keys(t.last.users)));
+            // a join and a leave in one read leave nobody behind
+            const mem = (id, name, x = {}) => memberOf(id, name, x);
+            md.dispatchBatch([
+              ['VOICE_STATE_UPDATE', vstate('3006', '910', { member: mem('3006', 'blip', { guest: true, nick: 'Blip' }) })],
+              ['VOICE_STATE_UPDATE', vstate('3006', null, { member: mem('3006', 'blip', { guest: true, nick: 'Blip' }) })],
+              ['VOICE_STATE_UPDATE', vstate('2003', '910', { member: mem('2003', 'dave') })],
+              ['VOICE_STATE_UPDATE', vstate('2003', null, { member: mem('2003', 'dave') })],
+            ]);
+            await nap(700);
+            check('GRN-210: a join and a leave that arrive together (one read) leave nobody behind: no row for a guest or a member who is already gone', !t.last.users['3006'] && !t.last.users['2003'], JSON.stringify(Object.keys(t.last.users)));
+            // a frame with no member object adds nothing
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('4001', '910'));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910'));
+            await nap(600);
+            check('GRN-210: a voice-state frame with no member object does not add a nameless row (an id nobody knows, the bot itself)', !t.last.users['4001'] && !t.last.users[ME], JSON.stringify(Object.keys(t.last.users)));
+            // a member with a per-server avatar joins, a member departs (GRN-166)
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
             const carol = await t.waitFor((p) => p.users['2002'] && /\/guilds\/900\//.test(p.users['2002'].avatarUrl), 3000) || t.last;
-            check('GRN-166: a member with a per-server avatar shows it (the guild avatar path), not the account avatar', !!carol && /\/guilds\/900\/users\/2002\/avatars\/abc123def/.test(carol.users['2002'].avatarUrl), JSON.stringify(carol && carol.users['2002']));
-            dispatchAll('VOICE_STATE_UPDATE', vstate('2001', '914'));
+            check('GRN-166: a member with a per-server avatar shows it (the guild avatar path), not the account avatar', !!carol && !!carol.users['2002'] && /\/guilds\/900\/users\/2002\/avatars\/abc123def/.test(carol.users['2002'].avatarUrl), JSON.stringify(carol && carol.users['2002']));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2001', '914'));
             await nap(600);
             check('GRN-210: a member who moves to another channel leaves the roster of the working channel', !t.last.users['2001'] && !!t.last.users['2002'], JSON.stringify(Object.keys(t.last.users)));
-            // only known members get a speaking flag (GRN-12)
-            t.cmd('test-speaking', '9999999');
-            await nap(500);
-            t.cmd('test-speaking', '2002');
-            const spk = await t.waitFor((p) => p.users['2002'] && p.users['2002'].speaking === true, 3000);
-            check('GRN-12: a speaking event for a user who is not in the roster does not add them; one for a member sets the flag', !t.last.users['9999999'] && !!spk, JSON.stringify(Object.keys(t.last.users)));
+            // only a member of the working channel gets a speaking flag (GRN-12): not an id nobody knows, not the bot, not a member who has left
+            for (const id of ['9999999', ME, '2001']) { t.cmd('test-speaking', id); await nap(250); }
+            t.cmd('test-speaking', '2002'); t.cmd('test-speaking', '3004');
+            const spk = await t.waitFor((p) => p.users['2002'] && p.users['2002'].speaking === true && p.users['3004'] && p.users['3004'].speaking === true, 3000);
+            check('GRN-12: a speaking event for an id that is not in the roster (unknown, the bot itself, a member who has left) adds no row; one for a member or a guest in the call sets the flag', !t.last.users['9999999'] && !t.last.users[ME] && !t.last.users['2001'] && !!spk, JSON.stringify(t.last.users));
+            // a refusal does not stay on the status line for the rest of the stream
+            const refused = await use(GUILD, '912', 600);
+            await nap(2700);
+            check('GRN-204: a refusal is shown for a while and then clears (the bot is still working in its channel, so the status is not left red for the rest of the stream)', /regular voice channel/.test((refused.rpc && refused.rpc.error) || '') && !(t.last.rpc && t.last.rpc.error) && t.last.channelId === '910', JSON.stringify({ shown: refused.rpc, now: t.last.rpc, channelId: t.last.channelId }));
+            // a config file that cannot be written: the pick is not applied and the error says so
+            await rm(t.env.DISCORD_BRIDGE_CONFIG, { force: true });
+            await mkdir(t.env.DISCORD_BRIDGE_CONFIG);
+            const failed = await use(GUILD, '914', 1100);
+            check('GRN-204: if the config cannot be saved the pick is not applied: the working channel and the current channel stay, and the status says the save failed', !!failed.current && failed.current.channelId === '910' && failed.channelId === '910' && /could not save/i.test((failed.rpc && failed.rpc.error) || ''), JSON.stringify({ current: failed.current, channelId: failed.channelId, err: failed.rpc && failed.rpc.error }));
+            await rm(t.env.DISCORD_BRIDGE_CONFIG, { recursive: true, force: true });
+            const saved4 = await use(GUILD, '914', 1100);
+            check('GRN-204: …and the next pick works once the file can be written', saved4.current.channelId === '914' && saved4.channelId === '914' && !(saved4.rpc && saved4.rpc.error) && (await savedCurrent()).channelId === '914', JSON.stringify({ current: saved4.current, channelId: saved4.channelId }));
+            t.close();
+            // offline: a pick made while the bot is offline keeps the message that says why it is offline
+            const off = await rig();
+            off.cmd('connect');
+            await off.waitFor((p) => /No bot token/.test((p.rpc && p.rpc.error) || ''), 4000);
+            off.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '914' })); await nap(700);
+            check('GRN-204: an offline USE saves the pick and leaves the reason the bot is offline on the status line (it is not erased)', !!off.last.current && off.last.current.channelId === '914' && /No bot token/.test((off.last.rpc && off.last.rpc.error) || ''), JSON.stringify({ current: off.last.current, err: off.last.rpc && off.last.rpc.error }));
+            off.close();
+            // a saved channel that fails its check at login is not joined, is marked, and a cleared channel clears the mark
+            const lg = await rig({ token, cfgText: JSON.stringify({ favorites: [], current: { serverId: GUILD, channelId: '912' }, settings: {} }), env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '1000' } });
+            lg.cmd('connect');
+            const refusedAtLogin = await lg.waitFor((p) => p.connected === true && /regular voice channel/.test((p.rpc && p.rpc.error) || ''), 8000);
+            check('GRN-204: a saved channel that fails its check at login (a Stage) is not joined; it stays the saved pick but is marked currentRefused', !!refusedAtLogin && refusedAtLogin.current.channelId === '912' && refusedAtLogin.channelId === null && refusedAtLogin.currentRefused === true, JSON.stringify(refusedAtLogin && { current: refusedAtLogin.current, channelId: refusedAtLogin.channelId, currentRefused: refusedAtLogin.currentRefused }));
+            await nap(1600);
+            check('GRN-204: …and unlike the refusal of a USE (which clears after a while), the reason stays on the status line for as long as the saved pick is refused', lg.last.currentRefused === true && /regular voice channel/.test((lg.last.rpc && lg.last.rpc.error) || ''), JSON.stringify({ currentRefused: lg.last.currentRefused, err: lg.last.rpc && lg.last.rpc.error }));
+            lg.cmd('set-current', JSON.stringify({ serverId: '', channelId: '' })); await nap(800);
+            check('GRN-204: clearing the channel clears that pick and the mark', lg.last.current === null && lg.last.currentRefused === false, JSON.stringify({ current: lg.last.current, currentRefused: lg.last.currentRefused }));
+            lg.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
+            const joined = await lg.waitFor((p) => p.channelId === '910' && p.users['2001'], 5000);
+            check('GRN-204: …and a good pick after that joins', !!joined && joined.currentRefused === false, JSON.stringify(joined && Object.keys(joined.users)));
+            lg.close();
           } finally {
             t.close();
-            await new Promise((res) => gw.close(res)); restSrv.close();
+            await md.close();
           }
         }
       } finally {
