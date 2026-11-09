@@ -286,7 +286,9 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   "settings": { "streamerUserId": "", "avatarPx": 56, "streamerPx": 72, "height": 180,
                 "accent": "cyan", "scanlines": true, "neonBlink": true, "hideWhenAbsent": true,
                 "exitOnSbClose": false },
-  "rpc": { "enabled": true, "hasToken": true, "error": "" },
+  "rpc": { "enabled": true, "hasToken": true, "error": "",
+           "reconnecting": false,   // the gateway is resuming or re-identifying (additive)
+           "speakingStale": false },// speaking detection looks dead (additive)
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
   "current": { "serverId": "…", "channelId": "…" } | null,
   "currentRefused": false,        // the saved `current` failed its check at login and is not joined (additive)
@@ -312,6 +314,25 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   linger in the channel after you close SB. The env var
   `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set, and the argument
   `--exit-on-sb-close=1/0` overrides both. The grace window is never shorter than 1 s.
+- `rpc.reconnecting` is true while Discord's gateway is resuming or re-identifying
+  (`connected` stays true: the roster overlay hides on `!connected`, and a resume
+  replays what was missed). `rpc.speakingStale` is true when the bot is in the
+  channel, someone present is unmuted and undeafened, and no speaking start has
+  arrived for several minutes (or a glow has stayed on for minutes): speaking
+  detection uses Discord's voice receive, which Discord does not document, and may
+  need `npm update` in `sidecar/` after a Discord change. It is a separate flag, not
+  an `rpc.error`. Both are additive.
+- **Voice recovery.** A voice connection that drops is rejoined by the bridge with a
+  backoff of 2, 5, 15 and 30 s, then every 30 s; after about 10 s outside Ready the
+  payload says `hostInChannel: false` with "Voice connection lost, reconnecting…",
+  and after about 30 s the connection is dropped (no channel, empty roster) and
+  rebuilt. A removal by Discord (voice close code 4014, 4021 or 4022) **parks** the
+  bridge ("Removed from voice (…), press USE to rejoin"): it waits for USE or
+  Connect. The exception is a 4014 within 15 s of a gateway reconnect, which is a
+  dropped session and is rejoined. Dragging the bot to another channel in Discord
+  makes the roster follow it (`channelId` changes, `current` does not); USE brings
+  it back. A login that fails is retried with a capped backoff (5 s, doubling, up to
+  5 minutes) unless the token is rejected.
 - `hb`, `stopped` and `bridgeVersion` are additive (a consumer that does not know
   them ignores them). The bridge pushes at least every `hb` ms (5000) even when
   nothing changed, so a consumer can tell a live bridge from one that died with
@@ -334,7 +355,7 @@ absent, is dropped (only the types are logged): anyone on the bus can send any J
 | command | value | effect |
 |---|---|---|
 | `connect` | — | (re)start the bot with the FILE token; visible error if none |
-| `leave` | — | leave voice gracefully, stay logged in, clear auto-rejoin intent |
+| `leave` | — | leave voice gracefully, stay logged in, clear the rejoin intent and cancel a pending rejoin (the intent is kept in memory only: a bridge restart wants voice again). With no connection to close, a bot that Discord still shows in the call is told to leave (a gateway voice-state update with no channel) |
 | `reset-auth` | — | forget the saved token (file keeps `enabled`) |
 | `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live; empty ids leave). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join (View Channel + Connect, room under the user limit; guests count). A target that fails is refused with a message in `rpc.error` (it clears itself after about a minute) and **changes nothing**: the current channel, the saved file, the voice connection and the roster stay. A pick that cannot be saved to the config file is not applied either (`rpc.error` says so). When USEs overlap, the newest decides. Offline, the pick is saved (the reason the bot is offline stays in `rpc.error`) and the same check runs when the bot logs in: a saved channel that fails it is not joined, stays `current`, and the payload says `currentRefused: true` until the pick changes |
 | `favorite-add` | `{"name","serverId","channelId"}` | add favorite |

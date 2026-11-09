@@ -214,8 +214,11 @@ Extracted from a personal streaming toolkit, where this ran as part of a bespoke
 ControlPanel + relay-service stack; the port design is documented in that
 repo's research notes (the director enumeration moved into the control page, the
 bot became this sidecar, and Streamer.bot's WS replaced the relay). The
-battle-tested parts — rejoin races, the Discord error taxonomy, the BigInt
-default-avatar math, the 100 ms coalesce — carried over unchanged.
+parts that carried over are the Discord error taxonomy, the BigInt
+default-avatar math and the 100 ms coalesce. The voice rejoin (a backoff of 2, 5,
+15 and 30 s, parked after Discord removes the bot from the call), the roster
+reconcile after a gateway resume or re-identify, and the login retry are this
+plugin's own.
 
 ## Author & support
 

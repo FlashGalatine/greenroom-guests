@@ -1554,6 +1554,16 @@ async function main() {
         if (!opts.noWait) await r.waitFor(() => true, 8000); // the first push
         return r;
       }
+      // Fixtures for the mock Discord: one guild (900), the bot's own user (1000), and builders for users, members, voice states and channels.
+      const DF = (() => {
+        const GUILD = '900', ME = '1000';
+        const VIEW = 1n << 10n, CONNECT = 1n << 20n, SPEAK = 1n << 21n;
+        const userOf = (id, name, x = {}) => ({ id, username: name, discriminator: '0', avatar: x.avatar || null, bot: !!x.bot, global_name: x.global || null });
+        const memberOf = (id, name, x = {}) => ({ user: userOf(id, name, x), nick: x.nick || null, roles: [], joined_at: x.guest ? null : '2020-01-01T00:00:00.000000+00:00', deaf: false, mute: !!x.mute, ...(x.guildAvatar ? { avatar: x.guildAvatar } : {}) });
+        const vstate = (userId, channelId, x = {}) => ({ user_id: userId, channel_id: channelId, guild_id: GUILD, deaf: false, mute: false, self_deaf: !!x.selfDeaf, self_mute: !!x.selfMute, session_id: 's' + userId, suppress: false, self_video: false, self_stream: false, request_to_speak_timestamp: null, ...(x.member ? { member: x.member } : {}) });
+        const chan = (id, type, name, pos, over = [], limit = 0) => ({ id, type, name, position: pos, permission_overwrites: over, bitrate: 64000, user_limit: limit, guild_id: GUILD });
+        return { GUILD, ME, VIEW, CONNECT, SPEAK, userOf, memberOf, vstate, chan };
+      })();
       // A mock Discord for the real discord.js inside the bridge (DISCORD_BRIDGE_API, loopback only): a REST server and a gateway. The
       // gateway answers heartbeats, identifies (READY, then GUILD_CREATE from guild()), RESUMEs (op 6 -> RESUMED) and records the
       // voice-state requests (op 4: this mock has no voice server, so a voice connection never becomes ready). Controls: dispatchAll(t, d)
@@ -1563,12 +1573,14 @@ async function main() {
       // GUILD_CREATE). Sprint 13b's gateway cases (re-identify, resume, leave while reconnecting) run on the same mock.
       async function mockDiscord({ guild, users = {} }) {
         const socks = new Set();
-        const st = { identifies: 0, resumes: 0, ops4: [], holdHelloMs: 0, seq: 0, restDelay: {} };
+        // gatewayFailNext: the next N REST lookups of the gateway URL (the first thing a login does) answer gatewayStatus (after gatewayDelay ms)
+        // instead of the URL; gatewayHits counts them; connections counts gateway sockets accepted.
+        const st = { identifies: 0, resumes: 0, ops4: [], holdHelloMs: 0, seq: 0, restDelay: {}, gatewayFailNext: 0, gatewayStatus: 500, gatewayDelay: 0, gatewayHits: 0, connections: 0 };
         const send = (ws, t, d) => { try { ws.send(JSON.stringify({ op: 0, t, s: ++st.seq, d })); } catch { /* gone */ } };
         const gw = new WebSocketServer({ port: 0, host: '127.0.0.1' });
         const me = guild().members.find((m) => m.user.bot).user;
         gw.on('connection', async (ws) => {
-          socks.add(ws); ws.on('close', () => socks.delete(ws)); ws.on('error', () => {});
+          socks.add(ws); st.connections++; ws.on('close', () => socks.delete(ws)); ws.on('error', () => {});
           ws.on('message', (raw) => {
             let m; try { m = JSON.parse(raw.toString()); } catch { return; }
             if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
@@ -1585,6 +1597,13 @@ async function main() {
         await new Promise((res) => gw.once('listening', res));
         const rest = createHttp(async (req, res) => {
           res.setHeader('content-type', 'application/json');
+          if (/gateway\/bot/.test(req.url)) st.gatewayHits++;
+          if (/gateway\/bot/.test(req.url) && st.gatewayFailNext > 0) {
+            st.gatewayFailNext--;
+            if (st.gatewayDelay) await nap(st.gatewayDelay);
+            res.statusCode = st.gatewayStatus;
+            return res.end(JSON.stringify({ message: st.gatewayStatus === 401 ? '401: Unauthorized' : 'mock gateway failure', code: 0 }));
+          }
           if (/gateway\/bot/.test(req.url)) return res.end(JSON.stringify({ url: `ws://127.0.0.1:${gw.address().port}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }));
           const slow = Object.keys(st.restDelay).find((k) => req.url.includes(k));
           if (slow) await nap(st.restDelay[slow]);
@@ -1891,12 +1910,7 @@ async function main() {
         // through the REAL discord.js handlers. The bridge dials it through DISCORD_BRIDGE_API (loopback only). Sprint 13b's cases run on it too.
         console.log('\n[8c] voice target: validate before leaving the working channel, Stage, full, removed favorite, guests, avatars');
         {
-          const GUILD = '900', ME = '1000';
-          const VIEW = 1n << 10n, CONNECT = 1n << 20n, SPEAK = 1n << 21n;
-          const userOf = (id, name, x = {}) => ({ id, username: name, discriminator: '0', avatar: x.avatar || null, bot: !!x.bot, global_name: x.global || null });
-          const memberOf = (id, name, x = {}) => ({ user: userOf(id, name, x), nick: x.nick || null, roles: [], joined_at: x.guest ? null : '2020-01-01T00:00:00.000000+00:00', deaf: false, mute: !!x.mute, ...(x.guildAvatar ? { avatar: x.guildAvatar } : {}) });
-          const vstate = (userId, channelId, x = {}) => ({ user_id: userId, channel_id: channelId, guild_id: GUILD, deaf: false, mute: false, self_deaf: !!x.selfDeaf, self_mute: !!x.selfMute, session_id: 's' + userId, suppress: false, self_video: false, self_stream: false, request_to_speak_timestamp: null, ...(x.member ? { member: x.member } : {}) });
-          const chan = (id, type, name, pos, over = [], limit = 0) => ({ id, type, name, position: pos, permission_overwrites: over, bitrate: 64000, user_limit: limit, guild_id: GUILD });
+          const { GUILD, ME, VIEW, CONNECT, SPEAK, userOf, memberOf, vstate, chan } = DF;
           const guildCreate = () => ({
             id: GUILD, name: 'Mock Guild', icon: null, owner_id: '2000', afk_timeout: 300, verification_level: 0, default_message_notifications: 0, explicit_content_filter: 0,
             roles: [{ id: GUILD, name: '@everyone', permissions: String(VIEW | CONNECT | SPEAK), position: 0, color: 0, hoist: false, managed: false, mentionable: false }],
@@ -1910,8 +1924,10 @@ async function main() {
           });
           const md = await mockDiscord({ guild: guildCreate, users: { 3004: userOf('3004', 'latecomer', { global: 'Late Comer' }), 3005: userOf('3005', 'otherbot', { bot: true }) } });
           const token = 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC';
+          // These mock connections never get a voice server, so the stall watchdogs (Sprint 13b) are switched off here: [8d] tests them.
+          const NO_WATCH = JSON.stringify({ notReadyMs: 0, stallWarnMs: 0, stallLostMs: 0 });
           const cfgGood = JSON.stringify({ favorites: [{ id: 'f914', name: 'second', serverId: GUILD, channelId: '914' }], current: { serverId: GUILD, channelId: '910' }, settings: {} });
-          const t = await rig({ token, cfgText: cfgGood, env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '2500' } });
+          const t = await rig({ token, cfgText: cfgGood, env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '2500', GREENROOM_TIMING: NO_WATCH } });
           try {
             t.cmd('connect');
             const inGood = await t.waitFor((p) => p.connected === true && p.channelId === '910' && p.users['2001'], 8000);
@@ -2036,7 +2052,7 @@ async function main() {
             check('GRN-204: an offline USE saves the pick and leaves the reason the bot is offline on the status line (it is not erased)', !!off.last.current && off.last.current.channelId === '914' && /No bot token/.test((off.last.rpc && off.last.rpc.error) || ''), JSON.stringify({ current: off.last.current, err: off.last.rpc && off.last.rpc.error }));
             off.close();
             // a saved channel that fails its check at login is not joined, is marked, and a cleared channel clears the mark
-            const lg = await rig({ token, cfgText: JSON.stringify({ favorites: [], current: { serverId: GUILD, channelId: '912' }, settings: {} }), env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '1000' } });
+            const lg = await rig({ token, cfgText: JSON.stringify({ favorites: [], current: { serverId: GUILD, channelId: '912' }, settings: {} }), env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '1000', GREENROOM_TIMING: NO_WATCH } });
             lg.cmd('connect');
             const refusedAtLogin = await lg.waitFor((p) => p.connected === true && /regular voice channel/.test((p.rpc && p.rpc.error) || ''), 8000);
             check('GRN-204: a saved channel that fails its check at login (a Stage) is not joined; it stays the saved pick but is marked currentRefused', !!refusedAtLogin && refusedAtLogin.current.channelId === '912' && refusedAtLogin.channelId === null && refusedAtLogin.currentRefused === true, JSON.stringify(refusedAtLogin && { current: refusedAtLogin.current, channelId: refusedAtLogin.channelId, currentRefused: refusedAtLogin.currentRefused }));
@@ -2050,6 +2066,359 @@ async function main() {
             lg.close();
           } finally {
             t.close();
+            await md.close();
+          }
+        }
+        // ── 8d. the voice lifecycle and the login (Sprint 13b) ──
+        // Every case runs the REAL bridge (real discord.js, real @discordjs/voice VoiceConnection) on the mock Discord. The mock has no voice
+        // server, so a voice connection never reaches Ready by itself: the test hooks (GREENROOM_TEST_HOOKS=1, `test-voice`) move the real
+        // connection through its real state setter, exactly as the library's networking would, and `GREENROOM_TIMING` shortens the timers.
+        console.log('\n[8d] voice lifecycle: drop and rejoin, park after a kick, moves, resume, re-identify, 4004, guildAvailable, stall, late Ready, superseded client, login retry');
+        {
+          const { GUILD, ME, VIEW, CONNECT, SPEAK, userOf, memberOf, vstate, chan } = DF;
+          const where = { 2001: '910', 2002: '914', [ME]: null }; // who is in which voice channel right now (the mock's truth)
+          const guildNow = () => ({
+            id: GUILD, name: 'Mock Guild', icon: null, owner_id: '2000', afk_timeout: 300, verification_level: 0, default_message_notifications: 0, explicit_content_filter: 0,
+            roles: [{ id: GUILD, name: '@everyone', permissions: String(VIEW | CONNECT | SPEAK), position: 0, color: 0, hoist: false, managed: false, mentionable: false }],
+            emojis: [], features: [], mfa_level: 0, system_channel_id: null, premium_tier: 0, premium_subscription_count: 0, preferred_locale: 'en-US', nsfw_level: 0,
+            large: false, unavailable: false, member_count: 3, joined_at: '2020-01-01T00:00:00.000000+00:00', threads: [], stage_instances: [], guild_scheduled_events: [], presences: [],
+            channels: [chan('910', 2, 'main', 0), chan('914', 2, 'second', 1), chan('912', 13, 'stage', 2)],
+            members: [memberOf(ME, 'mockbot', { bot: true }), memberOf('2001', 'Alice'), memberOf('2002', 'Bob'), memberOf('2003', 'Carol')],
+            voice_states: Object.entries(where).filter(([, c]) => c).map(([u, c]) => vstate(u, c)),
+          });
+          const md = await mockDiscord({ guild: guildNow, users: {} });
+          const token = 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC';
+          const cur = (channelId = '910') => JSON.stringify({ favorites: [], current: channelId ? { serverId: GUILD, channelId } : null, settings: {} });
+          const OFF = { notReadyMs: 0, stallWarnMs: 0, stallLostMs: 0, backoffMs: [200, 300], disconnectRaceMs: 300, sessionDropMs: 200, loginStartMs: 250, loginCapMs: 500, speakingStaleMs: 0, stuckGlowMs: 0 };
+          const mk = async (timing = {}, o = {}) => {
+            const t = await rig({ token, cfgText: o.cfg !== undefined ? o.cfg : cur(), env: { DISCORD_BRIDGE_API: md.api, GREENROOM_TIMING: JSON.stringify({ ...OFF, ...timing }) } });
+            if (!o.noConnect) {
+              t.cmd('connect');
+              if (o.waitJoin !== false) await t.waitFor((p) => p.connected === true && p.channelId === '910' && p.users['2001'], 8000);
+            }
+            return t;
+          };
+          const vc = (t, o) => t.cmd('test-voice', JSON.stringify(o));
+          const wa = async (t, mark, pred, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = t.got.slice(mark).find(pred); if (hit) return hit; await nap(50); } return null; };
+          const ready = async (t) => { const m = t.got.length; vc(t, { do: 'state', status: 'ready' }); return wa(t, m, (p) => p.hostInChannel === true, 3000); };
+          const err = (p) => (p && p.rpc && p.rpc.error) || '';
+          const mkSock = () => md.ops4.length;
+          try {
+            // ── a stall, the loss, the backoff and the rejoin (GRN-141, GRN-49, GRN-53) ──
+            {
+              const t = await mk({ stallWarnMs: 400, stallLostMs: 1100, backoffMs: [300, 700] });
+              const up = await ready(t);
+              check('GRN-53 (harness): the real VoiceConnection is moved to Ready: hostInChannel is true, the status line is empty and the roster is the channel\'s', !!up && !err(up) && !!up.users['2001'], JSON.stringify(up && { h: up.hostInChannel, e: err(up) }));
+              const m0 = t.got.length, o0 = mkSock();
+              vc(t, { do: 'close', code: 4006 });
+              const warn = await wa(t, m0, (p) => p.hostInChannel === false && /reconnecting/i.test(err(p)), 2500);
+              check('GRN-141: a connection that stays outside Ready for the warn time (about 10 s) shows "reconnecting" and hostInChannel false, and keeps the roster (it does not give up yet)', !!warn && warn.channelId === '910' && !!warn.users['2001'], JSON.stringify(warn && { c: warn.channelId, e: err(warn) }));
+              const lost = await wa(t, m0, (p) => p.channelId === null && /rejoining/i.test(err(p)), 3000);
+              check('GRN-49/141: …after the loss time (about 30 s) the connection is dropped: no channel, an empty roster, "Voice connection lost, rejoining…"', !!lost && Object.keys(lost.users).length === 0 && lost.current && lost.current.channelId === '910', JSON.stringify(lost && { c: lost.channelId, u: Object.keys(lost.users), e: err(lost) }));
+              const back = await wa(t, m0, (p) => p.channelId === '910' && p.users['2001'] && lost && t.got.indexOf(p) > t.got.indexOf(lost), 4000);
+              check('GRN-49: …and the bridge rejoins by itself after the backoff, with the roster back, and asked Discord to join (op 4)', !!back && md.ops4.slice(o0).filter((d) => d.channel_id === '910').length >= 2, JSON.stringify({ ops4: md.ops4.slice(o0) }));
+              const up2 = await ready(t);
+              check('GRN-53: …Ready on the new connection clears the message and sets hostInChannel', !!up2 && !err(up2), JSON.stringify(up2 && err(up2)));
+              const oReady = md.ops4.length;
+              await nap(1600);
+              check('GRN-49: …and Ready cancels the backoff: nothing rejoins after that (one connection, no more joins)', t.last.channelId === '910' && t.last.hostInChannel === true && md.ops4.length === oReady, JSON.stringify({ ops4: md.ops4.length - oReady }));
+              t.close();
+            }
+            // ── the backoff steps ──
+            {
+              const t = await mk({ stallLostMs: 400, backoffMs: [250, 500] }, {});
+              await nap(3200);
+              const steps = [...t.out.matchAll(/rejoin in (\d+)ms/g)].map((x) => Number(x[1]));
+              check('GRN-49: a connection that never gets Ready is retried with the backoff steps (250, then 500, then 500 ms here), one at a time', steps.length >= 3 && steps[0] === 250 && steps[1] === 500 && steps[2] === 500, JSON.stringify(steps));
+              t.close();
+            }
+            // ── a kick parks the bridge; USE and Connect bring it back (GRN-49) ──
+            {
+              const t = await mk({ sessionDropMs: 100 });
+              await ready(t);
+              await nap(400);
+              const o0 = mkSock(), m0 = t.got.length;
+              vc(t, { do: 'close', code: 4014 });
+              const parked = await wa(t, m0, (p) => p.channelId === null && /Removed from voice \(.*4014.*\).*USE/i.test(err(p)), 3000);
+              check('GRN-49: a close with code 4014 (removed from the call) is not retried: "Removed from voice (…), press USE to rejoin", no channel, empty roster', !!parked && Object.keys(parked.users).length === 0, JSON.stringify(parked && { c: parked.channelId, e: err(parked) }));
+              await nap(1500);
+              check('GRN-49: …and nothing rejoins on its own while it is parked (no join is sent: only the leave of the destroyed connection)', t.last.channelId === null && !md.ops4.slice(o0).some((d) => d.channel_id) && /Removed from voice/.test(err(t.last)), JSON.stringify({ ops4: md.ops4.slice(o0), c: t.last.channelId }));
+              // every path that could bring it back on its own respects the parked state: a gateway resume, a server that becomes available
+              const r0 = md.resumes, o1 = mkSock();
+              md.dropAll(4000);
+              await until(() => md.resumes > r0, 8000);
+              md.dispatchAll('GUILD_DELETE', { id: GUILD, unavailable: true });
+              await nap(100);
+              md.dispatchAll('GUILD_CREATE', guildNow());
+              await nap(700);
+              check('GRN-49: …not even when the gateway resumes or the server becomes available again (every path that rejoins respects the parked state)', t.last.channelId === null && /Removed from voice/.test(err(t.last)) && !md.ops4.slice(o1).some((d) => d.channel_id), JSON.stringify({ ops4: md.ops4.slice(o1), c: t.last.channelId }));
+              const m1 = t.got.length;
+              t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
+              const used = await wa(t, m1, (p) => p.channelId === '910' && p.users['2001'], 4000);
+              check('GRN-49: USE on the channel brings it back from the parked state', !!used && !/Removed/.test(err(used)), JSON.stringify(used && err(used)));
+              await ready(t); await nap(400);
+              const m2 = t.got.length;
+              // (the library turns only a 4014 into a Disconnected state with a close code; the hook forges the others to exercise the list)
+              vc(t, { do: 'disconnect', reason: 0, code: 4021 });
+              const parked2 = await wa(t, m2, (p) => p.channelId === null && /Removed from voice \(.*4021/i.test(err(p)), 3000);
+              t.cmd('connect');
+              const conn2 = await wa(t, m2, (p) => p.connected === true && p.channelId === '910' && p.users['2001'] && !/Removed/.test(err(p)), 8000);
+              check('GRN-49: code 4021 parks too, and Connect brings it back', !!parked2 && !!conn2, JSON.stringify({ parked2: !!parked2, conn2: !!conn2 }));
+              t.close();
+            }
+            // ── a 4014 right after the gateway dropped is a lost session, not a kick ──
+            {
+              const t = await mk({ sessionDropMs: 15000 });
+              await ready(t);
+              const o0 = mkSock(), m0 = t.got.length, r0 = md.resumes;
+              md.dropAll(4000);
+              await until(() => md.resumes > r0 && t.last.rpc.reconnecting === false, 8000);
+              vc(t, { do: 'close', code: 4014 });
+              const lost = await wa(t, m0, (p) => p.channelId === null && /rejoining/i.test(err(p)), 3000);
+              const back = await wa(t, m0, (p) => p.channelId === '910' && p.users['2001'] && lost && t.got.indexOf(p) > t.got.indexOf(lost), 4000);
+              check('GRN-49: a 4014 within 15 s of a gateway reconnect is a dropped session, not a kick: the bridge says "rejoining" (not "Removed from voice") and rejoins', !!lost && !/Removed/.test(err(lost)) && !!back && md.ops4.length > o0, JSON.stringify({ lost: lost && err(lost), back: !!back }));
+              t.close();
+            }
+            // ── the bot dragged to another channel in Discord (GRN-50) ──
+            {
+              const t = await mk();
+              await ready(t);
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910', { member: memberOf(ME, 'mockbot', { bot: true }) })); // the bot's own join, as Discord reports it
+              await nap(200);
+              const m0 = t.got.length;
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '914', { member: memberOf(ME, 'mockbot', { bot: true }) }));
+              const moved = await wa(t, m0, (p) => p.channelId === '914' && p.users['2002'], 3000);
+              check('GRN-50: when the bot is dragged to another channel in Discord the roster follows it (channel 914, Bob), while the saved current channel stays 910', !!moved && !moved.users['2001'] && moved.current.channelId === '910' && !err(moved), JSON.stringify(moved && { c: moved.channelId, u: Object.keys(moved.users), cur: moved.current, e: err(moved) }));
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, null, { member: memberOf(ME, 'mockbot', { bot: true }) }));
+              t.close();
+            }
+            // ── a gateway resume: the status shows it, connected stays true, nothing is re-seeded (GRN-51) ──
+            {
+              const t = await mk();
+              await ready(t);
+              const m0 = t.got.length, r0 = md.resumes;
+              md.dropAll(4000);
+              const resumed = await until(() => md.resumes > r0 && t.last.rpc.reconnecting === false, 8000);
+              const during = t.got.slice(m0);
+              check('GRN-51: a gateway drop that resumes shows rpc.reconnecting while it lasts, then clears it', during.some((p) => p.rpc && p.rpc.reconnecting === true) && resumed, JSON.stringify({ n: during.length, resumed }));
+              check('GRN-51: …connected stays true the whole time (the roster overlay hides on !connected) and the voice connection is left alone (still Ready, roster intact)', during.every((p) => p.connected === true) && t.last.hostInChannel === true && !!t.last.users['2001'], JSON.stringify(during.map((p) => p.connected)));
+              // a connection that was stuck in Signalling is re-sent its join at the resume
+              vc(t, { do: 'state', status: 'signalling' });
+              await nap(200);
+              const o1 = mkSock(), r1 = md.resumes;
+              md.dropAll(4000);
+              await wa(t, t.got.length - 1, () => md.resumes > r1, 6000);
+              await nap(500);
+              check('GRN-51: a voice connection that is Signalling when the gateway resumes is asked to rejoin (a join op 4 is sent again)', md.ops4.length > o1 && md.ops4.slice(o1).some((d) => d.channel_id === '910'), JSON.stringify(md.ops4.slice(o1)));
+              t.close();
+            }
+            // ── a re-identify: the roster is rebuilt from what Discord now says, speaking flags are kept (GRN-51, GRN-109) ──
+            {
+              where['2003'] = null;
+              const t = await mk();
+              await ready(t);
+              where['2001'] = '910'; where['2002'] = '910';
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'Bob') }));
+              await t.waitFor((p) => p.users['2002'], 3000);
+              t.cmd('test-speaking', '2002');
+              await t.waitFor((p) => p.users['2002'] && p.users['2002'].speaking === true, 3000);
+              // during the outage Alice leaves and Carol joins (nothing reaches the bridge: it re-identifies)
+              where['2001'] = null; where['2003'] = '910';
+              const m0 = t.got.length, i0 = md.identifies;
+              md.holdHelloMs = 600;
+              md.dropAll(1000);
+              const re = await wa(t, m0, (p) => md.identifies > i0 && p.users['2003'] && !p.users['2001'] && p.rpc && p.rpc.reconnecting === false, 10000);
+              const during = t.got.slice(m0);
+              check('GRN-51/109: after a re-identify (new session, no replay) the roster is rebuilt from what Discord says now: Alice gone, Carol there', !!re && !!re.users['2002'] && md.identifies === i0 + 1, JSON.stringify(re && Object.keys(re.users)));
+              check('GRN-51: …speaking flags of people who are still there are kept, and connected stayed true through the re-identify', !!re && re.users['2002'].speaking === true && during.every((p) => p.connected === true), JSON.stringify(re && re.users['2002']));
+              where['2003'] = null; where['2001'] = '910'; where['2002'] = '914';
+              t.close();
+            }
+            // ── an unrecoverable close: 4004 (the token was rejected) ──
+            {
+              const t = await mk();
+              await ready(t);
+              const c0 = md.connections, m0 = t.got.length;
+              md.dropAll(4004);
+              const dead = await wa(t, m0, (p) => p.connected === false && /token/i.test(err(p)), 4000);
+              await nap(1800);
+              check('GRN-51: Discord closing with 4004 stops the bot with "the token was rejected" on the status line, and the bridge does not dial again', !!dead && dead.channelId === null && Object.keys(dead.users).length === 0 && md.connections === c0, JSON.stringify({ e: dead && err(dead), conns: md.connections - c0 }));
+              t.close();
+            }
+            // ── guildAvailable: a server that comes back (GRN-109) and voice that was lost (GRN-49/150) ──
+            {
+              const t = await mk({ stallLostMs: 700, backoffMs: [30000] });
+              const m0 = t.got.length;
+              const lost = await wa(t, m0, (p) => p.channelId === null && /rejoining/i.test(err(p)), 4000);
+              const o0 = mkSock();
+              md.dispatchAll('GUILD_DELETE', { id: GUILD, unavailable: true });
+              await nap(100);
+              md.dispatchAll('GUILD_CREATE', guildNow());
+              const back = await wa(t, m0, (p) => p.channelId === '910' && p.users['2001'] && lost && t.got.indexOf(p) > t.got.indexOf(lost), 4000);
+              check('GRN-109: a server that becomes available again while the voice connection is lost joins at once (not after the 30 s backoff) and seeds the roster', !!lost && !!back && md.ops4.length > o0, JSON.stringify({ lost: !!lost, back: !!back }));
+              // and one that comes back while joined re-seeds the roster from the fresh data
+              await ready(t);
+              where['2003'] = '910'; where['2001'] = null;
+              md.dispatchAll('GUILD_DELETE', { id: GUILD, unavailable: true });
+              await nap(100);
+              const m1 = t.got.length;
+              md.dispatchAll('GUILD_CREATE', guildNow());
+              const fresh = await wa(t, m1, (p) => p.users['2003'] && !p.users['2001'], 4000);
+              check('GRN-109: …and while joined the roster is re-seeded from the server\'s fresh data', !!fresh, JSON.stringify(Object.keys(t.last.users)));
+              where['2003'] = null; where['2001'] = '910';
+              t.close();
+            }
+            // ── the bot is removed from the server (GRN-141) ──
+            {
+              const t = await mk({ sessionDropMs: 100 });
+              await ready(t);
+              await nap(400);
+              const o0 = mkSock(), m0 = t.got.length;
+              md.dispatchAll('GUILD_DELETE', { id: GUILD });
+              const gone = await wa(t, m0, (p) => p.channelId === null && /removed from that server/i.test(err(p)), 3000);
+              vc(t, { do: 'close', code: 4014 });
+              await nap(1500);
+              check('GRN-141: GUILD_DELETE for the current server says "Bot was removed from that server", drops the voice connection and the roster, and the 4014 that follows does not replace the message or start a rejoin', !!gone && Object.keys(gone.users).length === 0 && /removed from that server/i.test(err(t.last)) && t.last.channelId === null && md.ops4.length === o0, JSON.stringify({ e: err(t.last), c: t.last.channelId, ops4: md.ops4.length - o0 }));
+              t.close();
+            }
+            // ── a connection that is slow to get Ready is warned about, never destroyed (GRN-53) ──
+            {
+              const t = await mk({ notReadyMs: 400 });
+              const slow = await t.waitFor((p) => /not ready after \d+ s, still retrying/i.test(err(p)), 3000);
+              check('GRN-53: a connection that is not Ready after the wait only warns ("not ready after …, still retrying"): the channel and the roster stay', !!slow && slow.channelId === '910' && slow.hostInChannel === false && !!slow.users['2001'], JSON.stringify(slow && err(slow)));
+              const up = await ready(t);
+              check('GRN-53: …a Ready that comes late wires the connection: hostInChannel true, the warning gone', !!up && !err(up), JSON.stringify(up && err(up)));
+              const m0 = t.got.length;
+              vc(t, { do: 'speak', id: '2001' });
+              const sp = await wa(t, m0, (p) => p.users['2001'] && p.users['2001'].speaking === true, 3000);
+              vc(t, { do: 'speak', id: '2001', end: true });
+              const sp2 = await wa(t, m0, (p) => p.users['2001'] && p.users['2001'].speaking === false && t.got.indexOf(p) > t.got.indexOf(sp), 3000);
+              check('GRN-53: the connection\'s speaking events reach the roster (start sets the glow, end clears it)', !!sp && !!sp2, JSON.stringify({ sp: !!sp, sp2: !!sp2 }));
+              // a second Ready (a live reconnect) does not stack listeners: one start event lights the glow once
+              vc(t, { do: 'state', status: 'connecting' }); await nap(100); await ready(t);
+              vc(t, { do: 'listeners' });
+              await until(() => /test-listeners/.test(t.out), 3000);
+              check('GRN-53: …and Ready again after a live reconnect wires nothing twice (one start and one end listener on the connection)', /test-listeners start=1 end=1/.test(t.out), (t.out.match(/test-listeners[^\n]*/) || [''])[0]);
+              t.close();
+            }
+            // ── a speaking event of an old connection changes nothing (GRN-12) ──
+            {
+              const t = await mk();
+              await ready(t);
+              vc(t, { do: 'keep' });
+              const m0 = t.got.length;
+              where['2002'] = '914';
+              t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '914' }));
+              await wa(t, m0, (p) => p.channelId === '914' && p.users['2002'], 4000);
+              await ready(t);
+              const m1 = t.got.length;
+              vc(t, { do: 'speak-old', id: '2002' });
+              await nap(700);
+              check('GRN-12: a speaking event from the connection of the channel the bot left does not light the glow of someone in the new channel (the event was emitted on the old connection)', /test-speak-old: emitting/.test(t.out) && t.got.slice(m1).every((p) => !(p.users['2002'] && p.users['2002'].speaking)) && !!t.last.users['2002'], JSON.stringify(t.last.users['2002']));
+              t.close();
+            }
+            // ── Leave and the intended target are authoritative (GRN-150) ──
+            {
+              // Leave pressed, and the gateway resumes while Discord still shows the bot in the call (the leave was lost): it is told to leave again
+              const t = await mk();
+              await ready(t);
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910', { member: memberOf(ME, 'mockbot', { bot: true }) }));
+              await nap(200);
+              t.cmd('leave');
+              await t.waitFor((p) => p.channelId === null, 3000);
+              const o0 = mkSock(), r0 = md.resumes;
+              md.dropAll(4000);
+              await until(() => md.resumes > r0, 8000);
+              await nap(600);
+              check('GRN-150: after Leave, a gateway resume that finds Discord still showing the bot in the call tells it to leave (op 4 with channel null)', md.ops4.slice(o0).some((d) => d.channel_id === null && d.guild_id === GUILD) && !md.ops4.slice(o0).some((d) => d.channel_id === '910'), JSON.stringify(md.ops4.slice(o0)));
+              t.close();
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, null, { member: memberOf(ME, 'mockbot', { bot: true }) }));
+            }
+            {
+              // Leave pressed while the voice connection is down (waiting for its backoff) cancels the rejoin and tells Discord (op 4, null)
+              const t = await mk({ stallLostMs: 600, backoffMs: [1200] });
+              const lost = await t.waitFor((p) => p.channelId === null && /rejoining/i.test(err(p)), 4000);
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910', { member: memberOf(ME, 'mockbot', { bot: true }) }));
+              await nap(200);
+              const o0 = mkSock();
+              t.cmd('leave');
+              await nap(2200);
+              check('GRN-150: Leave while the connection is down and waiting to rejoin cancels the rejoin and tells Discord to take the bot out of the call (op 4, channel null)', !!lost && t.last.channelId === null && md.ops4.slice(o0).some((d) => d.channel_id === null) && !md.ops4.slice(o0).some((d) => d.channel_id === '910'), JSON.stringify({ ops4: md.ops4.slice(o0), c: t.last.channelId }));
+              t.close();
+              md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, null, { member: memberOf(ME, 'mockbot', { bot: true }) }));
+            }
+            {
+              // the gateway resumes while the voice connection is gone and the target is wanted: join now, not after the backoff
+              const t = await mk({ stallLostMs: 600, backoffMs: [30000] });
+              const lost = await t.waitFor((p) => p.channelId === null && /rejoining/i.test(err(p)), 4000);
+              const m0 = t.got.length, r0 = md.resumes;
+              md.dropAll(4000);
+              const back = await wa(t, m0, (p) => p.channelId === '910' && p.users['2001'], 8000);
+              check('GRN-150: a gateway resume while the bot should be in the call but has no connection joins at once (not after the 30 s backoff)', !!lost && !!back && md.resumes > r0, JSON.stringify({ lost: !!lost, back: !!back }));
+              t.close();
+            }
+            // ── a login that was replaced does not touch the bot that replaced it (GRN-20) ──
+            {
+              md.gatewayFailNext = 1; md.gatewayStatus = 400; md.gatewayDelay = 900; // (a 4xx other than 401: discord.js does not retry it itself)
+              const h0 = md.gatewayHits;
+              const t = await mk({}, { waitJoin: false });
+              await nap(250);
+              t.cmd('connect');
+              const up = await t.waitFor((p) => p.connected === true && p.channelId === '910', 8000);
+              await nap(1500);
+              check('GRN-20: the failure of a login that was replaced meanwhile (a second Connect) neither stops the running bot, nor sets a message, nor starts a retry', !!up && t.last.connected === true && !/login failed/i.test(err(t.last)) && md.gatewayHits - h0 === 2, JSON.stringify({ c: t.last.connected, e: err(t.last), hits: md.gatewayHits - h0 }));
+              md.gatewayDelay = 0; t.close();
+            }
+            // ── the login is retried with a capped backoff, and stops for good on a rejected token (GRN-52) ──
+            {
+              md.gatewayFailNext = 2; md.gatewayStatus = 400; md.gatewayDelay = 0;
+              const h0 = md.gatewayHits;
+              const t = await mk({}, { waitJoin: false });
+              const failed = await t.waitFor((p) => /login failed/i.test(err(p)) && /retrying/i.test(err(p)), 4000);
+              const up = await t.waitFor((p) => p.connected === true && p.channelId === '910' && !err(p), 8000);
+              check('GRN-52: a login that fails (Discord or the network is down) says so and is retried; when one works the bot connects and the message is gone', !!failed && !!up && md.gatewayHits - h0 === 3 && [...t.out.matchAll(/Bot login failed/g)].length === 2, JSON.stringify({ failed: failed && err(failed), up: !!up, hits: md.gatewayHits - h0 }));
+              t.close();
+              md.gatewayFailNext = 1e9; md.gatewayStatus = 401;
+              const h1 = md.gatewayHits;
+              const t2 = await mk({}, { waitJoin: false });
+              const rejected = await t2.waitFor((p) => /login failed/i.test(err(p)) && !/retrying/i.test(err(p)), 4000);
+              await nap(1800);
+              check('GRN-52: a rejected token (401) is a real failure: the status line says so, and the bridge does not retry', !!rejected && md.gatewayHits - h1 === 1 && t2.last.connected === false, JSON.stringify({ e: rejected && err(rejected), hits: md.gatewayHits - h1 }));
+              md.gatewayFailNext = 0;
+              t2.cmd('connect');
+              const ok = await t2.waitFor((p) => p.connected === true && p.channelId === '910', 8000);
+              check('GRN-52: …and Connect (after the token was fixed) works', !!ok);
+              t2.close();
+            }
+            // ── speaking detection that went quiet is flagged (GRN-174) ──
+            {
+              const t = await mk({ speakingStaleMs: 900 });
+              await ready(t);
+              check('GRN-174: right after Ready the payload does not claim speaking detection went quiet', t.last.rpc.speakingStale === false, JSON.stringify(t.last.rpc));
+              await nap(1200);
+              t.cmd('set-settings', '{}');
+              const stale = await t.waitFor((p) => p.rpc && p.rpc.speakingStale === true, 3000);
+              check('GRN-174: with someone present and unmuted and no speaking start for a long time, rpc.speakingStale is true (a separate flag, not rpc.error)', !!stale && !err(stale), JSON.stringify(stale && stale.rpc));
+              const m0 = t.got.length;
+              vc(t, { do: 'speak', id: '2001' });
+              vc(t, { do: 'speak', id: '2001', end: true });
+              const fresh = await wa(t, m0, (p) => p.rpc.speakingStale === false, 3000);
+              check('GRN-174: …and a speaking start clears it', !!fresh, JSON.stringify(t.last.rpc));
+              t.close();
+            }
+            {
+              const t = await mk({ speakingStaleMs: 600000, stuckGlowMs: 900 });
+              await ready(t);
+              vc(t, { do: 'speak', id: '2001' });
+              await t.waitFor((p) => p.users['2001'] && p.users['2001'].speaking === true, 3000);
+              check('GRN-174: a glow that has just come on is not flagged', t.last.rpc.speakingStale === false, JSON.stringify(t.last.rpc));
+              await nap(1200);
+              t.cmd('set-settings', '{}');
+              const stuck = await t.waitFor((p) => p.rpc.speakingStale === true && p.users['2001'] && p.users['2001'].speaking === true, 3000);
+              check('GRN-174: …a glow that stays on for minutes with no end is flagged the same way', !!stuck, JSON.stringify(t.last.rpc));
+              t.close();
+            }
+          } finally {
             await md.close();
           }
         }

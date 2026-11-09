@@ -258,6 +258,13 @@ Webcam-only users skip this whole section — nothing else depends on it.
    another favorite names the same channel. Guests invited into a call (they are not
    server members) appear in the roster by their nickname or Discord name, with
    their mute and deafen state, and members show their per-server avatar.
+   If someone drags the bot to another voice channel in Discord, the roster follows
+   it; **USE** (or ACTIVE) brings it back to your chosen channel. If the bot's
+   connection drops, the bridge rejoins by itself (after 2, 5, 15, then every 30
+   seconds); if Discord removes the bot from the call, or the call ends, it stays
+   out until you press **USE** or **Connect**. A login that fails because Discord or
+   your network is down is retried (5 s, doubling to 5 minutes); a rejected token is
+   not.
 
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.
@@ -354,7 +361,22 @@ exercised on a live rig. Outcomes, faithfully:
   window's Properties, use Windows Terminal, or start the bridge hidden with the
   `Discord Bridge Start` action.
 - **`in voice` but no speaking glow** → the bot must join with `selfDeaf: false`
-  (already the shipped default — check you didn't server-deafen the bot).
+  (already the shipped default — check you didn't server-deafen the bot). Speaking
+  detection uses Discord's voice receive, which Discord does not document: if the
+  glow stops after a Discord update, run `npm update` in `sidecar/` and start the
+  bridge again. The feed's `rpc.speakingStale` flags a long silence with people
+  unmuted in the call.
+- **"Removed from voice (…), press USE to rejoin" or "Voice connection not ready"
+  in the middle of a stream** → Discord removed the bot from the call (or the call
+  ended), or the voice connection could not start. Press **USE**/**ACTIVE** (or
+  **Connect**) once Discord is reachable. "not ready after … still retrying" means
+  the bridge is still trying; if it keeps failing, check the bot has View Channel +
+  Connect on that channel and that the channel has room under its user limit, or
+  that Discord is not having an outage.
+- **"Bot login failed … retrying"** → Discord or your network is unreachable; the
+  bridge retries on its own with a growing delay. A rejected token ("Discord
+  rejected the bot token") is not retried: reset it in the Developer Portal, put the
+  new one in `sidecar/discord-tokens.json` and press **Connect**.
 - **An unwanted name appeared on stream** → auto-add invented a placeholder from a
   guest's VDO label or Discord name. Rename that row (the `auto` badge clears), `×`
   it, or untick **auto-add guests** in the directory bar; **Clear auto-added**

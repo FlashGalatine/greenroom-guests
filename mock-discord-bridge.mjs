@@ -59,7 +59,7 @@ const state = {
   favorites: [{ id: 'fav1', name: 'Main Hang', serverId: '111', channelId: '222' }],
   current: { serverId: '111', channelId: '222' },
   settings: { ...DEFAULT_SETTINGS },
-  rpc: { enabled: true, hasToken: true, error: null },
+  rpc: { enabled: true, hasToken: true, error: null, reconnecting: false, speakingStale: false },
   connected: false,
   hostInChannel: false,
   channelId: null,
