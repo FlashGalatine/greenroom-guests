@@ -9,6 +9,33 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.63] — 2026-11-09
+
+The dock and `director-min` now tell their own pushes from someone else's by a revision number, the newer saved state wins, an edit made while Streamer.bot is unreachable is kept, and one director is the designated one.
+
+### Added
+
+- **Revisions on every push.** `vdo.state` carries `schemaVersion: 2`, a `rev` and a `writer` (a new file, `control/vdo-rev.js`, loaded by both pages). The rev is chosen when a push is really sent, the writer is random per page load. The actions are unchanged: the fields travel inside the saved state. See docs/PROTOCOL.md, "Revisions".
+- **"director-min.html is my always-on director"** (Room & Director, saved with the config as `alwaysOnDirector`). Ticked, the dock sends only your own edits and leaves following the guests, and adding them to the directory, to the `director-min` source. The dock warns "director-min is designated but not correcting: is its OBS source visible?" if the saved stream IDs stay different from what its own director sees for about 30 seconds.
+- Status messages: **"SB offline, changes will be sent on reconnect"**, **"not confirmed by Streamer.bot: is VDO Push compiled?"** (a push whose broadcast does not come back within about five seconds), and, when vdo.ninja says another director holds the room, "director: connected (not room owner, another director holds the room)" (information, not an error).
+- Tests: `verify` gains the revision unit cases (stamping, echoes, the newer state, equal revs, legacy writes) and the restore stamp; `verify:render` has a new section R19 (every push stamped, an echo that Streamer.bot rewrote, an old own echo, the rev gate and legacy writes, a delayed replay after a newer push, an edit made while Streamer.bot is down, a stream ID that changed while it was down, the designation and the correction, a forged and a malformed director reply, "not room owner", an unconfirmed push, schemaVersion 3). `RENDER_ONLY=revision` runs it alone, `R19_ONLY=a,b` picks sections. The mock gains `/mock/drop?ms=N` and `rewrite=fffd`, the mock director `?notowner=1`.
+
+### Fixed
+
+- **A delayed replay can no longer undo your edit.** A replay of an older saved state (a slow `VDO Sync`, a reconnect) used to be adopted over a newer push; a state with a lower rev is now dropped, equal revs are broken by the writer id, and a state without a rev (a page from before this release, a hand-made file) is still adopted.
+- **An own push coming back is recognised by rev, not by its text.** A name with a lone surrogate comes back from Streamer.bot with U+FFFD in it; it used to look like someone else's state. An older own push replayed later is no longer adopted either.
+- **An edit made while Streamer.bot was down is kept.** The dock sends its own state, with a fresh rev, when the connection returns instead of adopting the older saved one (also when the replay is its own last push, and never over a config saved by a newer Greenroom); `director-min` adopts the replay and re-pushes a difference in stream IDs once it has held for two polls, and adds again a guest it had added meanwhile.
+- **A replay between a push and its echo cannot undo the push.** A frame with a rev below a push of this page that is still on its way to Streamer.bot is dropped.
+- **Stream IDs after a restore or after another page's push** are corrected: the designated director sends ONE correction once the same difference in stream IDs has held for two polls, and no more than one per 30 seconds per page (it used to leave the saved IDs as they were until something else changed). A dock beside a designated director-min shows and sends the stream IDs Streamer.bot holds, so its edits no longer carry a view that is a poll behind, and its "not correcting" warning is real. `npm run backup:restore` now pushes a new write (rev above the clock and above the rev already saved, writer "backup") with the slots' stream IDs blanked, since the ones in the file were true on the day it was saved; a running director (the dock, or the `director-min` source) puts the live ones back within a few seconds.
+- **A box that has the focus follows the saved config** ("director enabled", "director-min.html is my always-on director").
+- **A second director page** (the Manage link included) is documented as limited, with the steps to use it as the full director; the one-director rule is written in the setup guide, the README and both pages.
+
+### Changed
+
+- `schemaVersion` is now 2. A page from an earlier release that is still open shows "reload this page" and pushes nothing once a page from this release has saved the config. `backup.mjs` reads schemaVersion 2.
+
+**Deploy:** copy the `control/` folder (a new file, `vdo-rev.js`) and `backup.mjs` (the old one refuses snapshots saved after this release). In one sitting reload the dock, refresh the `director-min` source and reload any other open `control.html`: a page from an earlier release left open stops pushing and shows "reload this page". **If you run the `director-min` source as your director, tick "director-min.html is my always-on director" in the dock.** Nothing to re-paste. The overlays and the sidecar are unchanged. `verify` 324/324, `verify:render` 357/357.
+
 ## [1.0.59] — 2026-11-09
 
 Guests are matched to directory entries by one identity rule in every place that looks them up, and a stranger in the voice channel is never bound to an entry you named yourself.
@@ -388,6 +415,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.63]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.59...v1.0.63
 [1.0.59]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.55...v1.0.59
 [1.0.55]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.52...v1.0.55
 [1.0.52]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.49...v1.0.52
