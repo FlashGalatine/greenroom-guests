@@ -71,6 +71,8 @@ let msgId = 0;
 let favSeq = 1;
 let speakTimer = null;
 let burstTimer = null;
+let hbTimer = null;
+const HEARTBEAT_MS = 5000;
 
 function payloadOut() {
   return {
@@ -82,6 +84,10 @@ function payloadOut() {
     rpc: state.rpc,
     favorites: state.favorites,
     current: state.current,
+    // the same liveness fields as the real bridge (docs/PROTOCOL.md): a push every hb ms while it runs
+    hb: HEARTBEAT_MS,
+    stopped: false,
+    bridgeVersion: 'mock',
   };
 }
 
@@ -216,6 +222,8 @@ function connect() {
     // Lowercase `general` — the SB Subscribe case gotcha (same as the real sidecar).
     ws.send(JSON.stringify({ request: 'Subscribe', id: String(++msgId), events: { general: ['Custom'] } }));
     pushNow(); // seed the discord.state cache so late joiners see bot status/favorites
+    if (hbTimer) clearInterval(hbTimer);
+    hbTimer = setInterval(pushNow, HEARTBEAT_MS);
     console.log(`[mock-bridge] up — connected to ${WS_URL}`);
   };
   ws.on('open', () => {
@@ -242,6 +250,7 @@ function connect() {
     dispatch(String(d.command || ''), String(d.value ?? ''));
   });
   ws.on('close', () => {
+    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
     clearTimeout(helloTimer); // a stale 'no Hello' timer must never act on a connection that has already ended
     stopTimers();
     console.log(`[mock-bridge] disconnected — retrying in ${RECONNECT_MS}ms`);

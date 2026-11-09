@@ -288,7 +288,10 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
                 "exitOnSbClose": false },
   "rpc": { "enabled": true, "hasToken": true, "error": "" },
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
-  "current": { "serverId": "…", "channelId": "…" } | null
+  "current": { "serverId": "…", "channelId": "…" } | null,
+  "hb": 5000,                     // the bridge pushes at least every hb ms while it runs; 0 once it is stopping
+  "stopped": false,               // true on the last frame a bridge sends before it exits
+  "bridgeVersion": "1.0.63"       // the sidecar build that sent it
 }
 ```
 
@@ -303,6 +306,14 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   window (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms) — so the bot doesn't
   linger in the channel after you close SB. The env var
   `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set.
+- `hb`, `stopped` and `bridgeVersion` are additive (a consumer that does not know
+  them ignores them). The bridge pushes at least every `hb` ms (5000) even when
+  nothing changed, so a consumer can tell a live bridge from one that died with
+  its last state still in `discord.state`. A frame with `stopped: true` (and
+  `hb: 0`, no users, offline) is the bridge's one last push before it exits: a
+  signal, the `quit` command, Streamer.bot closing with exit-on-close on, or a
+  crash (then `rpc.error` says "Bridge crashed: …"). The overlays use them in
+  Sprint 15, the control pill in Sprint 16.
 - Pushed leading-edge with a 100 ms trailing coalesce: worst case ~10
   DoActions/s in a rowdy channel.
 
@@ -310,7 +321,9 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 
 `value` is **always a plain string** on the wire; structured commands carry JSON
 the control page pre-serialized and the sidecar `JSON.parse`s. Unknown commands
-are logged and ignored (the mock bridge adds a test-only `mock-burst on|off`).
+are logged and ignored (the mock bridge adds a test-only `mock-burst on|off`). A
+frame whose `command` is not a string, or whose `value` is neither a string nor
+absent, is dropped (only the types are logged): anyone on the bus can send any JSON.
 
 | command | value | effect |
 |---|---|---|
@@ -322,6 +335,7 @@ are logged and ignored (the mock bridge adds a test-only `mock-burst on|off`).
 | `favorite-update` | `{"id", …fields}` | edit favorite |
 | `favorite-remove` | `{"id"}` | remove favorite |
 | `set-settings` | partial settings object | merge + clamp + persist |
+| `quit` | — | leave voice, send the clearing state and exit (code 0): the clean stop |
 
 ## Error broadcasts
 

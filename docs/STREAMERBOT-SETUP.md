@@ -235,7 +235,14 @@ Webcam-only users skip this whole section — nothing else depends on it.
 4. Start the bridge: double-click `start-discord-bridge.bat` (visible log), or
    `npm run bridge` from the repo root, or the `Discord Bridge Start` action
    (hidden, auto-start). A second instance exits cleanly (single-instance guard
-   on `:7495`).
+   on `:7495`); a **newer** build asks an older one to quit and takes over (stop an
+   old bridge from before this release yourself first: it has no `quit` command).
+   Options go on the command line, in an edited `.bat` or `npm run bridge -- …`:
+   `--sb-ws-url=ws://127.0.0.1:8080/`, `--guard-port=7495`,
+   `--exit-on-sb-close=1`; an argument wins over `SB_WS_URL`,
+   `GREENROOM_GUARD_PORT` and `GREENROOM_EXIT_ON_SB_CLOSE`. The `Discord Bridge
+   Start` action cannot set environment variables: do not launch the bridge with
+   a "Run a Program" sub-action that sets some, or waits for exit.
 5. In the control page: save a favorite (server ID / voice channel ID), press
    **USE**, then **Connect**. The pill should go `in voice · N present`.
 
@@ -249,10 +256,23 @@ close SB**, tick *"leave call & quit when Streamer.bot closes"* in the control
 page's Discord Voice Bridge section (persists to `settings.exitOnSbClose`). When
 enabled, losing SB's WebSocket for longer than the grace window
 (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms) makes the bridge disconnect from
-voice cleanly and exit; an SB **restart** reconnects inside the window and
-cancels the shutdown. The env var `GREENROOM_EXIT_ON_SB_CLOSE=1` forces it on (or
-`=0` off) regardless of the saved setting — handy for the `Discord Bridge Start`
-action or the `.bat`.
+voice cleanly and exit; an SB **restart** reconnects inside the window (the bridge
+retries about once a second meanwhile, and makes one last attempt when the window
+ends) and cancels the shutdown. The env var `GREENROOM_EXIT_ON_SB_CLOSE=1` forces
+it on (or `=0` off) regardless of the saved setting, and so does
+`--exit-on-sb-close=1` / `=0` in an edited `.bat`. The bridge outlives
+Streamer.bot on any SB exit when this is off: there may be no listener to see
+in `netstat`, look for `node.exe` as a client of the SB port.
+
+**How the bridge stops.** Every way out is one routine: it pushes a final state
+(`stopped: true`, nobody in voice) to Streamer.bot, leaves the voice call once and
+exits. That covers Ctrl+C, Ctrl+Break, closing its window, the `quit` command and
+exit-on-close, and a crash (exit code 1, the error in the pushed `rpc.error`).
+**Ending `node.exe` in Task Manager** (the hidden instance the SB action starts
+included) cannot leave cleanly: the bot stays in the call until Discord times it
+out, so use exit-on-close or the `quit` command for that setup. A rejected promise
+is logged and the bridge keeps running. The bot token is never written to the log or to
+`rpc.error`.
 
 ## 6. Live-validation results (2026-07-10, real Streamer.bot 1.0.4)
 
@@ -306,8 +326,18 @@ exercised on a live rig. Outcomes, faithfully:
   `file://` Local-file source; use the `http://127.0.0.1:7474/...` URL field.
 - **SB can't restart its WS/HTTP server after a crash** → an orphaned helper
   child is holding the sockets; kill stray `node.exe` (see §2 UseShellExecute).
-- **Bridge exits immediately** → another instance is already running (guard port
-  `:7495`), or Node < 22.12.
+- **Bridge exits immediately** → it says why in its log. Another program, or a
+  Greenroom bridge older than this release (it sends no banner), holds the guard
+  port `:7495` ("held by another program or by a Greenroom bridge older than this
+  release"): check with `netstat -ano | findstr 7495`, end that `node.exe`, or set
+  `--guard-port=` / `GREENROOM_GUARD_PORT`. A running bridge of the same or a newer
+  version says so and exits; Node older than 22.12 says "Node >= 22.12 required".
+- **The bridge window froze, pushes stopped** → a click in the console window starts
+  a text selection (QuickEdit) and Windows pauses the program that writes to it; the
+  bridge writes its log from a worker thread so pushes continue, but the window still
+  shows "Select" in its title: press Esc. To avoid it, untick QuickEdit Mode in the
+  window's Properties, use Windows Terminal, or start the bridge hidden with the
+  `Discord Bridge Start` action.
 - **`in voice` but no speaking glow** → the bot must join with `selfDeaf: false`
   (already the shipped default — check you didn't server-deafen the bot).
 - **An unwanted name appeared on stream** → auto-add invented a placeholder from a

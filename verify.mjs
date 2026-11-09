@@ -23,13 +23,14 @@
 // It does NOT render pixels; verify-render.mjs does that in a real browser.
 
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { createServer, connect as netConnect } from 'node:net';
+import { createServer as createHttp } from 'node:http';
 import { existsSync } from 'node:fs';
 import { readFile, rm, mkdtemp, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebSocket } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7475; // off the SB defaults so it coexists with a running SB
@@ -1505,7 +1506,229 @@ async function main() {
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
     }
 
-    } // end of the sidecar sections ([7], [8])
+    // ── 8b. the bridge's lifecycle: one exit path, the stopping flag, the guard, hostile frames, arguments, dial races (Sprint 12) ──
+    console.log('\n[8b] bridge lifecycle: shutdown, crash policy, guard, command frames, arguments, dial races');
+    {
+      const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+      const until = async (fn, ms) => { for (let t = 0; t < ms; t += 100) { if (fn()) return true; await nap(100); } return !!fn(); };
+      const connectTcp = (port) => netConnect(port, '127.0.0.1');
+      const SIDECAR_VERSION = JSON.parse(await readFile(resolve(__dirname, 'sidecar', 'package.json'), 'utf8')).version;
+      const s12 = await mkdtemp(resolve(tmpdir(), 'greenroom-s12-'));
+      scratchDirs.push(s12);
+      const live = []; // everything a rig started, closed at the end
+      let seq = 0;
+      // One real bridge (token-less unless told otherwise) on a mock SB, with a watcher that keeps every payload it pushes.
+      async function rig(opts = {}) {
+        const sb = opts.sb || await startMockWith({});
+        const n = ++seq;
+        const guardPort = opts.guardPort || await freePort();
+        const env = { SB_WS_URL: sb.url, DISCORD_BRIDGE_CONFIG: resolve(s12, `cfg${n}.json`), DISCORD_BRIDGE_TOKENS: resolve(s12, `tok${n}.json`),
+          GREENROOM_GUARD_PORT: String(guardPort), GREENROOM_TEST_HOOKS: '1', ...(opts.env || {}) };
+        if (opts.token) await writeFile(env.DISCORD_BRIDGE_TOKENS, JSON.stringify({ botToken: opts.token, enabled: false }));
+        const got = []; // every discordVoice payload, in order
+        const watcher = new WebSocket(sb.url);
+        await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
+        watcher.on('message', (raw) => {
+          try {
+            const m = JSON.parse(raw.toString());
+            if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') got.push(JSON.parse(d.discordVoiceJson)); }
+          } catch { /* not a payload */ }
+        });
+        watcher.send(JSON.stringify({ request: 'Subscribe', id: 's', events: { general: ['Custom'] } }));
+        const child = spawn(process.execPath, ['sidecar/discord-bridge.mjs', ...(opts.args || [])], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv(env) });
+        let out = ''; let code = null;
+        child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => { out += d; });
+        child.stderr.setEncoding('utf8'); child.stderr.on('data', (d) => { out += d; });
+        child.on('exit', (c) => { code = c; });
+        const r = {
+          sb, child, got, guardPort, env,
+          get out() { return out; }, get code() { return code; }, get last() { return got[got.length - 1]; },
+          cmd: (command, value = '') => watcher.send(JSON.stringify({ request: 'DoAction', id: 'c' + (++seq), action: { name: 'Discord Voice Command' }, args: { command, value } })),
+          raw: (data) => fetch(`${sb.base}/mock/broadcast`, { method: 'POST', body: JSON.stringify(data) }).then((x) => x.arrayBuffer()),
+          exited: (ms) => waitExit(child, ms),
+          waitFor: async (pred, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = got.find(pred); if (hit) return hit; await nap(100); } return null; },
+          close: () => { try { watcher.close(); } catch {} try { child.kill(); } catch {} },
+        };
+        live.push(r);
+        if (!opts.noWait) await r.waitFor(() => true, 8000); // the first push
+        return r;
+      }
+      try {
+        // hb / stopped / bridgeVersion, and the heartbeat (GRN-129)
+        const a = await rig();
+        const first = a.got[0] || {};
+        check('GRN-129: every payload carries hb 5000, stopped false and the bridge version (additive fields)', first.hb === 5000 && first.stopped === false && first.bridgeVersion === SIDECAR_VERSION, JSON.stringify({ hb: first.hb, stopped: first.stopped, v: first.bridgeVersion }));
+        await nap(300);
+        check('GRN-02: the pushes at connect are one burst, not one per cause (at most 2 frames in the first 300 ms)', a.got.length <= 2, String(a.got.length));
+        const n0 = a.got.length;
+        await nap(5800);
+        check('GRN-129: with nothing else going on a heartbeat push arrives about every 5 s', a.got.length > n0, String(a.got.length - n0));
+        check('GRN-69: the log is written from a worker thread (a console that stops draining cannot stall the bridge) and the bot token is redacted', bridgeSrc.includes('new Worker(') && bridgeSrc.includes('fs.writeSync(1') && bridgeSrc.includes('[bot token]'));
+        // the mock bridge sends the same heartbeat fields (GRN-129)
+        {
+          const mbSb = await startMockWith({});
+          const mbGot = [];
+          const mbW = new WebSocket(mbSb.url);
+          await new Promise((res, rej) => { mbW.on('open', res); mbW.on('error', rej); });
+          mbW.on('message', (raw) => { try { const m = JSON.parse(raw.toString()); if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') mbGot.push(JSON.parse(d.discordVoiceJson)); } } catch { /* not a payload */ } });
+          mbW.send(JSON.stringify({ request: 'Subscribe', id: 's', events: { general: ['Custom'] } }));
+          const mb = await startChild('mock-discord-bridge.mjs', '[mock-bridge] up', { SB_WS_URL: mbSb.url, SB_WS_PORT: String(mbSb.wsPort) });
+          await nap(5800);
+          check('GRN-129: the mock bridge pushes hb 5000, stopped false and a bridgeVersion, and pushes again about every 5 s with nothing else going on',
+            mbGot.length >= 2 && mbGot.every((p) => p.hb === 5000 && p.stopped === false && typeof p.bridgeVersion === 'string'), JSON.stringify(mbGot.map((p) => [p.hb, p.stopped])));
+          try { mbW.close(); } catch {} try { mb.kill(); } catch {} try { mbSb.child.kill(); } catch {}
+        }
+        // the guard says who holds it (GRN-22)
+        const banner = await new Promise((res) => { const s = connectTcp(a.guardPort); let buf = ''; s.setEncoding('utf8'); s.on('data', (d) => { buf += d; if (buf.includes('\n')) { s.destroy(); res(buf.split('\n')[0]); } }); s.on('error', () => res(buf)); setTimeout(() => { s.destroy(); res(buf); }, 1500); });
+        let bn = null; try { bn = JSON.parse(banner); } catch { /* left null */ }
+        check('GRN-22: the guard port answers with a banner (name, pid, version) as one JSON line', !!bn && bn.name === 'greenroom-bridge' && Number.isInteger(bn.pid) && bn.pid === a.child.pid && bn.version === SIDECAR_VERSION, banner);
+        // hostile guard peers: RST with data, RST with no data, a peer that is killed (GRN-105)
+        for (const how of ['rst-with-data', 'rst-no-data']) {
+          await new Promise((res) => { const s = connectTcp(a.guardPort); s.on('error', () => {}); s.on('connect', () => { if (how === 'rst-with-data') s.write('hello\n'); setTimeout(() => { s.resetAndDestroy(); res(); }, 60); }); });
+        }
+        const killedPeer = spawn(process.execPath, ['-e', `require('net').connect(${a.guardPort}, '127.0.0.1', () => { setInterval(() => {}, 1000); });`], { stdio: 'ignore' });
+        await nap(600); killedPeer.kill(); await nap(800);
+        a.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+        const afterPeers = await a.waitFor((p) => p.settings && p.settings.accent === 'magenta', 4000);
+        check('GRN-105: an RST with data, an RST with no data and a killed peer on the guard port change nothing: the bridge is alive and still serves commands', a.code === null && !!afterPeers, a.out.slice(-300));
+        // hostile command frames (GRN-160)
+        for (const bad of [{ command: { toString: 1 } }, { command: 'leave', value: { toString: null } }, { command: [{ toString: 1 }] }, { command: 'leave', value: 5 }, { command: 7 }]) await a.raw({ type: 'discord:voice:command', ...bad });
+        await nap(600);
+        a.cmd('set-settings', JSON.stringify({ accent: 'neon-green' }));
+        const afterFrames = await a.waitFor((p) => p.settings && p.settings.accent === 'neon-green', 4000);
+        check('GRN-160: command frames with an object, an array or a number for command or value are dropped (the bridge stays up and serves the next command)', a.code === null && !!afterFrames, a.out.slice(-300));
+        // a throw on a path that has its own catch is logged; an unhandled rejection is logged and the bridge goes on (GRN-129, GRN-23)
+        a.cmd('test-throw-sync'); a.cmd('test-reject'); await nap(800);
+        a.cmd('set-settings', JSON.stringify({ accent: 'cyan' }));
+        const afterReject = await a.waitFor((p) => p.settings && p.settings.accent === 'cyan', 4000);
+        check('GRN-129/23: a command that throws, and an unhandled rejection, are logged and the bridge carries on', a.code === null && !!afterReject && /unhandled/i.test(a.out), a.out.slice(-300));
+        // control characters in a command never reach the log raw (GRN-16)
+        await a.raw({ type: 'discord:voice:command', command: 'bell\u0007esc\u001b[31mred', value: 'x'.repeat(500) });
+        await nap(500);
+        check('GRN-16: a command with control characters is logged with them replaced, and its value is cut', a.code === null && !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(a.out) && !a.out.includes('x'.repeat(200)), JSON.stringify(a.out.slice(-200)));
+        a.close();
+
+        // signals and the quit command: one exit, a clearing push first, code 0, no rpc.error (GRN-129, GRN-128, GRN-110)
+        for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'quit']) {
+          const b = await rig();
+          if (sig === 'quit') b.cmd('quit'); else b.cmd('test-signal', sig);
+          const gone = await b.exited(5000);
+          const last = b.last || {};
+          check('GRN-129/128/110: ' + sig + ' → the bridge pushes ONE clearing state (stopped, hb 0, no users, offline, no error) and exits 0',
+            gone && b.code === 0 && last.stopped === true && last.hb === 0 && last.connected === false && last.hostInChannel === false && Object.keys(last.users || {}).length === 0 && !(last.rpc && last.rpc.error), JSON.stringify({ gone, code: b.code, stopped: last.stopped, hb: last.hb, err: last.rpc && last.rpc.error }));
+          b.close();
+        }
+        // a crash: exit code 1, the same clearing push, the error text without a secret (GRN-129, GRN-16)
+        const secret = 'MTIzNDU2Nzg5.AbCdEf.SECRETSECRETSECRET';
+        const c = await rig({ token: secret });
+        c.cmd('test-throw', 'boom with ' + secret + ' inside');
+        const crashed = await c.exited(5000);
+        const cl = c.last || {};
+        check('GRN-129: an uncaught exception pushes the clearing state with an error and exits 1', crashed && c.code === 1 && cl.stopped === true && cl.hb === 0 && /boom/.test((cl.rpc && cl.rpc.error) || ''), JSON.stringify({ code: c.code, err: cl.rpc && cl.rpc.error }));
+        check('GRN-16: the bot token never appears in the log or in the pushed error', !c.out.includes(secret) && !JSON.stringify(c.got).includes(secret), c.out.slice(-200));
+        c.close();
+
+        // the guard: a program that holds the port and says nothing, and takeover by a newer build (GRN-22, GRN-110)
+        const foreign = createServer((s) => s.on('error', () => {}));
+        await new Promise((res) => foreign.listen(0, '127.0.0.1', res));
+        const fp = foreign.address().port;
+        const d = await rig({ guardPort: fp, noWait: true });
+        const dGone = await d.exited(6000);
+        check('GRN-22: a guard port held by a program that sends no banner → the bridge says so and exits non-zero (it never runs without the guard)', dGone && d.code !== 0 && /another program|older than this release/i.test(d.out), JSON.stringify({ code: d.code, out: d.out.slice(-200) }));
+        foreign.close(); d.close();
+        const old = await rig({ env: { GREENROOM_BRIDGE_VERSION: '1.0.1' } });
+        const neu = await rig({ sb: old.sb, guardPort: old.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.10' }, noWait: true });
+        const oldGone = await old.exited(8000);
+        const neuUp = await until(() => /Connected to Streamer.bot/.test(neu.out), 8000);
+        check('GRN-110: a newer build (1.0.10) replaces an older one (1.0.1: numeric, not text order): the old one quits cleanly and the new one runs', oldGone && old.code === 0 && neuUp && neu.code === null && /taking over|replac/i.test(neu.out), JSON.stringify({ oldGone, oldCode: old.code, neuCode: neu.code, out: neu.out.slice(-200) }));
+        const same = await rig({ sb: old.sb, guardPort: old.guardPort, env: { GREENROOM_BRIDGE_VERSION: '1.0.9' }, noWait: true });
+        const sameGone = await same.exited(6000);
+        check('GRN-110: a build that is older than the one running exits and says so; the running one is left alone', sameGone && neu.code === null && /already running|newer|same version/i.test(same.out), JSON.stringify({ sameGone, out: same.out.slice(-200) }));
+        old.close(); neu.close(); same.close();
+
+        // command-line arguments win over the environment, and the guard port is the one asked for (GRN-142)
+        const sbArg = await startMockWith({});
+        const e = await rig({ sb: sbArg, env: { SB_WS_URL: 'ws://127.0.0.1:1/', GREENROOM_EXIT_ON_SB_CLOSE: '0', GREENROOM_SB_EXIT_GRACE_MS: '400' }, args: [`--sb-ws-url=${sbArg.url}`, '--exit-on-sb-close=1'] });
+        check('GRN-142: --sb-ws-url= wins over SB_WS_URL (the bridge reaches the mock named by the argument)', !!e.got[0]);
+        sbArg.child.kill();
+        const eGone = await e.exited(6000);
+        check('GRN-142: --exit-on-sb-close=1 wins over GREENROOM_EXIT_ON_SB_CLOSE=0', eGone && e.code === 0, JSON.stringify({ eGone, code: e.code }));
+        e.close();
+        const busy = createServer((s) => s.on('error', () => {}));
+        await new Promise((res) => busy.listen(0, '127.0.0.1', res));
+        const freeGuard = await freePort();
+        const g = await rig({ guardPort: busy.address().port, args: [`--guard-port=${freeGuard}`] });
+        check('GRN-142: --guard-port= wins over GREENROOM_GUARD_PORT (the bridge runs although the environment names a busy port)', g.code === null && !!g.got[0]);
+        busy.close(); g.close();
+
+        // exit-on-SB-close: SB back before the grace ends (GRN-180)
+        const sbE = await startMockWith({});
+        const h = await rig({ sb: sbE, env: { GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_SB_EXIT_GRACE_MS: '2500' } });
+        sbE.child.kill();
+        await nap(1300);
+        const sbBack = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(sbE.httpPort), SB_WS_PORT: String(sbE.wsPort) });
+        await nap(3500);
+        check('GRN-180: Streamer.bot back inside the grace window (grace 2.5 s, back after about 1.6 s) keeps the bridge running (it retries about once a second while the countdown runs)', h.code === null && /reconnected/i.test(h.out), JSON.stringify({ code: h.code, out: h.out.slice(-250) }));
+        h.close(); try { sbBack.kill(); } catch {}
+
+        // Connect, Reset auth and Stop during a gateway dial (GRN-76, GRN-130) against a mock Discord
+        const gwConns = [];
+        const gwHello = { ms: 0 }; // how long the mock gateway waits before it greets a connection
+        let gwN = 0;
+        // connection 1 is refused after 1.5 s; later ones complete the login
+        const gateway = new WebSocketServer({
+          port: 0, host: '127.0.0.1',
+          verifyClient: (info, cb) => {
+            const idx = ++gwN;
+            if (idx === 1) setTimeout(() => cb(false, 503, 'down'), 1500); else cb(true);
+          },
+        });
+        gateway.on('connection', (ws) => {
+          const rec = { closed: false, identified: false }; gwConns.push(rec);
+          ws.on('close', () => { rec.closed = true; }); ws.on('error', () => {});
+          const hello = () => { try { ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45000 } })); } catch { /* gone */ } };
+          setTimeout(hello, gwHello.ms);
+          ws.on('message', (raw) => {
+            let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+            if (m.op === 1) ws.send(JSON.stringify({ op: 11 }));
+            if (m.op === 2) {
+              rec.identified = true;
+              ws.send(JSON.stringify({ op: 0, t: 'READY', s: 1, d: { v: 10, user: { id: '1000', username: 'mockbot', discriminator: '0', avatar: null, bot: true }, guilds: [], session_id: 'mock', resume_gateway_url: `ws://127.0.0.1:${gateway.address().port}`, application: { id: '1000', flags: 0 } } }));
+            }
+          });
+        });
+        await new Promise((res) => gateway.once('listening', res));
+        const gwPort = gateway.address().port;
+        const restHttp = createHttp((req, res) => { res.setHeader('content-type', 'application/json'); res.end(/gateway\/bot/.test(req.url) ? JSON.stringify({ url: `ws://127.0.0.1:${gwPort}`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 1000, max_concurrency: 1 } }) : '{}'); });
+        await new Promise((res) => restHttp.listen(0, '127.0.0.1', res));
+        const api = `http://127.0.0.1:${restHttp.address().port}/api`;
+        const dr = await rig({ token: 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC', env: { DISCORD_BRIDGE_API: api } });
+        dr.cmd('connect'); await nap(300);
+        dr.cmd('connect'); // the first login is still dialing; this one replaces it and completes
+        const up = await dr.waitFor((p) => p.connected === true, 6000);
+        await nap(2600); // the first login is refused by now, 1.5 s after it started
+        check('GRN-130: a login that fails AFTER it was replaced does not take the newer bot down (the bridge stays connected, no error shown)', !!up && dr.code === null && dr.last.connected === true && !(dr.last.rpc && dr.last.rpc.error), JSON.stringify({ up: !!up, connected: dr.last && dr.last.connected, err: dr.last && dr.last.rpc && dr.last.rpc.error, out: dr.out.slice(-200) }));
+        dr.cmd('reset-auth'); await nap(1500);
+        check('GRN-76/130: Reset auth on a connected bot leaves no session: offline, the gateway socket closed, the bridge alive', dr.code === null && dr.last.connected === false && gwConns.every((r) => r.closed), JSON.stringify({ connected: dr.last.connected, closed: gwConns.map((r) => r.closed) }));
+        // Stop during the dial: Connect, then Reset auth before the gateway has said hello. The login finishes later and is closed then.
+        await writeFile(dr.env.DISCORD_BRIDGE_TOKENS, JSON.stringify({ botToken: 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC', enabled: false })); // Reset auth forgot the token: the next Connect reads the file again
+        const connectedBefore = dr.got.filter((p) => p.connected === true).length;
+        const connsBefore = gwConns.length;
+        gwHello.ms = 1500;
+        dr.cmd('connect'); await nap(300);
+        dr.cmd('reset-auth');
+        await nap(3600);
+        const newConns = gwConns.slice(connsBefore);
+        check('GRN-130: Connect then Reset auth during a gateway dial: no crash, the bridge never shows connected, and the session that finished dialing afterwards is closed (no logged-in session left)',
+          dr.code === null && dr.got.filter((p) => p.connected === true).length === connectedBefore && newConns.length >= 1 && newConns.every((r) => r.closed), JSON.stringify({ code: dr.code, conns: newConns.length, closed: newConns.map((r) => r.closed) }));
+        dr.close();
+        await new Promise((res) => gateway.close(res)); restHttp.close();
+      } finally {
+        for (const r of live) { r.close(); try { r.sb.child.kill(); } catch {} }
+      }
+    }
+
+    } // end of the sidecar sections ([7], [8], [8b])
 
     // ── 9. config backup CLI: save + restore round-trip (backup.mjs vs the mock) ──
     // The shared mock still holds VDO_PAYLOAD from [2] (room 'testroom', 2 directory
