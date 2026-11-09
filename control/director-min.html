@@ -21,11 +21,21 @@
   scene collection you stream with):
       http://127.0.0.1:7474/greenroom-control/director-min.html
   That keeps auto-follow-on-rejoin alive with zero operator attention; open
-  control.html only when you want to edit slots. Prefer ONE long-lived director
-  page (this one). While control.html is open it also hosts a director iframe, so
-  expect a brief two-director overlap — their rosters converge within a poll, and
-  the signature gates prevent push ping-pong; real vdo.ninja multi-director
-  behavior stays on the live-validation checklist (docs/STREAMERBOT-SETUP.md).
+  control.html only when you want to edit slots.
+
+  THE ONE-DIRECTOR RULE: run ONE long-lived director — this page when you use it,
+  otherwise the dock's own hidden director — and tick "director-min.html is my
+  always-on director" in the dock (saved as vdo.state's alwaysOnDirector). This
+  page is then the designated director: the dock sends only the operator's edits,
+  and after adopting someone else's state (a restore, say) THIS page sends the one
+  correction of the stream IDs, once the same difference has held for two polls.
+  A second director page — the invite builder's Manage link included — does not
+  own the room and has limited control. Pushes carry a rev and a writer id
+  (control/vdo-rev.js): an older state is dropped, equal revs are broken by the
+  writer id, and a page's own echo is never adopted, so two pages converge on the
+  newer state; that protects convergence, not an edit (an edit made just as a guest
+  joins may need redoing). Real vdo.ninja multi-director behavior stays on the
+  live-validation checklist (docs/STREAMERBOT-SETUP.md).
 
   Config: ?sbport=<n> · window.__SB_WS_URL · window.__VDO_DIRECTOR_URL (test hook).
 -->

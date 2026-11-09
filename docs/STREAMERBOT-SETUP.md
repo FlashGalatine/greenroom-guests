@@ -147,8 +147,12 @@ another port) accepts only a port number from 1 to 65535, and the host is always
 `http://127.0.0.1:7474/greenroom-control/control.html` — open as a browser tab
 or an OBS **Custom Browser Dock** (Docks → Custom Browser Docks…).
 
-Auto-follow needs **one director page open somewhere** (it hosts the hidden
-vdo.ninja director iframe that re-resolves labels → streamIDs every 2.5 s).
+Auto-follow needs **one long-lived director** (it hosts the hidden
+vdo.ninja director iframe that re-resolves labels → streamIDs every 2.5 s): the
+`director-min.html` source when you use it, otherwise the dock's own hidden
+director. A second director page, **including the Manage link** the invite builder
+generates, does not own the room (Greenroom's own director page claims it first)
+and has limited control; see "The Manage link" below.
 Deployment options, best first:
 
 1. **`control.html` as an OBS Custom Browser Dock** — the natural operator home,
@@ -159,9 +163,32 @@ Deployment options, best first:
 2. **1×1 OBS Browser Source running `director-min.html`** — the headless
    always-on alternative (browser sources are known-good CEF). Use it if you
    prefer to keep the director running without the dock open; open `control.html`
-   only to edit (a brief two-director overlap is fine — pushes converge).
+   only to edit, and **tick "director-min.html is my always-on director"** in the
+   dock's Room & Director section (it is saved with the config). The dock then
+   sends only your own edits and leaves following the guests, and adding them to
+   the directory, to director-min; it warns "director-min is designated but not
+   correcting: is its OBS source visible?" if the saved stream IDs stay different
+   from what its own director sees for about 30 s. **Never untick the shared
+   "director enabled" box to free the room**: that blanks every slot. (Two
+   directors at once only converge on the newer state; they do not protect an
+   edit. An edit made just as a guest joins or a voice user appears may need
+   redoing, or hide the director-min source while you edit.)
 3. **A pinned browser tab** — last-resort fallback, no longer needed now that
    the dock is validated.
+
+A director that has just (re)loaded keeps the stream of a label it has not
+reported yet for about 10 s, so a director that starts cold does not blank guests
+who are on air.
+
+**The Manage link.** The invite builder's Manage link is a second vdo.ninja
+director. Because Greenroom's own director page claims the room first, a Manage
+page opened beside it does not own the room and has limited control. To use it as
+the full director: close the dock and any director-min source, refresh the Manage
+page so it claims the room, then reopen the dock and show the director-min source
+again (each rejoins without control). Auto-follow pauses until they are back;
+with the always-on box ticked the dock sends no roster pushes, so slots follow
+guests again only once the director-min source is running. This has not been
+checked against a live room yet.
 
 **Nameplates & Guest Directory** auto-populates from whichever of those pages is
 running (`director-min.html` does it too — the rule is shared in
@@ -259,9 +286,11 @@ exercised on a live rig. Outcomes, faithfully:
 - [x] **OBS dock CEF spike** — **PASSED.** The director iframe (WebRTC +
       postMessage) enumerates and pushes from inside a Custom Browser Dock, so
       the dock alone drives auto-follow (see §4).
-- [ ] **Multi-director safety** — **not stress-tested** (one director page at a
-      time). Still open: the hidden director + a human-operated director link in
-      the same room simultaneously.
+- [ ] **Multi-director safety** — **not stress-tested live** (one long-lived
+      director at a time; see §4). Tested on the mock only: two pages converge on the
+      newer state (docs/PROTOCOL.md, Revisions). Still open: the hidden director +
+      a human-operated director link in the same room simultaneously, and the
+      Manage link opened before and after the dock.
 - [x] **1×1 source pattern** — `director-min.html` validated offline
       (`verify-render` [R1]); live, the director ran from `control.html` / the
       dock. Confirm the standalone 1×1 source with the dock closed if you adopt
@@ -289,6 +318,22 @@ exercised on a live rig. Outcomes, faithfully:
   Discord ID field). Emptying the *name* does not remove anyone: the old name
   comes back with a "use × to remove" hint, because only `×` removes an entry.
   **Un-ignore removed (N)** shows how many guests are currently suppressed.
+- **"SB offline, changes will be sent on reconnect"** → Streamer.bot's WebSocket is
+  unreachable and the page holds an edit (or a push that may not have arrived).
+  Nothing is lost: when the connection returns the dock sends its own state
+  instead of adopting the older saved one, and director-min re-pushes on its next
+  poll.
+- **"not confirmed by Streamer.bot: is VDO Push compiled?"** → a push was sent but
+  never came back as a broadcast within about five seconds. Open the **VDO Push**
+  action in Streamer.bot and compile it; the dock stays as you left it, but the
+  overlays are not receiving it.
+- **"director-min is designated but not correcting"** → "director-min.html is my
+  always-on director" is ticked in the dock, but the saved stream IDs stay different
+  from what the dock's own director sees. Make sure the director-min source is
+  visible (not hidden in OBS) and its URL has the right `?sbport`, or untick the box.
+- **A page says "reload this page"** → the saved config was written by a newer
+  Greenroom than that page (`schemaVersion` 2 and above): reload it, and refresh
+  the OBS sources so every page runs the same version.
 - **Lost your room/slots/guest directory** (SB reinstall, wiped globals, moved
   machines) → the dock config lives only in SB's persisted `vdo.state`. Keep a
   file copy: the control page's **Export/Import config** buttons, or the CLI

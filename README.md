@@ -62,8 +62,11 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
 2. Add OBS Browser Sources:
    `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…2, 3, 4).
 3. Open `http://127.0.0.1:7474/greenroom-control/control.html`, set your room + password,
-   enable the director, and bind slots to guest labels. Keep one director page
-   open (a 1×1 source running `director-min.html` is the set-and-forget option).
+   enable the director, and bind slots to guest labels. Keep exactly one director
+   running (a 1×1 source running `director-min.html` is the set-and-forget option;
+   tick "director-min.html is my always-on director" in the dock when you use it).
+   A second director page, the invite builder's Manage link included, does not
+   own the room (docs/STREAMERBOT-SETUP.md, §4).
    The invite builder hands you guest links (`&hash=` password mode included).
 4. *(optional)* Give guests on-stream names + socials in **Nameplates & Guest
    Directory**. Guests who are live show up there on their own with a placeholder

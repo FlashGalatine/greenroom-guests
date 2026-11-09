@@ -116,9 +116,56 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
       "socials": [ { "platform": "twitch", "handle": "TyrannyTimeTV" } ] }
   ],
   "directoryAutoAdd": true,         // auto-populate new guests (absent → true)
-  "directoryIgnored": [ "vdo:lurker", "discord:200000000000000009" ]
+  "directoryIgnored": [ "vdo:lurker", "discord:200000000000000009" ],
+  "alwaysOnDirector": "director-min", // optional: director-min.html is the designated director
+  "schemaVersion": 2,
+  "rev": 1794249243633,             // per push, see "Revisions" below
+  "writer": "w3f9c0a1d7b42e615"     // random per page load
 }
 ```
+
+- **Revisions: `schemaVersion`, `rev`, `writer` (`control/vdo-rev.js`).** Every
+  push a control page really sends carries `schemaVersion: 2`, a `rev` and the
+  page's `writer` id. `rev` is a whole number chosen when the push is sent:
+  the larger of the clock (`Date.now()`), one more than the highest rev the page
+  has received (its own echoes included) and one more than its own last rev; a
+  push that could not be sent takes none. `writer` is random per page load and
+  only breaks ties. A page that reads a `schemaVersion` higher than its own shows
+  "reload this page" and pushes nothing (pages from before this scheme do that
+  on `schemaVersion: 2`). Streamer.bot stores and replays the fields as part of
+  the text: the actions neither read nor change them. **What a page does with an
+  incoming `vdo.state`:** its **own** push (or an older one of its own) coming
+  back is an echo and is never adopted, matched by `writer` and `rev`, never by
+  the text, because Streamer.bot may rewrite the text (a lone surrogate comes back
+  as U+FFFD); a `rev` **below the highest it has received** is dropped (a
+  delayed `VDO Sync` replay of an older state, say); **equal** revs are broken by
+  the writer id (the larger wins) so every page picks the same winner; a higher
+  `rev` is adopted; a payload with **no `rev`** (a page from before this scheme,
+  a hand-made restore) is a legacy write: adopted, never dropped as rev 0, and
+  the page's next push stamps a rev. Every comparison (is this a change worth a
+  push, is this my echo) is made over the state **without** these three fields
+  and with the keys sorted. This gives convergence, not protection of an edit: of
+  two pushes sent in the same moment the later one Streamer.bot runs wins in the
+  store even if its rev is lower, so an edit made just as a guest joins or a
+  voice user appears may need redoing.
+- **An edit made while Streamer.bot is unreachable** is kept. The dock says "SB
+  offline, changes will be sent on reconnect"; when the connection is back and the
+  replay of the saved state arrives, the dock pushes its own state with a fresh
+  rev instead of adopting the replay. `director-min.html` adopts the replay and
+  re-pushes what differs on its next poll. A push whose echo does not come back
+  within about five seconds is reported ("not confirmed by Streamer.bot: is VDO
+  Push compiled?").
+- **`alwaysOnDirector` (optional, `"director-min"` or absent).** The dock's
+  "director-min.html is my always-on director" box. Ticked, director-min is the
+  **designated director**: the dock sends only the operator's own edits (no
+  follow pushes, no auto-add pushes) and shows "director-min is designated but not
+  correcting" when its own director has seen different stream IDs than the saved
+  ones for about 30 s with no correction arriving. Not ticked, the dock is the
+  designated director. Only the designated director corrects stream IDs after
+  adopting another writer's state (a restore, say): when its own roster differs
+  from the adopted state in `slots[].streamID` alone for two polls in a row it
+  sends ONE correction. The fields travel inside `vdo.state`, so no action
+  changes and nothing is re-pasted.
 
 - Slots bind guests by **label** (stable across rejoins); `streamID` is the
   volatile live resolution the director loop refreshes every 2.5 s.

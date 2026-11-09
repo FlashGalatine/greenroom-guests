@@ -8,9 +8,12 @@
   Greenroom control page — director + editor + pusher in one document.
   Open it at  http://127.0.0.1:7474/greenroom-control/control.html  (Streamer.bot
   HTTP Server, docs/STREAMERBOT-SETUP.md), as a browser tab or an OBS Custom
-  Browser Dock. Run exactly ONE director page at a time (this page or director-min.html) —
-  it hosts the hidden vdo.ninja director iframe that resolves guest labels to live
-  streamIDs every 2.5 s (that loop IS auto-follow-on-rejoin).
+  Browser Dock. Run exactly ONE long-lived director (director-min.html when you use it,
+  otherwise this page's hidden director) — it hosts the hidden vdo.ninja director iframe that
+  resolves guest labels to live streamIDs every 2.5 s (that loop IS auto-follow-on-rejoin).
+  With "director-min.html is my always-on director" ticked (saved as vdo.state's alwaysOnDirector)
+  this page sends only the operator's own edits; a second director page, the invite builder's
+  Manage link included, does not own the room (docs/STREAMERBOT-SETUP.md, section 4).
 
   State lives in Streamer.bot's persisted `vdo.state` global, not in this page: on
   connect it fires "VDO Sync" and hydrates from the replayed vdoninja:update; every
@@ -191,7 +194,7 @@
     <div id="vdoPwWarn" class="warn" role="status"></div>
     <div class="hint">Slots bind guests by their vdo.ninja <b>label</b>; the hidden director iframe
       re-resolves label → current streamID every 2.5&nbsp;s, so a guest who rejoins is re-followed
-      automatically. Keep exactly one director page open (this page or director-min.html).</div>
+      automatically. Keep exactly one long-lived director (director-min.html, with the box above ticked, or this page); a second director page, the Manage link included, does not own the room.</div>
     <div id="syncStatus" class="warn" role="status" hidden></div>
     <div id="cfgStatus" class="hint" role="status" aria-live="polite"></div>
     <div id="cfgExportBox" class="linkrow" hidden>

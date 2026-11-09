@@ -916,8 +916,8 @@ async function main() {
       { vdoLabel: 'A', displayName: 'Alpha' }, { vdoLabel: 'B', displayName: 'Bravo' }, { vdoLabel: 'C', displayName: '' }] });
     check('R9b: the confirm counts the entries that will survive sanitising, and says how many are dropped',
       r.length === 1 && r[0].type === 'confirm' && /2 guest entr/.test(r[0].msg) && /1\D{0,40}dropped|dropped\D{0,40}1/i.test(r[0].msg), JSON.stringify(r));
-    r = await importObj({ schemaVersion: 2, room: 'r', slots: [] });
-    check('R9b: a backup from a newer Greenroom (schemaVersion 2) is refused before the confirm, with a message',
+    r = await importObj({ schemaVersion: 3, room: 'r', slots: [] });
+    check('R9b: a backup from a newer Greenroom (schemaVersion 3) is refused before the confirm, with a message',
       r.length === 1 && r[0].type === 'alert' && /newer/i.test(r[0].msg), JSON.stringify(r));
     check('R9b: none of those imports pushed anything', pushesOf(await seeded.api.actions()).length === 0);
     await pgI.close();
@@ -967,7 +967,7 @@ async function main() {
     check('R9c: a fresh install can export after its first push (Export is disabled until then)', freshDisabled === true && freshEnabled);
     await pgX3.close();
 
-    // R9d: GRN-75 + GRN-202 — unknown fields survive both pages' pushes; rev/writer never do;
+    // R9d: GRN-75 + GRN-202 — unknown fields survive both pages' pushes; the saved rev/writer are never copied (each push is stamped by its own page);
     // a higher schemaVersion stops them; director-min keeps the auto-add companions.
     const SEED_EXTRA = { enabled: true, room: 'extraroom', password: 'pw1', viewFlags: VIEWFLAGS, futureTop: { a: 1 }, rev: 99, writer: 'zzz',
       slots: [slot(1, { label: 'ALPHA', volume: 0.5 }), slot(2, { label: 'BRAVO' }), slot(3), slot(4)],
@@ -979,7 +979,7 @@ async function main() {
       && p.directory && p.directory[0] && p.directory[0].pronouns === 'they/them'
       && p.directory[0].socials && p.directory[0].socials[0] && p.directory[0].socials[0].url === 'https://example.invalid/a'
       && p.invite && p.invite.futureInvite === 'x';
-    const noReserved = (p) => p && !('rev' in p) && !('writer' in p);
+    const noReserved = (p) => p && p.writer !== 'zzz' && typeof p.writer === 'string' && p.writer !== '' && Number.isInteger(p.rev) && p.rev > 99; // the push carries this page's own stamp, never the saved state's rev or writer
     const ext = await startExtra({});
     const reseed = async (obj) => { await ext.api.restart(true); ext.prod.doAction('VDO Push', { payload: JSON.stringify(obj) }); await sleep(300); await ext.api.clear(); };
     await reseed(SEED_EXTRA);
@@ -988,8 +988,8 @@ async function main() {
     let resolvePush = null;
     for (let i = 0; i < 40 && !resolvePush; i++) { resolvePush = savedPayloads(await ext.api.actions()).find((p) => p.slots && p.slots[0] && p.slots[0].streamID === 'aaa111'); if (!resolvePush) await sleep(250); }
     check('R9d: control.html keeps unknown top-level, slot, directory, social and invite fields through a resolution push', !!keeps(resolvePush), JSON.stringify(resolvePush));
-    check('R9d: …and never copies rev or writer', noReserved(resolvePush) && !!resolvePush);
-    check('R9d: …and sends schemaVersion 1', !!resolvePush && resolvePush.schemaVersion === 1);
+    check('R9d: …and never copies the saved rev or writer: it stamps its own', noReserved(resolvePush) && !!resolvePush);
+    check('R9d: …and sends schemaVersion 2', !!resolvePush && resolvePush.schemaVersion === 2);
     await ext.api.clear();
     await pgP.fill('#vdoViewFlags', '&solo&edit-test');
     await pgP.click('#btnVdoSave');
@@ -1015,26 +1015,26 @@ async function main() {
     await pgPm.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
     let minPush = null;
     for (let i = 0; i < 40 && !minPush; i++) { minPush = savedPayloads(await ext.api.actions()).find((p) => p.slots && p.slots[0] && p.slots[0].streamID === 'aaa111'); if (!minPush) await sleep(250); }
-    check('R9d: director-min keeps the same unknown fields through its resolution push, and not rev/writer',
-      !!keeps(minPush) && noReserved(minPush) && minPush.schemaVersion === 1, JSON.stringify(minPush));
+    check('R9d: director-min keeps the same unknown fields through its resolution push, and stamps its own rev/writer',
+      !!keeps(minPush) && noReserved(minPush) && minPush.schemaVersion === 2, JSON.stringify(minPush));
     await pgPm.close();
 
     // schemaVersion higher than the page knows: it adopts for display but stops pushing.
-    await reseed({ ...SEED_EXTRA, schemaVersion: 2 });
+    await reseed({ ...SEED_EXTRA, schemaVersion: 3 });
     const dlgV = [];
     const pgV = await newPage(browser, { width: 920, height: 1300 }, FIXED_DIR);
     pgV.on('dialog', (d) => { dlgV.push(d.message()); d.accept(); });
     await pgV.goto(`${ext.api.base}/control/control.html?sbport=${ext.ws}`, { waitUntil: 'load' });
     const reloadTxt = await wait(pgV, () => /reload this page/i.test((document.getElementById('sbStatus')?.textContent || '') + (document.getElementById('syncStatus')?.textContent || '')), null, 8000);
     check("R9d: a higher schemaVersion makes control.html say 'reload this page'", reloadTxt);
-    check('R9d: …and Export is disabled (it would write that newer config back stamped as version 1)',
+    check('R9d: …and Export is disabled (it would write that newer config back stamped as version 2)',
       await pgV.evaluate(() => document.getElementById('btnCfgExport').disabled === true));
     await pgV.fill('#vdoViewFlags', '&solo&too-new');
     await pgV.click('#btnVdoSave');
     await sleep(3500); // a director poll or two as well
     check('R9d: …and it pushes nothing, not even on Save or from the director poll', pushesOf(await ext.api.actions()).length === 0, `${pushesOf(await ext.api.actions()).length} push(es)`);
     await pgV.close();
-    await reseed({ ...SEED_EXTRA, schemaVersion: 2 });
+    await reseed({ ...SEED_EXTRA, schemaVersion: 3 });
     const pgVm = await newPage(browser, { width: 480, height: 120 }, FIXED_DIR);
     await pgVm.goto(`${ext.api.base}/control/director-min.html?sbport=${ext.ws}`, { waitUntil: 'load' });
     const reloadMin = await wait(pgVm, () => /reload this page/i.test(document.getElementById('status')?.textContent || ''), null, 8000);
