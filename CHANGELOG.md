@@ -9,6 +9,27 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.69] — 2026-11-09
+
+The Discord bridge now checks the channel you pick before it leaves the one it is in, and keeps guests invited into the call on the roster. The sidecar version is now 1.0.69.
+
+### Fixed
+
+- **A bad pick no longer drops the working channel.** USE (Set current) used to leave the old channel, forget the roster and save the new pick before anything was checked, so a Stage channel, a text channel, a channel the bot cannot join, a deleted channel or a server the bot is not in left the bot out of voice with an empty roster. While the bot is online the target is now checked first: a server the bot is in, a channel that exists, a regular voice channel the bot can join (View Channel and Connect, and room under the user limit: a guest in the call counts). A target that fails keeps the current channel, the voice connection, the roster and the saved pick, and says why on the status line ("That is a Stage channel — pick a regular voice channel instead", "Channel not found", "cannot join", "full", …). The message clears itself after about a minute, so the status does not stay red for the rest of the stream while the bot is working. When USEs overlap the newest one decides, and a pick that cannot be saved to the config file is not applied (the status says so).
+- **Offline picks.** USE before Connect still just saves the pick, and it no longer erases the message that says why the bot is offline (a bad token, no token). The same check runs when the bot logs in: a saved channel that fails it is not joined, and the reason stays on the status line until the pick changes. The Discord feed says so with a new `currentRefused` field (additive; docs/PROTOCOL.md).
+- **Stage channels are refused with a reason** instead of a join that never works. The setup guide now says "a regular voice channel (not a Stage)".
+- **Removing the favorite that is the current channel clears it and leaves voice** (unless another favorite names the same channel). Before, the removed favorite stayed the working channel, and a restart or a `connect` joined it again.
+- **Guests invited into the call stay on the roster.** A guest (Discord keeps no member for them) is now listed when the bridge joins, moves, re-joins or logs in, not only when they join while the bot is already there: by their nickname or Discord name (looked up when no earlier message named them), with their mute and deafen state following them. A join and a leave that arrive together leave nobody behind, and a message with no user in it adds nobody.
+- **A bot or a departed user no longer gets a speaking flag**, and the speaking handlers of an old voice connection no longer touch the roster of the next one.
+- **Members show their per-server avatar** (the picture they set for that server), with the global avatar as the fallback.
+- **Departures are handled by user id before the member check**, so a user who left, or who is not cached, is removed from the roster.
+- **Two commands that save at the same time can no longer garble the config file.** Writes happen one at a time.
+
+### Added
+
+- Tests: `verify` section [8c] extends the mock Discord (now a reusable `mockDiscord` helper with resume, voice-state requests, an outage switch, delayed answers and user lookups) with a gateway that identifies, lists a guild in READY and dispatches GUILD_CREATE (a voice, a text, a Stage, a locked and a full channel, the bot's own member, a member and some guests in voice) and VOICE_STATE_UPDATE through the real discord.js handlers. It drives the real bridge through USE on wrong-server, text, Stage, locked, missing and full targets, a slow older USE, a config file that cannot be written, an accepted USE, favorite removal (with a duplicate), guests joining, muting, re-joining, leaving and moving, a join and a leave in one read, frames with no user, a per-server avatar, the speaking flag, an offline USE and a refused saved channel at login. Test-only: `test-speaking <userId>` and `GREENROOM_REFUSAL_MS` (with `GREENROOM_TEST_HOOKS=1`).
+
+**Deploy:** **stop the running bridge first** (close its window, or send `quit`), copy the `sidecar/` folder (and `mock-discord-bridge.mjs` if you use it) and start the bridge again with Discord Bridge Start or `start-discord-bridge.bat`. Nothing to re-paste; no page reload. The control page and the overlays are unchanged. `verify` 395/395, `verify:render` 357/357.
 ## [1.0.66] — 2026-11-09
 
 The Discord bridge has one way out, a guard that says who holds it, and survives bad frames. The sidecar version is now 1.0.66.
@@ -436,6 +457,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.69]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.66...v1.0.69
 [1.0.66]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.63...v1.0.66
 [1.0.63]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.59...v1.0.63
 [1.0.59]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.55...v1.0.59
