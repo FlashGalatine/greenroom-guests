@@ -24,8 +24,12 @@ window.GRNameplate = (function () {
     website: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9S14.5 18.4 12 21c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></svg>',
   };
 
+  // Short names people type for a platform. Only own properties count: icon('constructor') must not return a function.
+  const ICON_ALIASES = { x: 'twitter', yt: 'youtube', ig: 'instagram', bsky: 'bluesky', tt: 'tiktok' };
   function icon(platform) {
-    return ICONS[String(platform ?? '').toLowerCase()] || ICONS.website;
+    let k = String(platform ?? '').toLowerCase();
+    if (Object.hasOwn(ICON_ALIASES, k)) k = ICON_ALIASES[k];
+    return Object.hasOwn(ICONS, k) ? ICONS[k] : ICONS.website;
   }
 
   function escapeHtml(str) {
@@ -78,19 +82,67 @@ window.GRNameplate = (function () {
   }
 
   // ── Lookup ──────────────────────────────────────────────────────────────────
-  // Labels are stored as the operator typed them but matched case-insensitively
-  // (vdo.ninja labels come back trimmed from the director enumeration).
+  // KEEP IN SYNC with control/directory-core.js: the block below is the same text there (verify.mjs compares them).
+  // <guest-identity>
+  // The comparison key for guest labels and the lookups built on it. IDENTICAL in control/directory-core.js and
+  // overlay/nameplate-shared.js (verify.mjs compares the two blocks and runs both over the same vectors).
+  //
+  // A label is normalised ONLY into a key; the raw label stays the slot key and is what is stored. canon() decodes vdo.ninja's HTML
+  // escaping (it escapes twice: "Tom &amp;amp; Jerry"), reads '_' as a space, applies NFC, drops invisible characters (zero-width
+  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (a few passes at most),
+  // so canon(canon(x)) === canon(x). fold() also folds case. Two labels are "exactly equal" when their canons are equal.
+  function decodeHtml(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = t.replace(/&(lt|gt|quot|#39|#x27|apos);/gi, (m, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", apos: "'" }[n.toLowerCase()])).replace(/&amp;/gi, '&');
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function canon(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = decodeHtml(t).replace(/_/g, ' ').normalize('NFC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').replace(/\s+/g, ' ').trim();
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function fold(s) { return canon(s).toLowerCase(); }
+  // Does the label draw anything? (U+2800, the Braille blank, is not whitespace but shows nothing.)
+  function hasGlyph(s) { return /[^\s⠀ㅤᅟᅠ]/u.test(canon(s)); }
+
+  // Which directory entry stands for this live label? Collect every entry whose key matches, then prefer an exact-case match (equal
+  // canon), then a curated entry over an auto one, then the first in array order.
   function findByLabel(dir, label) {
-    const needle = String(label ?? '').trim().toLowerCase();
-    if (!needle) return null;
-    return dir.find((e) => e.vdoLabel && e.vdoLabel.toLowerCase() === needle) || null;
+    const c = canon(label);
+    if (!c) return null;
+    const f = c.toLowerCase();
+    let hit = null;
+    let hitRank = 99;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || !e.vdoLabel) continue;
+      const ec = canon(e.vdoLabel);
+      if (ec.toLowerCase() !== f) continue;
+      const rank = (ec === c ? 0 : 2) + (e.auto ? 1 : 0);
+      if (rank < hitRank) { hit = e; hitRank = rank; }
+    }
+    return hit;
   }
 
+  // Which entry stands for this Discord user? Digits only; a curated entry beats an auto one, then array order.
   function findByUserId(dir, id) {
-    const needle = String(id ?? '');
+    const needle = String(id ?? '').replace(/\D/g, '');
     if (!needle) return null;
-    return dir.find((e) => e.discordUserId && e.discordUserId === needle) || null;
+    let hit = null;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || String(e.discordUserId || '').replace(/\D/g, '') !== needle) continue;
+      if (!hit || (hit.auto && !e.auto)) hit = e;
+    }
+    return hit;
   }
+  // </guest-identity>
 
   // The single visibility rule shared by both nameplate surfaces. Needs only the
   // vdoninja payload (never discordVoice): a discord-mode plate mirrors the PFP
@@ -103,7 +155,8 @@ window.GRNameplate = (function () {
     if (!slot) return null;
     const dir = sanitizeDirectory(vdo.directory);
     if (slot.mode === 'discord') {
-      return slot.discordUserId ? findByUserId(dir, String(slot.discordUserId)) : null;
+      const uid = String(slot.discordUserId ?? '').replace(/\D/g, '');
+      return uid ? findByUserId(dir, uid) : null;
     }
     return slot.streamID ? findByLabel(dir, slot.label) : null;
   }
@@ -112,7 +165,7 @@ window.GRNameplate = (function () {
   const ACCENTS = { cyan: '34, 211, 238', magenta: '255, 0, 229', 'neon-green': '57, 255, 20' };
   function accentTriplet(name) {
     if (!name) return null;
-    if (ACCENTS[name]) return ACCENTS[name];
+    if (Object.hasOwn(ACCENTS, name)) return ACCENTS[name];
     return /^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$/.test(name) ? name : null;
   }
 
@@ -258,7 +311,7 @@ window.GRNameplate = (function () {
   return {
     ICONS, icon, escapeHtml,
     sanitizeSocials, sanitizeDirectory,
-    findByLabel, findByUserId, resolvePlateEntry,
+    findByLabel, findByUserId, resolvePlateEntry, canon, fold, hasGlyph,
     ACCENTS, accentTriplet,
     makeRotator, socialSlide,
     injectCss, buildPlate,

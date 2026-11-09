@@ -128,7 +128,7 @@
   const ACCENTS = { cyan: '34, 211, 238', magenta: '255, 0, 229', 'neon-green': '57, 255, 20' };
   function accentTriplet(name) {
     if (!name) return null;
-    if (ACCENTS[name]) return ACCENTS[name];
+    if (Object.hasOwn(ACCENTS, name)) return ACCENTS[name];
     return /^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$/.test(name) ? name : null;
   }
 
@@ -206,12 +206,16 @@
     return { root, img, name };
   }
 
+  function shownName(uid, u) {
+    const d = GRNameplate.findByUserId(directory, uid);
+    return (d && !d.auto && d.displayName) || (u && u.username) || (d && d.displayName) || uid;
+  }
   function orderedIds(users, streamerId) {
     return Object.keys(users).sort((a, b) => {
       if (a === streamerId) return -1;
       if (b === streamerId) return 1;
-      const ua = (users[a].username || '').toLowerCase();
-      const ub = (users[b].username || '').toLowerCase();
+      const ua = String(shownName(a, users[a])).toLowerCase();
+      const ub = String(shownName(b, users[b])).toLowerCase();
       return ua < ub ? -1 : ua > ub ? 1 : a < b ? -1 : 1;
     });
   }
@@ -271,8 +275,7 @@
       if (n.img.getAttribute('src') !== avatarUrl) n.img.src = avatarUrl;
       // Directory override happens here (outside the membership sig) so a
       // directory edit restyles chips live without a rebuild.
-      const dirEntry = GRNameplate.findByUserId(directory, uid);
-      const label = (dirEntry && dirEntry.displayName) || u.username || uid;
+      const label = shownName(uid, u);
       if (n.name.textContent !== label) { n.name.textContent = label; n.name.title = label; }
       n.root.classList.toggle('streamer', uid === cfg.streamer);
       n.root.classList.toggle('speaking', !!u.speaking);

@@ -80,37 +80,84 @@
     const out = new Set();
     for (const k of raw) {
       const s = String(k ?? '').trim();
-      if (/^vdo:.+/.test(s)) out.add('vdo:' + s.slice(4).toLowerCase());
+      if (/^vdo:.+/.test(s)) { const f = fold(s.slice(4)); if (f) out.add('vdo:' + f); } // the same key labelKey builds, so old-format keys still match
       else if (/^discord:\d+$/.test(s)) out.add(s);
     }
     return [...out].sort();
   }
 
-  const labelKey = (label) => 'vdo:' + String(label ?? '').trim().toLowerCase();
-  const userKey = (id) => 'discord:' + String(id ?? '').replace(/\D/g, '');
+  // <guest-identity>
+  // The comparison key for guest labels and the lookups built on it. IDENTICAL in control/directory-core.js and
+  // overlay/nameplate-shared.js (verify.mjs compares the two blocks and runs both over the same vectors).
+  //
+  // A label is normalised ONLY into a key; the raw label stays the slot key and is what is stored. canon() decodes vdo.ninja's HTML
+  // escaping (it escapes twice: "Tom &amp;amp; Jerry"), reads '_' as a space, applies NFC, drops invisible characters (zero-width
+  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (a few passes at most),
+  // so canon(canon(x)) === canon(x). fold() also folds case. Two labels are "exactly equal" when their canons are equal.
+  function decodeHtml(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = t.replace(/&(lt|gt|quot|#39|#x27|apos);/gi, (m, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", apos: "'" }[n.toLowerCase()])).replace(/&amp;/gi, '&');
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function canon(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = decodeHtml(t).replace(/_/g, ' ').normalize('NFC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').replace(/\s+/g, ' ').trim();
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function fold(s) { return canon(s).toLowerCase(); }
+  // Does the label draw anything? (U+2800, the Braille blank, is not whitespace but shows nothing.)
+  function hasGlyph(s) { return /[^\s⠀ㅤᅟᅠ]/u.test(canon(s)); }
 
-  // Labels are stored as the operator typed them but matched case-insensitively
-  // (vdo.ninja labels come back trimmed from the director enumeration).
+  // Which directory entry stands for this live label? Collect every entry whose key matches, then prefer an exact-case match (equal
+  // canon), then a curated entry over an auto one, then the first in array order.
   function findByLabel(dir, label) {
-    const needle = String(label ?? '').trim().toLowerCase();
-    if (!needle) return null;
-    return (dir || []).find((e) => e && e.vdoLabel && String(e.vdoLabel).trim().toLowerCase() === needle) || null;
+    const c = canon(label);
+    if (!c) return null;
+    const f = c.toLowerCase();
+    let hit = null;
+    let hitRank = 99;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || !e.vdoLabel) continue;
+      const ec = canon(e.vdoLabel);
+      if (ec.toLowerCase() !== f) continue;
+      const rank = (ec === c ? 0 : 2) + (e.auto ? 1 : 0);
+      if (rank < hitRank) { hit = e; hitRank = rank; }
+    }
+    return hit;
   }
 
+  // Which entry stands for this Discord user? Digits only; a curated entry beats an auto one, then array order.
   function findByUserId(dir, id) {
     const needle = String(id ?? '').replace(/\D/g, '');
     if (!needle) return null;
-    return (dir || []).find((e) => e && String(e.discordUserId || '') === needle) || null;
+    let hit = null;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || String(e.discordUserId || '').replace(/\D/g, '') !== needle) continue;
+      if (!hit || (hit.auto && !e.auto)) hit = e;
+    }
+    return hit;
   }
+  // </guest-identity>
+
+  const labelKey = (label) => 'vdo:' + fold(label);
+  const userKey = (id) => 'discord:' + String(id ?? '').replace(/\D/g, '');
 
   // Textarea grammar — one social per line: "platform handle", split on the FIRST
-  // space (the handle may itself contain spaces). Control-page only; the wire
+  // whitespace (a space, tab or NBSP; the handle may itself contain spaces). Control-page only; the wire
   // always carries {platform, handle} objects.
   function parseSocialsText(text) {
     const out = [];
     for (const line of String(text || '').split(/\r?\n/)) {
       const t = line.trim();
-      const sp = t.indexOf(' ');
+      const sp = t.search(/\s/);
       if (sp <= 0) continue;
       const platform = t.slice(0, sp).toLowerCase();
       const handle = t.slice(sp + 1).trim();
@@ -123,10 +170,6 @@
     return (socials || []).map((s) => s.platform + ' ' + s.handle).join('\n');
   }
 
-  function eqCi(a, b) {
-    return !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
-  }
-
   // A guest controls their own label, and a label that looks like a timestamp is not
   // safe to carry in a payload Streamer.bot re-parses (the actions get their own fix in
   // a later release). Auto-add never copies one into a payload. Deliberately broad:
@@ -135,69 +178,134 @@
   function isDateShaped(s) { return DATE_SHAPED.test(String(s ?? '')); }
 
   // Turn "who is live right now" into directory entries.
-  //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} }, skip: ['vdo:alpha', 'discord:1'] }
+  //   opts = { directory, ignored, labels: ['ALPHA'], users: { '<id>': {username} }, skip: ['vdo:alpha', 'discord:1'],
+  //            boundLabels: ['ALPHA'], boundUsers: ['<id>'] }
   // `skip` lists keys the caller has already auto-added in this session: they are never appended again (a label that Streamer.bot
-  // rewrites on the way back would otherwise look new on every pass). It does not stop a Discord id being filled into an entry.
-  // Returns { directory, changed, added } — `directory` is a NEW array (entries
-  // are only ever appended or key-filled, never renamed), `added` lists the keys
-  // it created, for status text.
+  // rewrites on the way back would otherwise look new on every pass). `boundLabels` / `boundUsers` name the guests that sit in a slot:
+  // an auto entry for one of them is never evicted.
   //
-  // Both control pages run this on the same inputs, so the result must not depend
-  // on iteration order: candidates are sorted (labels case-insensitively, user ids
-  // as strings) before anything is appended. Two directors that disagree on order
-  // would push each other in circles.
+  // Returns { directory, changed, added, linked, suggested, skipped, evicted, appended }:
+  //   directory  a NEW array: the input without the evicted entries, with the appended ones at the end
+  //   added      the keys of the entries it appended (for status text)
+  //   linked     [{ index, id, username, name }] a Discord id filled into an AUTO entry whose name matched (index = input index)
+  //   suggested  [{ index, id, username }] a CURATED entry whose name matches a Discord user: never linked silently (anyone can pick
+  //              a Discord name), only offered to the operator; it changes nothing, so the pass stays a fixpoint
+  //   skipped    how many new entries were not added because AUTO_MAX auto entries exist and none could be evicted
+  //   evicted    input indices of the auto entries dropped to make room (only entries absent from the room and bound to no slot)
+  //   appended   the new entry objects
+  //
+  // Both control pages run this on the same inputs, so the result must not depend on iteration order: labels are sorted (by key, then
+  // exact case, then raw text) and user ids as strings before anything is appended.
+  const AUTO_MAX = 50;
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   function autoPopulate(opts) {
     const o = opts || {};
     const dir = (Array.isArray(o.directory) ? o.directory : []).slice();
+    const orig = dir.map((e, i) => i); // each entry's index in the input (-1 once appended here)
     const ignored = new Set(sanitizeIgnored(o.ignored));
     const skip = new Set(Array.isArray(o.skip) ? o.skip.map(String) : []);
+    const digits = (x) => String(x ?? '').replace(/\D/g, '');
+    const boundLabels = new Set((Array.isArray(o.boundLabels) ? o.boundLabels : []).map(fold).filter(Boolean));
+    const boundUsers = new Set((Array.isArray(o.boundUsers) ? o.boundUsers : []).map(digits).filter(Boolean));
     const added = [];
+    const linked = [];
+    const suggested = [];
+    const evicted = [];
+    const appended = [];
+    let skipped = 0;
     let changed = false;
 
-    const labels = [...new Set((Array.isArray(o.labels) ? o.labels : [])
-      .map((l) => String(l ?? '').trim()).filter(Boolean))]
-      .sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0));
+    // Live labels: unique by exact key (labels that differ only in case stay separate guests), in a fixed order.
+    const byCanon = new Map();
+    for (const l of (Array.isArray(o.labels) ? o.labels : []).map((x) => String(x ?? '').trim()).filter(Boolean).sort(cmp)) {
+      const c = canon(l);
+      if (c && !byCanon.has(c)) byCanon.set(c, l);
+    }
+    const labels = [...byCanon.values()].sort((a, b) => cmp(fold(a), fold(b)) || cmp(canon(a), canon(b)) || cmp(a, b));
+    const foldCount = new Map();
+    for (const l of labels) foldCount.set(fold(l), (foldCount.get(fold(l)) || 0) + 1);
+    const users = (o.users && typeof o.users === 'object') ? o.users : {};
+    const liveUsers = new Set(Object.keys(users).map(digits).filter(Boolean));
+
+    const isLive = (e) => (e.vdoLabel && foldCount.has(fold(e.vdoLabel))) || (e.discordUserId && liveUsers.has(digits(e.discordUserId)));
+    const isBound = (e) => (e.vdoLabel && boundLabels.has(fold(e.vdoLabel))) || (e.discordUserId && boundUsers.has(digits(e.discordUserId)));
+    // Room for one more auto entry? At AUTO_MAX, drop the first auto entry that is not in the room and not in a slot; else skip.
+    const room = () => {
+      if (dir.reduce((n, e) => n + (e && e.auto ? 1 : 0), 0) < AUTO_MAX) return true;
+      const i = dir.findIndex((e, k) => e && e.auto && orig[k] >= 0 && !isLive(e) && !isBound(e));
+      if (i < 0) { skipped++; return false; }
+      evicted.push(orig[i]);
+      dir.splice(i, 1);
+      orig.splice(i, 1);
+      changed = true;
+      return true;
+    };
 
     for (const label of labels) {
       const key = labelKey(label);
-      if (isDateShaped(label) || ignored.has(key) || skip.has(key) || findByLabel(dir, label)) continue;
-      dir.push({ vdoLabel: label, discordUserId: '', displayName: label, socials: [], auto: true });
+      const c = canon(label);
+      if (!hasGlyph(label) || isDateShaped(label) || ignored.has(key) || skip.has(key)) continue;
+      if (dir.some((e) => e && e.vdoLabel && canon(e.vdoLabel) === c)) continue; // an entry already has exactly this label
+      // matched ignoring case, and no other live label collides with it by case: the same guest
+      if (foldCount.get(fold(label)) === 1 && dir.some((e) => e && e.vdoLabel && fold(e.vdoLabel) === fold(label))) continue;
+      // the guest came into the voice channel first: their auto entry takes the label (never a curated one)
+      const mi = dir.findIndex((e) => e && !e.vdoLabel && e.auto && fold(e.displayName) === fold(label));
+      if (mi >= 0) {
+        dir[mi] = Object.assign({}, dir[mi], { vdoLabel: label });
+        changed = true;
+        continue;
+      }
+      if (!room()) continue;
+      const entry = { vdoLabel: label, discordUserId: '', displayName: decodeHtml(label).trim() || label, socials: [], auto: true };
+      dir.push(entry);
+      orig.push(-1);
+      appended.push(entry);
       added.push(key);
       changed = true;
     }
 
-    const users = (o.users && typeof o.users === 'object') ? o.users : {};
     for (const rawId of Object.keys(users).sort()) {
-      const id = String(rawId).replace(/\D/g, '');
+      const id = digits(rawId);
       if (!id) continue;
       const key = userKey(id);
       if (ignored.has(key) || findByUserId(dir, id)) continue;
       const u = users[rawId] || {};
-      // A date-shaped Discord name is never copied into the directory (see isDateShaped);
-      // the entry is named by the id, as for a user with no name.
-      const username = isDateShaped(u.username) ? '' : String(u.username ?? '').trim();
-      const name = username || id;
-      // Same human, already in the book under a VDO label or that exact name →
-      // fill in the Discord id instead of creating a twin. Clearing the id field
-      // ignores it (control.html), so a wrong guess is one edit away from gone.
-      const idx = dir.findIndex((e) => e && !e.discordUserId
-        && (eqCi(e.displayName, username) || eqCi(e.vdoLabel, username)));
-      if (idx >= 0) {
-        dir[idx] = Object.assign({}, dir[idx], { discordUserId: id });
-        changed = true;
-      } else if (!skip.has(key)) {
-        dir.push({ vdoLabel: '', discordUserId: id, displayName: name, socials: [], auto: true });
-        added.push(key);
-        changed = true;
+      const rawName = String(u.username ?? '').trim();
+      if (!rawName) continue; // no name yet: the entry is added when the name arrives, not named after the snowflake
+      // A date-shaped Discord name is never copied into the directory (see isDateShaped); the entry is named by the id.
+      const username = isDateShaped(rawName) ? '' : rawName;
+      // Same human, already in the book under a VDO label or this exact name? An AUTO entry takes the id silently. A CURATED entry
+      // never does (a Discord name is self-chosen, anyone can pick "Bob"): it is only offered the link, and no twin is made.
+      const nameKey = fold(username);
+      const nameHits = nameKey ? dir.map((e, k) => (e && !e.discordUserId && (fold(e.displayName) === nameKey || fold(e.vdoLabel) === nameKey) ? k : -1)).filter((k) => k >= 0) : [];
+      if (nameHits.length) {
+        const idx = nameHits.find((k) => dir[k].auto);
+        if (idx !== undefined) {
+          const e = dir[idx];
+          dir[idx] = Object.assign({}, e, { discordUserId: id });
+          linked.push({ index: orig[idx], id, username, name: e.displayName });
+          changed = true;
+        } else {
+          suggested.push({ index: orig[nameHits[0]], id, username });
+        }
+        continue;
       }
+      if (skip.has(key)) continue;
+      if (!room()) continue;
+      const entry = { vdoLabel: '', discordUserId: id, displayName: username || id, socials: [], auto: true };
+      dir.push(entry);
+      orig.push(-1);
+      appended.push(entry);
+      added.push(key);
+      changed = true;
     }
 
-    return { directory: dir, changed, added };
+    return { directory: dir, changed, added, linked, suggested, skipped, evicted, appended };
   }
 
   globalThis.GRDir = {
     sanitizeSocials, sanitizeDirectory, sanitizeIgnored,
-    labelKey, userKey, findByLabel, findByUserId,
+    labelKey, userKey, findByLabel, findByUserId, canon, fold, hasGlyph, decodeHtml, AUTO_MAX,
     parseSocialsText, socialsToText, autoPopulate, isDateShaped,
     extraFields, carrySocialExtras, DIR_KEYS, SOCIAL_KEYS,
   };
