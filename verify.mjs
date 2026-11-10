@@ -1620,7 +1620,7 @@ async function main() {
     }
 
     // ── 6d. the documents say what the code does (Sprint 20: GRN-193, 201, 230, 214) ──
-    console.log('\n[6d] Documents: the path names, the theming table, the Subscribe casing, the tested versions');
+    console.log('\n[6d] Documents: the path names, the theming table, the Subscribe casing, the tested versions, what Authentication covers');
     {
       const readme = await readFile(resolve(__dirname, 'README.md'), 'utf8');
       const setup = await readFile(resolve(__dirname, 'docs', 'STREAMERBOT-SETUP.md'), 'utf8');
@@ -1647,6 +1647,26 @@ async function main() {
       const section6 = (/\*\*Tested versions\.\*\*([\s\S]*?)What the offline harness/.exec(setup) || [])[1] || '';
       check('GRN-214/235: the versions the README says it was tested on are the ones the setup guide\'s section 6 says were run, and while 1.0.7 and OBS 33.0.1 are not among them both documents say they were not',
         named.length > 0 && named.every((v) => section6.includes(v)) && (named.includes('1.0.7') || (/not been re-run/.test(readme) && /not been run again\*\* on 1\.0\.7/.test(section6))), JSON.stringify({ named, section6: section6.slice(0, 80) }));
+      // what Streamer.bot Authentication protects: its WebSocket only. The HTTP server Greenroom needs to serve its pages has no password setting, and
+      // Streamer.bot documents a DoAction request on it, so no security text may say Enforce keeps out another program or a stray tab. Each section is
+      // read on its own (the setup guide says "another program" elsewhere about the guard port) and with its line breaks folded into spaces.
+      const sectionOf = (text, from, to) => { const i = text.indexOf(from); if (i < 0) return ''; const j = to ? text.indexOf(to, i + from.length) : -1; return text.slice(i, j < 0 ? undefined : j).replace(/\s+/g, ' '); };
+      const authDocs = {
+        readme: sectionOf(readme, '## Security posture', '## Origins'),
+        protocol: sectionOf(protocol, '## Security posture', null),
+        setup: sectionOf(setup, '## Optional: Streamer.bot Authentication', '## Troubleshooting'),
+      };
+      const authWrong = [];
+      const inSentence = (a, b) => new RegExp(a + '(?:[^.]|\\.(?=\\S))*?' + b, 'i'); // a then b in one sentence (the dot of "Streamer.bot" or "127.0.0.1" does not end it)
+      for (const [doc, s] of Object.entries(authDocs)) {
+        if (!s) { authWrong.push(doc + ': section not found'); continue; }
+        if (inSentence('keeps? out', '(another program|stray tab)').test(s)) authWrong.push(doc + ': says Enforce keeps out another program or a stray tab');
+        if (!/WebSocket only/i.test(s)) authWrong.push(doc + ': does not say Authentication covers the WebSocket only');
+        if (!inSentence('HTTP server', 'no password').test(s)) authWrong.push(doc + ': does not say the HTTP server has no password');
+        if (!inSentence('Streamer\\.bot documents', 'DoAction').test(s)) authWrong.push(doc + ': does not say Streamer.bot documents a DoAction request on it');
+      }
+      check('C66: README, the protocol and the setup guide scope Streamer.bot Authentication to the WebSocket: none says Enforce keeps out another program or a stray tab, and each says the HTTP server has no password and Streamer.bot documents a DoAction request on it',
+        authWrong.length === 0, authWrong.join('; '));
     }
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────

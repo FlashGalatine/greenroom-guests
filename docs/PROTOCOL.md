@@ -427,15 +427,22 @@ view URLs) — same trust model as the toolkit it replaces. The Discord bot toke
 is **file-only** (`sidecar/discord-tokens.json`, gitignored) and has no bus
 command that can read or write it (`reset-auth` only turns `enabled` off; deleting the
 file by hand forgets the token at the next Connect or restart). Bus commands can still stop and move the bot, so
-SB's WebSocket must stay localhost-only, whether Authentication is on or off.
+SB's WebSocket and HTTP servers must stay localhost-only, whether Authentication is on or off.
 With Authentication off, any page running in OBS (a browser source or dock) or in
 a browser on the same PC can read the room password and drive Greenroom through
 the WebSocket, so only load pages you trust. **Authentication plus Enforce**
-(recommended once every Greenroom piece is updated) keeps out everything that is
-not given the password: a page in an ordinary browser, another program, a stray
-tab. It does not keep out your own OBS sources and docks, the unprompted route in,
-because they carry the password in their address (`?sbpass=`; OBS stores it in
-the scene collection or its own settings). **Enforce**, not Authentication alone, is
+(recommended once every Greenroom piece is updated) keeps everything that is not
+given the password off the WebSocket. It does not keep out your own OBS sources
+and docks, an unprompted route in, because they carry the password in their
+address (`?sbpass=`; OBS stores it in the scene collection or its own settings).
+It covers the WebSocket only. Streamer.bot's HTTP server, which serves Greenroom's
+pages, has no password setting, and Streamer.bot documents a `DoAction` request on
+it (`POST /DoAction` with an action's id or name and its args) that runs that
+action. So a program on this PC, or a page that can send requests to that server,
+can still run Greenroom's actions with Enforce on: `VDO Push` changes what the
+guest slots and overlays show, and `Discord Voice Command` can make the bot leave
+the call or quit. Keep both servers on 127.0.0.1 and load only pages you trust.
+**Enforce**, not Authentication alone, is
 what breaks a client that was not updated. The bridge's only password store is
 `sidecar/discord-tokens.json` (`sbPassword`); the password is in no log line, bus
 message or payload, and a Hello that arrives later than about a second after the

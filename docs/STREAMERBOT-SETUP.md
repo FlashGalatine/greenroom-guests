@@ -510,6 +510,12 @@ Do this only after **every** piece is updated (the overlay folder, the control f
 `sidecar/`, `backup.mjs`): a piece that is not updated cannot answer the password, and
 **Enforce** (not Authentication alone) is what refuses it.
 
+Authentication covers the WebSocket only. The HTTP server (§1) has no password setting,
+and Streamer.bot documents a `DoAction` request on it that runs an action by its name,
+so a program on this PC, or a page that can send requests to `127.0.0.1:7474`, can
+still run Greenroom's actions with Enforce on. Keep both servers on `127.0.0.1` and
+load only pages you trust (README → Security posture).
+
 1. In Streamer.bot (Servers/Clients → WebSocket Server) set a password.
 2. Add `sbpass=<password>` by hand to the dock URL (the control page), the
    director-min source and the roster source: write `?sbpass=...` when the address

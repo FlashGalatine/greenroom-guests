@@ -264,9 +264,9 @@ or in a browser on the same PC can read the room password and drive Greenroom
 through the WebSocket. Only add sources and docks you trust.
 
 **Authentication plus Enforce** (recommended once every Greenroom piece is updated)
-keeps out anything that is not given the Streamer.bot WebSocket password: a page
-in an ordinary browser on the PC, another program, a stray tab. It does not keep
-out your own OBS sources and docks, which are the unprompted route in: they carry the
+keeps anything that is not given the Streamer.bot WebSocket password off the
+WebSocket. It does not keep
+out your own OBS sources and docks, which are an unprompted route in: they carry the
 password in their address (`?sbpass=<password>`, percent-encoded), and OBS stores a
 source's address in the scene collection and a dock's in its own settings, so treat
 both like the password. Enforce is what
@@ -274,6 +274,14 @@ breaks a Greenroom piece that has not been updated; Authentication alone does no
 The bridge keeps its copy in `sidecar/discord-tokens.json` (`"sbPassword"`, the only
 place it keeps one) and `backup.mjs` uses `GREENROOM_SB_PASSWORD` or the same field.
 Setup: docs/STREAMERBOT-SETUP.md, "Optional: Streamer.bot Authentication".
+
+Authentication covers the WebSocket only. Streamer.bot's HTTP server, which Greenroom
+needs to serve its pages, has no password setting, and Streamer.bot documents a
+`DoAction` request on it that runs an action by its name. So a program on this PC,
+or a page that can send requests to that server, can still run Greenroom's actions
+with Enforce on: change what the guest slots and overlays show (`VDO Push`), or make
+the Discord bot leave the call or quit (`Discord Voice Command`). Keep both servers
+on 127.0.0.1 and load only sources, docks and pages you trust.
 
 ## Origins
 
