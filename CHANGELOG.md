@@ -9,6 +9,27 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.98] — 2026-11-10
+
+Documentation and code comments only. The setup guide and the README get the sections the earlier sprints left for the end: a first run, audio, ports, updating, and what was tested on which version. Nothing a streamer runs changed.
+
+### Added
+
+- **First run** (setup guide §4, README Quick start): room and password, the confirming first Save, director on, the guest link, binding the slots, and what each state of the control page's pill means (`director: idle`, `no saved config yet`, `connected to SB — waiting for state`). What each invite option does: the default link makes vdo.ninja ask every guest for a display name; hash mode still makes the guest type the password (`&hash=` is vdo.ninja's own 4-character check, so use a long room name and password), plaintext puts it in the link, none emits a bare `&password`; fps and the bitrates cap what the guest sends, and there are no width, height, codec, require-approval or room-cap options; the view flags' default, the added `&`, the always-kept `&solo` and the flags that are dropped.
+- **Audio**: tick **Control audio via OBS** on the four guest-slot sources; to hear guests yourself, **Monitor and Output** on a device Desktop Audio does not capture. A test-recording item in the live checklist (not yet checked) and a troubleshooting entry "I hear guests but viewers don't".
+- **Start order and the dock**: start Streamer.bot before OBS; a dock that says "failed to load" needs Retry; a 1×1 `director-min` source in a scene that is always shown is the recommended director (OBS throttles a hidden source), with the dock for editing; troubleshooting lines for "director: not responding, retrying" and the 15-second "still connecting…", for a slot that is empty while its nameplate shows, and for a hidden director-min.
+- **Ports and addresses**: `?sbport` on every address, `--sb-ws-url` in the `.bat` or in the action's `psi.Arguments` (never `Environment.SetEnvironmentVariable` in the action), the guard port and the exit grace, and why only `http://127.0.0.1` or `localhost` works (the director refuses an insecure page).
+- **Updating** (README): back up, stop the bridge (Stop bridge, or end `node.exe`), extract over the old folder (an edited `.bat` is replaced), `npm install`, reload the dock and refresh every source **before** re-pasting the actions the CHANGELOG lists, set `BUNDLE` and your `psi.Arguments` again, start the bridge. Also: Export inside an OBS dock may save silently or not at all (use the copy box), `npm run backup -- <file>`, the backup CLI's Node and `npm install --omit=dev` requirements.
+- **Discord setup**: the OAuth2 URL Generator invite, Developer Mode for copying ids, your own user id in the streamer id box; the Path and the Folder of both HTTP maps; add each slot source once and reuse it (a copy is one more full stream from the guest).
+- `verify` section [6d] keeps the path names, the theming table, the Subscribe wording and the tested-versions statement from drifting.
+
+### Changed
+
+- **What was tested, said plainly.** The live checklist ran on Streamer.bot **1.0.4** on 2026-07-10 and has **not been re-run** on 1.0.7 or on OBS 33.0.1; no tested range is claimed that was not run (the action names and `CPH` calls were checked against 1.0.7 by name only; Streamer.bot 1.1.x is unvalidated). The 2026-07-10 results are reworded to what they showed: four items confirmed, the sustained rate partial (the 100 ms coalesce floor held; Streamer.bot's queue under a multi-speaker feed was not exercised, and `verify-render` R4 is a render test of a synthetic feed, not a throughput test; the ceiling stays open), the standalone 1×1 source offline only, multi-director safety open. The historical entry for those results in this file says the same.
+- The protocol document: Subscribe casing (lowercase is the convention; Streamer.bot 1.0.7 accepts any casing and delivers only to subscribed clients, so a capitalized Subscribe does not "receive nothing"), `users[].username` is the display name, `slots[].label` is read by the guest overlay, `viewFlags`. The theming document: the badge sizes (38% of `--avatar-px` for guests, 34% of `--streamer-px` for the streamer), and `--accent`, `--avatar-px` and `--streamer-px` are set by the page at runtime, so they are not in the `:root` table. "Settings →" became "Servers/Clients →".
+- Comments only: the Subscribe-case comments at six sites, the roster's `:root` comments, the guest slot's header (one source per slot), the bridge's `Env` header (`SB_WS_PORT`).
+
+**Deploy:** read the new sections; nothing to copy, re-paste, restart or refresh. **Not done:** the live re-run of the setup guide's §6 checklist on Streamer.bot 1.0.7 and OBS 33.0.1 (it needs a spare Streamer.bot, OBS, a throwaway vdo.ninja room and a test guild): the documents say so rather than claim it. `verify` 562/562, `verify:render` 472/472.
 ## [1.0.95] — 2026-11-10
 
 Tests, tools and housekeeping, plus one small fix to the control page: the dock showed an empty amber bar under its header at all times since 1.0.81, and it does not any more. The tests now cover the gaps the 2026-11 test audit listed, and there is a harness that checks the tests themselves.
@@ -615,6 +636,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.98]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.95...v1.0.98
 [1.0.95]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.87...v1.0.95
 [1.0.87]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.84...v1.0.87
 [1.0.84]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.81...v1.0.84
