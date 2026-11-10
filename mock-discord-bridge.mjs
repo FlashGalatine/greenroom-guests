@@ -218,7 +218,7 @@ function connect() {
     if (engaged) return;
     engaged = true;
     clearTimeout(helloTimer);
-    // Lowercase `general` — the SB Subscribe case gotcha (same as the real sidecar).
+    // Lowercase `general`, the project's convention (same as the real sidecar; the mock accepts any casing, as Streamer.bot 1.0.7 does).
     ws.send(JSON.stringify({ request: 'Subscribe', id: String(++msgId), events: { general: ['Custom'] } }));
     pushNow(); // seed the discord.state cache so late joiners see bot status/favorites
     if (hbTimer) clearInterval(hbTimer);

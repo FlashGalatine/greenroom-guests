@@ -811,7 +811,7 @@
       started = true;
       clearTimeout(helloTimer); helloTimer = null;
       subId = String(++msgId);
-      // Lowercase `general` — the SB Subscribe case gotcha.
+      // Lowercase `general` is the project's convention (Streamer.bot 1.0.7 accepts any casing; only subscribed clients get events).
       sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
       fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
     };

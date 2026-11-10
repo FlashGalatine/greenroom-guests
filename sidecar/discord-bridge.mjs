@@ -30,7 +30,7 @@
 //       @discordjs/voice 0.19 floor) and `npm install` in sidecar/.
 // Args: --sb-ws-url=ws://127.0.0.1:8080/ · --guard-port=7495 · --exit-on-sb-close=1|0
 //       (an argument wins over the matching environment variable below)
-// Env:  SB_WS_URL (default ws://127.0.0.1:8080/) · GREENROOM_GUARD_PORT (7495)
+// Env:  SB_WS_URL (default ws://127.0.0.1:8080/) · SB_WS_PORT (the port of that default) · GREENROOM_GUARD_PORT (7495)
 //       GREENROOM_EXIT_ON_SB_CLOSE (1/0 — override settings.exitOnSbClose) ·
 //       GREENROOM_SB_EXIT_GRACE_MS (default 8000, the leave-when-SB-closes window)
 //       DISCORD_BRIDGE_CONFIG / DISCORD_BRIDGE_TOKENS (test hooks: file paths)
@@ -1330,8 +1330,8 @@ function onSbAck(sock, m) {
 function startSbSession(sock) {
   if (sbWs !== sock || sbSessionOn || sock.readyState !== WebSocket.OPEN) return;
   sbSessionOn = true;
-  // Lowercase `general` — the SB Subscribe case gotcha (delivered events carry
-  // capitalized 'General'; a capitalized Subscribe silently receives nothing).
+  // Lowercase `general` is the project's convention (delivered events carry capitalized 'General'; Streamer.bot 1.0.7
+  // accepts any casing for the key, and only subscribed clients receive events).
   sbSubId = String(++sbMsgId);
   sock.send(JSON.stringify({ request: 'Subscribe', id: sbSubId, events: { general: ['Custom'] } }));
 }

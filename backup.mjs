@@ -218,7 +218,7 @@ function connect(url) {
       clearTimeout(helloTimer);
       const subId = 'sub' + (++idN);
       ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      // Lowercase `general` — the SB Subscribe case gotcha (a capitalized key acks but receives nothing).
+      // Lowercase `general` is the project's convention (Streamer.bot 1.0.7 accepts any casing; only subscribed clients get events).
       wait(ackWaiters, CONNECT_MS, (m) => m.id === subId, 'Subscribe ack').then((ack) => {
         clearTimeout(timer);
         if (ack.status && ack.status !== 'ok') {

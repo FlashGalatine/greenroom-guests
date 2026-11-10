@@ -577,8 +577,11 @@ blocking queue themselves (setup section 2). `verify` 105/105, `verify:render`
 - README: clone / Download-ZIP as the first setup step. (`b5edab6`, 2026-07-21)
 - Standardized attribution, Author & support block and dependency credits ahead
   of publishing. (`6011f8c` / `b1977bf`, 2026-07-20)
-- **Live-validation results recorded (Streamer.bot 1.0.4, 2026-07-10).** All
-  eight checklist items exercised on a real rig, no code changes needed. The
+- **Live-validation results recorded (Streamer.bot 1.0.4, 2026-07-10).** A
+  seven-item checklist run on a real rig, no code changes needed: four confirmed
+  live, one partial (the 100 ms coalesce floor held; the ~10 DoActions/s ceiling
+  is offline-only), the 1×1 `director-min` source validated offline only, and
+  multi-director safety left open. The
   headline: the OBS **Custom Browser Dock** CEF spike passed — the director
   iframe enumerates and pushes from inside the dock, so the dock alone drives
   auto-follow and the pinned-tab fallback is retired. Also confirmed: real-room

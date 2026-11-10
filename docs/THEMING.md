@@ -12,9 +12,6 @@ Open `discord-roster.html`, edit the `:root` block:
 
 | Variable | Default | What it drives |
 |---|---|---|
-| `--accent` | `34, 211, 238` (cyan) | speaking glow — an `R, G, B` **triplet** (goes into `rgba(var(--accent), α)`) |
-| `--avatar-px` | `56px` | guest avatar size |
-| `--streamer-px` | `72px` | streamer avatar size |
 | `--gap` | `14px` | spacing between members |
 | `--name-size` / `--name-color` / `--name-font` | `13px` / near-white / Segoe UI | name labels |
 | `--chip-bg` | dark translucent | per-member backing chip |
@@ -23,12 +20,16 @@ Open `discord-roster.html`, edit the `:root` block:
 | `--blink-s` | `.9s` | speaking pulse period |
 | `--radius` | `14px` | chip corner radius |
 
-Avatar size, accent, and the streamer id can also be changed **live** from the
-control page — they ride the payload's `settings` block, no file edit needed.
+The glow colour and the two avatar sizes are **not** reskinned in the `:root` block: the page sets
+`--accent`, `--avatar-px` and `--streamer-px` itself, at runtime, from `?accent=R,G,B`,
+`?avatar=` and `?streamerpx=` or, without those, from the payload's `settings` block (the control page
+changes them live), so an edit of those three lines in `:root` is overwritten. Use the URL parameters
+below, or the control page.
 
 ## URL params (http-served, so they work in OBS)
 
-Per-source overrides; precedence is **URL param → payload settings → default**:
+Per-source overrides; precedence is **URL param → payload settings → default** (the default is the one in the
+page's script, not the value in the `:root` block):
 
 | Param | Values | Meaning |
 |---|---|---|
@@ -57,8 +58,8 @@ Effect toggles that ride `settings`: `scanlines` (chip texture) and `neonBlink`
 
 Mute (mic-slash) and deafen (headphones-slash) are inline SVGs — no external
 assets. Deafen implies mute visually, so a deafened member shows only the deafen
-badge (Discord's own convention). Recolor via `--badge-bg`/`--badge-fg`; resize
-automatically with the avatar (38% of avatar size, 18px minimum).
+badge (Discord's own convention). Recolor via `--badge-bg`/`--badge-fg`; they resize
+automatically with the avatar (38% of `--avatar-px` for guests, 34% of `--streamer-px` for the streamer, 18px minimum).
 
 ## Speaking glow
 

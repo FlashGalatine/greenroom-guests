@@ -218,9 +218,9 @@
       if (started || sock.readyState !== WebSocket.OPEN) return;
       started = true;
       if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
-      // The event-SOURCE key is LOWERCASE ('general') in the Subscribe request,
-      // even though delivered events carry a capitalized source ('General'). Per
-      // https://docs.streamer.bot/api/websocket/requests
+      // Lowercase 'general' is this project's convention for the event-source key of the Subscribe request, though delivered
+      // events carry a capitalized source ('General'). Streamer.bot 1.0.7 matches the key case-insensitively (any casing is
+      // accepted); events reach only clients that subscribed. Per https://docs.streamer.bot/api/websocket/requests
       subId = String(++msgId);
       send({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } });
       log('sent Subscribe (id', subId + '); waiting for ack before sync');

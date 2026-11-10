@@ -1619,6 +1619,27 @@ async function main() {
         MUTANTS.filter((m) => !m.skip).length >= 87 && new Set(mutIds).size === mutIds.length && mutBad.length === 0 && /tools\/mutation\/run\.mjs/.test(pkgJson.scripts && pkgJson.scripts.mutation || ''), JSON.stringify({ n: MUTANTS.length, bad: mutBad, script: pkgJson.scripts && pkgJson.scripts.mutation }));
     }
 
+    // ── 6d. the documents say what the code does (Sprint 20: GRN-193, 201, 230, 214) ──
+    console.log('\n[6d] Documents: the path names, the theming table, the Subscribe casing, the tested versions');
+    {
+      const readme = await readFile(resolve(__dirname, 'README.md'), 'utf8');
+      const setup = await readFile(resolve(__dirname, 'docs', 'STREAMERBOT-SETUP.md'), 'utf8');
+      const theming = await readFile(resolve(__dirname, 'docs', 'THEMING.md'), 'utf8');
+      const protocol = await readFile(resolve(__dirname, 'docs', 'PROTOCOL.md'), 'utf8');
+      // every /greenroom-<x>/ address prefix the README uses is a Path of the setup guide's table (the mock's two spellings of each hide such drift)
+      const mapped = new Set([...setup.matchAll(/^\s*\|\s*`(greenroom-[a-z]+)`\s*\|/gm)].map((m) => m[1]));
+      const used = new Set([...readme.matchAll(/\/(greenroom-[a-z]+)\//g)].map((m) => m[1]));
+      check('GRN-193: every /greenroom-…/ prefix in the README is a Path in the setup guide\'s table, and the README names the Path and the folder of both maps',
+        mapped.size === 2 && used.size >= 2 && [...used].every((u) => mapped.has(u)) && /Path `greenroom-control` → this repo's `control` folder/.test(readme) && /Path `greenroom-overlay` →\s+its `overlay` folder/.test(readme), JSON.stringify({ mapped: [...mapped], used: [...used] }));
+      const themeRows = [...theming.matchAll(/^\|\s*`(--[a-z-]+)`/gm)].map((m) => m[1]);
+      check('GRN-201: docs/THEMING.md\'s :root table lists no variable the page sets itself at runtime (--accent, --avatar-px, --streamer-px) and says they are set at runtime',
+        themeRows.length > 3 && !themeRows.some((v) => ['--accent', '--avatar-px', '--streamer-px'].includes(v)) && /sets\s+`--accent`, `--avatar-px` and `--streamer-px` itself, at runtime/.test(theming), JSON.stringify(themeRows));
+      check('GRN-230: no document or comment says a capitalized Subscribe key receives nothing, and the protocol says lowercase is the convention and Streamer.bot 1.0.7 accepts any casing',
+        !/capitalized Subscribe[^.\n]*(NOTHING|nothing)/i.test(protocol + setup + readme) && /lowercase 'general' is this project's convention/.test(protocol) && /matches the key case-insensitively/.test(protocol));
+      check('GRN-214/235: the README and the setup guide say plainly that the live checklist was run on Streamer.bot 1.0.4 on 2026-07-10 and has not been re-run on 1.0.7 or OBS 33.0.1 (no tested range is claimed that was not run)',
+        /not been re-run/.test(readme) && /Tested on:\*\* Streamer\.bot 1\.0\.4/.test(readme) && /has \*\*not been run again\*\* on 1\.0\.7/.test(setup));
+    }
+
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
     // Proves discord-bridge.mjs's whole bus layer (subscribe, initial push, command
     // dispatch, config persistence, the no-token error path) with no Discord token

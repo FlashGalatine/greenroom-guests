@@ -56,20 +56,30 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
 
 **A — webcam slots only (no Node, no installs):**
 1. Follow [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md): enable SB's
-   WebSocket (:8080, auth off) + HTTP (:7474) servers, map `control` and
-   `overlay` to this repo's folders, paste the 4 core actions (skip
-   `Discord Bridge Start`).
+   WebSocket (:8080, auth off) + HTTP (:7474) servers, add two Path → Folder maps
+   (Path `greenroom-control` → this repo's `control` folder, Path `greenroom-overlay` →
+   its `overlay` folder: every address below uses those two names), paste the 4 core
+   actions (skip `Discord Bridge Start`). Start Streamer.bot before OBS. Servers on other ports:
+   the setup guide's "Ports and addresses" (§1).
 2. Add OBS Browser Sources:
    `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…2, 3, 4): the
    control page's per-slot **Copy** buttons give the exact URL. A slot is 1 to 4; any
-   other `?slot=` shows nothing (and the browser console says why).
-3. Open `http://127.0.0.1:7474/greenroom-control/control.html`, set your room + password,
-   enable the director, and bind slots to guest labels. Keep exactly one director
-   running (a 1×1 source running `director-min.html` is the set-and-forget option;
-   tick "director-min.html is my always-on director" in the dock when you use it).
-   A second director page, the invite builder's Manage link included, does not
-   own the room (docs/STREAMERBOT-SETUP.md, §4).
-   The invite builder hands you guest links (`&hash=` password mode included).
+   other `?slot=` shows nothing (and the browser console says why). In each of the four
+   sources tick **Control audio via OBS** (it is off by default), and to hear guests yourself
+   set the source's **Audio Monitoring** to **Monitor and Output** on a device that Desktop
+   Audio does not capture. Add each slot source **once** and reuse it in other scenes with
+   **Add Existing** or **Paste (Reference)**, never **Paste (Duplicate)** or a new source:
+   every copy is one more full stream the guest's PC has to send.
+3. **First run.** Open `http://127.0.0.1:7474/greenroom-control/control.html`, type your room +
+   password and press **Save** (on a fresh install the first Save asks once to confirm: nothing is
+   saved yet), tick **director enabled**, send the guest link from **Invite & Director Links**
+   (each guest is asked for a display name), and when a guest is live pick them in a **Guest
+   Slot** dropdown. Keep exactly one director running: a 1×1 source running `director-min.html`
+   **in a scene that is always shown** (OBS throttles a hidden source, which slows its polling)
+   is the recommended, set-and-forget one; tick "director-min.html is my always-on director" in
+   the dock, which is then for editing, not a second director. A second director page, the
+   invite builder's Manage link included, does not own the room (docs/STREAMERBOT-SETUP.md, §4,
+   which also explains the invite options and what each state of the pill means).
 4. *(optional)* Give guests on-stream names + socials in **Nameplates & Guest
    Directory**. Guests who are live show up there on their own with a placeholder
    name (badged `auto`) — click a row to rename them and add social handles, or
@@ -83,14 +93,18 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
 **B — add Discord voice (roster overlay + voice-only slots):**
 1. `cd sidecar && npm install` (Node ≥ 22.12; if you start the bridge from Streamer.bot's
    `Discord Bridge Start` action, **restart Streamer.bot after installing Node**: it reads its
-   PATH only when it starts).
-2. Create a bot (non-privileged Guilds + Guild Voice States intents; View
-   Channel + Connect on the target channel), paste its token into
-   `sidecar/discord-tokens.json` — file-only, never enters the control page.
+   PATH only when it starts). The details of steps 1 to 3 are in
+   [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md), §5.
+2. Create a bot (non-privileged Guilds + Guild Voice States intents) and **invite it to your
+   server** (Developer Portal → OAuth2 → URL Generator: scope `bot`, permissions View Channels +
+   Connect). Paste its token into `sidecar/discord-tokens.json`, shaped
+   `{ "botToken": "...", "enabled": true }` — file-only, never enters the control page.
 3. Run `start-discord-bridge.bat` (or the optional `Discord Bridge Start`
    action), add
    `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` as a
-   source, pick a channel in the control page and press USE → Connect.
+   source. In the control page's Discord section put your own Discord user ID in **streamer id**
+   (turn on Discord's Developer Mode to copy ids), save a favorite (Server ID + Voice Channel
+   ID, a regular voice channel) with **Save favorite**, press **USE**, then **Connect**.
 4. *(optional)* Tick **"leave call & quit when Streamer.bot closes"** in the
    control page so the bot hangs up and the sidecar exits when you close SB
    instead of lingering in the call (an SB restart reconnects and stays;
@@ -117,7 +131,8 @@ sidecar/    discord-bridge.mjs (optional discord.js bot) · its package.json
 docs/       STREAMERBOT-SETUP.md · PROTOCOL.md · THEMING.md · screenshots
 backup.mjs  snapshot/restore the SB dock config (room/slots/directory) to a file
 mock-sb-server.mjs · mock-vdo-director.html · mock-discord-bridge.mjs
-verify.mjs · verify-render.mjs · tools/shots.mjs · start-discord-bridge.bat
+verify.mjs · verify-render.mjs · verify-cs.mjs · start-discord-bridge.bat
+tools/      shots.mjs (the docs screenshots) · mutation/ (tests the tests) · cs-harness/ · sentinel.mjs · json-check.mjs
 ```
 
 There are deliberately no per-slot HTML stubs: stubs only ever served OBS
@@ -131,10 +146,13 @@ to keep a file copy:
 
 - **In the control page:** the header's **Export config** / **Import config**
   buttons. Export downloads a JSON snapshot; Import loads one and re-pushes it to
-  SB (so it persists like an edit — it *replaces* the current config).
+  SB (so it persists like an edit — it *replaces* the current config). Inside an **OBS dock**
+  the download may save silently (OBS 33) or not at all (OBS 32 and older): the page then shows
+  the snapshot in a box under the buttons, with a **Copy** button: copy it and save it in a file yourself.
 - **CLI** (your real Streamer.bot must be running; it needs Node 22.12+ and a one-time `npm install --omit=dev` in this folder, which installs `ws`. The development mock is not a place to keep a backup):
   ```
   npm run backup                                   # → backups/vdo-state-<timestamp>.json
+  npm run backup -- D:\safe\greenroom.json           # → that file (refused if it exists, unless --force)
   npm run backup:list
   npm run backup:restore -- backups/<file>         # check the snapshot, show current vs new; changes nothing
   npm run backup:restore -- backups/<file> --yes   # …and really replace the saved config
@@ -153,6 +171,23 @@ Snapshots contain the **room password**, so `backups/` is gitignored — treat t
 files as secret. The Discord bot's favorites/settings are already file-based in
 `sidecar/discord-voice-config.json` (copy it to back those up); the live voice
 roster is intentionally not snapshotted.
+
+## Updating
+
+1. **Back up first** (Export config, or `npm run backup`), and read the CHANGELOG entries between your version and
+   the new one: each lists what to copy, re-paste, restart or refresh.
+2. **Stop the bridge**: press **Stop bridge** in the control page's Discord section (a bridge from the release that added
+   `quit` onwards; it leaves the call and exits), otherwise end its `node.exe` in Task Manager (a hidden one that
+   `Discord Bridge Start` launched too).
+3. **Extract the new version over the old folder** (the download holds no `sidecar/discord-tokens.json`,
+   `sidecar/discord-voice-config.json` or `backups/`, so extracting over the folder keeps them). If you extract
+   into a new folder instead, first copy those three across, and then point the Streamer.bot Path → Folder
+   maps and `BUNDLE` (below) at the folder you now use.
+4. Run `npm install` in `sidecar/` again (and in this folder once, `npm install --omit=dev`, for the backup CLI).
+5. **Re-paste the C# actions the CHANGELOG lists** and compile each. After re-pasting `Discord Bridge Start`,
+   **set `BUNDLE` again**: the pasted code carries the placeholder. The HTTP path maps and `BUNDLE` stay on the folder in use.
+6. Start the bridge again, reload the dock and `director-min`, and **refresh every Greenroom OBS source** (a page that
+   was loaded before the update keeps running the old code until it is reloaded).
 
 ## Verification (no Streamer.bot, Discord, or camera needed)
 
@@ -198,12 +233,15 @@ The C# in `actions/` is only text-checked by `npm run verify` (section [6]); whe
 it and run it against a stub of Streamer.bot. No suite compiles it inside Streamer.bot, and the mock never launches the bridge.
 
 The mocks prove the protocol and the pixels; what only a live session can prove
-(real vdo.ninja shapes, real bot voice handshake, SB action-queue latency, the
-OBS-dock CEF question) was then exercised on a real Streamer.bot 1.0.4 rig —
-including the OBS Custom Browser Dock running the director, a real-room
-drop/rejoin auto-follow, and live Discord speaking events. Results and the
-remaining open item (multi-director safety) are in
-[docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-results-2026-07-10-real-streamerbot-104).
+(real vdo.ninja shapes, real bot voice handshake, the 100 ms coalesce floor, the
+OBS-dock CEF question) was exercised on **2026-07-10** on a real Streamer.bot **1.0.4**
+rig — including the OBS Custom Browser Dock running the director, a real-room
+drop/rejoin auto-follow, and live Discord speaking events. Not exercised live: Streamer.bot's
+action queue under a rowdy multi-speaker feed, the standalone 1×1 `director-min` source,
+multi-director safety, guest audio. **Tested on:** Streamer.bot 1.0.4 (live, that date). The checklist has
+**not been re-run** on Streamer.bot 1.0.7 or OBS 33.0.1 (the action names and `CPH` calls were checked against 1.0.7
+by name only); recheck it after a Streamer.bot or OBS major update, and 1.1.x (argument isolation) has not been
+validated. Results: [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-results-2026-07-10-real-streamerbot-104).
 
 ## Security posture
 

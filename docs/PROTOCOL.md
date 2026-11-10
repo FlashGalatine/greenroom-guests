@@ -9,9 +9,10 @@ Streamer.bot is the entire bus — there is no other server.
 ## Requests
 
 ```jsonc
-// Subscribe — the event-source key is LOWERCASE 'general' in the request, even
-// though delivered events carry a capitalized source 'General'. A capitalized
-// Subscribe is acked but receives NOTHING (the classic blank-overlay cause).
+// Subscribe — lowercase 'general' is this project's convention for the event-source key, though delivered
+// events carry a capitalized source 'General'. Streamer.bot 1.0.7 matches the key case-insensitively (any
+// casing is accepted); events are delivered only to clients that subscribed, so a client that never
+// subscribed receives nothing (a common blank-overlay cause). The mock lowercases keys (since Sprint 4a).
 { "request": "Subscribe", "id": "1", "events": { "general": ["Custom"] } }
 // Streamer.bot's documented reply is flat: { "status": "ok", "id": "1", "events": {…} }
 // (no "result" wrapper). Clients treat a `status` other than "ok" as a refusal: no
@@ -208,10 +209,17 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   → `&outboundvideobitrate` / `&outboundaudiobitrate`, `noVideo` / `noAudio` →
   `&videodevice=0` / `&audiodevice=0`. Older fields (width, height, codec,
   stereo, requireApproval, roomCap) are carried through but no longer used.
+- **`viewFlags`** is the flag string the overlay puts on each slot's solo view address (default
+  `&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish`). The control pages and the overlay
+  (`vdo-url.js`, an identical copy in each folder) normalise it the same way: a missing leading `&` is added;
+  `&solo` is added unless `solo` or `scene` is already there (a view without it would show the whole room);
+  flags that load script or style, send events away, or name the room, the stream or the password
+  (`js`, `css`, `invite`, `api`, `room`, `password`, `hash`, `view`, …) are dropped, and everything after a
+  `#` is cut.
 - `label`, `enabled`, and `invite` exist so the persisted `vdo.state` doubles as
   the config store — the control page rehydrates from a `VDO Sync` replay and
   holds no authoritative state of its own. The guest overlay reads only
-  `room`/`password`/`viewFlags`/`slots[].{streamID,mirror,mode,discordUserId}`
+  `room`/`password`/`viewFlags`/`slots[].{label,streamID,mirror,mode,discordUserId}`
   plus `directory`, and ignores the rest.
 - **`directory` (guest directory → nameplates).** Each entry maps a guest to a
   preferred on-stream `displayName` + optional social handles. Match keys —
@@ -310,6 +318,8 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 }
 ```
 
+- `users[].username` is the person's **display name**: their server nickname, else their global name, else their
+  account username; empty until the member is resolved.
 - `users` is the original toolkit feed, unchanged — the guest overlay's discord
   mode and the roster overlay read only it (+ `settings`). It lists the members of
   the working channel and the **guests** invited into the call (Discord keeps no

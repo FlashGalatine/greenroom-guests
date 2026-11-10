@@ -6,6 +6,8 @@
 <!--
   Greenroom guest slot — one OBS Browser Source per slot:
     http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1   (…2, 3, 4)
+  Add each slot source ONCE and reuse it in other scenes with Add Existing / Paste (Reference), never a new source or
+  Paste (Duplicate): every copy is one more viewer, and one more full stream for the guest's PC to send.
 
   SERVE OVER HTTP (Streamer.bot's HTTP Server, docs/STREAMERBOT-SETUP.md) — NOT as
   an OBS "Local file" source: the embedded vdo.ninja WebRTC viewer needs a

@@ -31,11 +31,15 @@
     ?sbport=<n> ?sbdebug=1 transport knobs (overlay/panel-client-sb.js)
 
   Re-theming = overriding the CSS custom properties in :root below (Cadence-style;
-  see docs/THEMING.md for the variable reference).
+  see docs/THEMING.md for the variable reference), EXCEPT --accent, --avatar-px and --streamer-px:
+  the script sets those three at runtime (?accent= / ?avatar= / ?streamerpx=, else the payload's
+  settings), so an edit of them in :root is overwritten.
 -->
 <style>
   :root {
     /* ── Theme variables — override these to re-skin (docs/THEMING.md) ── */
+    /* The next three are only the fallback before the script runs: it sets them at runtime (?accent=, ?avatar=, ?streamerpx=, else the
+       payload's settings), so an edit here is overwritten. */
     --accent: 34, 211, 238;          /* speaking glow, R,G,B triplet (cyan) */
     --avatar-px: 56px;               /* guest avatar size */
     --streamer-px: 72px;             /* streamer avatar size */
