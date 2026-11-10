@@ -3086,6 +3086,35 @@ async function main() {
             t.close();
           }
           {
+            // after a bad config was copied aside, the bridge's own first save replaces the file: the second save must not take that for a hand edit
+            // (it used to go read-only for the session, drop every later change and blame an edit nobody made)
+            const t = await rig({ cfgText: '{ "favorites": [ nope' });
+            await nap(300);
+            t.cmd('favorite-add', JSON.stringify({ name: 'One', serverId: S1, channelId: C1 }));
+            const first = await t.waitFor((p) => p.favorites.some((f) => f.name === 'One'), 6000); // pushed after its save has landed
+            await nap(200);
+            t.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+            await nap(800);
+            let saved = null; try { saved = JSON.parse(await fileText(t)); } catch { /* left null */ }
+            check('GRN-93: after a bad config was copied aside, two saves in a row (favorite-add, then set-settings) both reach the file: the bridge\'s own first save is not taken for a hand edit (no "edited while" warning, nothing goes read-only)', !!first && !!saved && Array.isArray(saved.favorites) && saved.favorites.some((f) => f.name === 'One') && !!saved.settings && saved.settings.accent === 'magenta' && /could not be used/i.test(warn(t.last)) && !/edited while|left as it is/i.test(warn(t.last)), JSON.stringify({ first: !!first, favs: saved && Array.isArray(saved.favorites) && saved.favorites.map((f) => f.name), accent: saved && saved.settings && saved.settings.accent, warn: warn(t.last) }));
+            t.close();
+          }
+          {
+            // …and a fix made by hand AFTER the bridge's first save is still the operator's: the next save leaves it alone (the guard follows the file
+            // as the bridge last wrote it, it is not dropped after the first save)
+            const t = await rig({ cfgText: '{ "favorites": [ nope' });
+            await nap(300);
+            t.cmd('favorite-add', JSON.stringify({ name: 'One', serverId: S1, channelId: C1 }));
+            const first = await t.waitFor((p) => p.favorites.some((f) => f.name === 'One'), 6000);
+            await nap(200);
+            const fixed = JSON.stringify({ favorites: [fav('fx', 'Fixed', S1, C1)], current: null, settings: {} }, null, 2);
+            await writeFile(t.env.DISCORD_BRIDGE_CONFIG, fixed);
+            t.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+            await nap(800);
+            check('GRN-93: a fix made by hand after the bridge\'s first save over a bad config is NOT overwritten by the next save (the change is used, the warning asks for a restart)', !!first && (await fileText(t)) === fixed && /restart the bridge/i.test(warn(t.last)) && t.last.settings.accent === 'magenta', JSON.stringify({ first: !!first, warn: warn(t.last) }));
+            t.close();
+          }
+          {
             const t = await rig({ stale: true, cfgText: cfg1, env: STRICT });
             check('GRN-19: temp files left beside the config and the token file by a crash are deleted at startup', !exists(t.env.DISCORD_BRIDGE_CONFIG + '.tmp') && !exists(t.env.DISCORD_BRIDGE_TOKENS + '.tmp'), '');
             t.close();

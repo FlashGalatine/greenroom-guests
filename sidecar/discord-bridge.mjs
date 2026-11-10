@@ -288,7 +288,7 @@ const configWarnings = new Map();
 function setWarning(key, text) { if (configWarnings.get(key) !== text) { configWarnings.set(key, text); log(`config warning: ${text}`); } schedulePush(); }
 function clearWarning(key) { if (configWarnings.delete(key)) schedulePush(); }
 let configReadOnly = false; // the config could be neither read nor copied aside: it is left alone for the whole session
-let configSnapshot = null;  // {size, mtimeMs} of a bad config at startup: a later change to it is somebody fixing it, not to be overwritten
+let configSnapshot = null;  // {size, mtimeMs} of a bad config at startup, then of each save the bridge makes over it: any other change is somebody fixing it, not to be overwritten
 let skippedFavorites = [];  // the favorites adoptConfig refused
 
 const TOKENS_BAD = 'discord-tokens.json exists but is not valid JSON: re-save it as UTF-8 (no BOM) with { "botToken": "…", "enabled": true }.';
@@ -547,8 +547,8 @@ function makeId() {
 
 // The config goes through the queue and the atomic write above. A failure rejects (the caller decides what to do) after it has put the fixed
 // message in rpc.configWarning; when the config is read-only for the session the write is skipped, with a warning. A config that could not
-// be used at startup (a copy was made and the bridge runs on its defaults) is not overwritten if somebody has edited it since: that is the
-// operator fixing it, and the fix is loaded at the next start.
+// be used at startup (a copy was made and the bridge runs on its defaults) is not overwritten if somebody has edited it since it was read or
+// since the bridge last saved it: that is the operator fixing it, and the fix is loaded at the next start.
 function persist() {
   return enqueueWrite(CONFIG_PATH, async () => {
     if (!configReadOnly && configSnapshot) {
@@ -558,7 +558,13 @@ function persist() {
       } catch { /* gone: nothing to protect */ }
     }
     if (configReadOnly) { setWarning('config-write', 'The saved config is left as it is this session: the change is not kept after a restart.'); return; }
-    try { await atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2)); clearWarning('config-write'); }
+    try {
+      await atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2));
+      // The bridge's own write is not somebody's edit: the guard now follows the file as written here, so the next save goes ahead and a hand
+      // edit made after it is still left alone. Saves are queued, so no other save of the bridge lands between the write and this stat.
+      if (configSnapshot) { try { const st = await stat(CONFIG_PATH); configSnapshot = { size: st.size, mtimeMs: st.mtimeMs }; } catch { /* gone: the check above treats it as nothing to protect */ } }
+      clearWarning('config-write');
+    }
     catch (e) { setWarning('config-write', `Could not save discord-voice-config.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`); throw e; }
   });
 }
