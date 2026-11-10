@@ -3779,30 +3779,217 @@ async function main() {
         check('R21k3: a control page under an unrecognised prefix shows a visible note that the "greenroom-overlay" address was assumed; under the usual one the note is hidden', noteShown && noteGone, JSON.stringify({ noteShown, noteGone }));
         await p.close();
       }
-      // (k) GRN-175: at a 460 px dock width nothing runs off the side, with every pill and line showing
+      // (m) review fixes for the settings path: a blank entry cancels an earlier one of the window, a name is not a streamer id, an early
+      // feed is not an echo, and an unconfirmed value goes back on its own when no feed comes
       {
         const x = await startExtra({});
-        const p = await newPage(browser, { width: 460, height: 1600 });
+        const p = await newPage(browser, { width: 920, height: 1300 });
         await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, { settings: S() });
+        await wait(p, () => !document.getElementById('dvoNeonBlink').disabled, null, 6000);
+        await x.api.clear();
+        await edit(p, 'dvoAvatarPx', '90');
+        await sleep(100);
+        await edit(p, 'dvoAvatarPx', '');
+        await sleep(1200);
+        const cancelled = await settingsCmds(x);
+        const shown = await p.evaluate(() => document.getElementById('dvoAvatarPx').value);
+        check('R21m: a blank size entered in the same 400 ms window as an earlier one cancels it: nothing is sent and the field shows the bridge\'s value', cancelled.length === 0 && shown === '56', JSON.stringify({ cancelled, shown }));
+        await x.api.clear();
+        await edit(p, 'dvoStreamerId', 'AsheTV');
+        await sleep(1200);
+        const nameCmds = await settingsCmds(x);
+        const idNow = await p.evaluate(() => ({ v: document.getElementById('dvoStreamerId').value, msg: !((document.getElementById('dvoSettingsMsg')||{hidden:true}).hidden) }));
+        check('R21m2: a streamer id with no digits (a name) sends nothing, the field goes back to the bridge\'s id and a message says why', nameCmds.length === 0 && idNow.v === STREAMER && idNow.msg, JSON.stringify({ nameCmds, idNow }));
+        await x.api.clear();
+        await edit(p, 'dvoStreamerId', '');
+        await sleep(1200);
+        const clr = await settingsCmds(x);
+        check('R21m3: emptying the streamer id field on purpose still clears it', clr.length === 1 && clr[0].value.streamerUserId === '', JSON.stringify(clr));
+        push(x, { settings: S() });
+        await sleep(500);
+        await flip(p, 'dvoScanlines'); // off, sent at 400 ms
+        await sleep(520);
+        await flip(p, 'dvoScanlines'); // back on, not sent yet
+        push(x, { settings: S({ scanlines: true }) }); // a feed from before the bridge applied the first send: equal to the new value, but no echo of it
+        await sleep(80);
+        push(x, { settings: S({ scanlines: false }) }); // the first send's echo
+        await sleep(250);
+        const sc = await p.evaluate(() => document.getElementById('dvoScanlines').checked);
+        check('R21m4: a feed that merely equals a value not yet sent is not its echo: undoing a change while the first is in flight does not flicker through the first value', sc === true, String(sc));
+        push(x, { stopped: true, hb: 0, users: {}, connected: false, hostInChannel: false, settings: S() });
+        await sleep(600);
+        await p.click('#dvoNeonBlink'); // keeps the focus, and no feed will come: the bridge has stopped
+        const gone = await wait(p, () => document.getElementById('dvoNeonBlink').checked === true, null, 6000);
+        check('R21m5: with the bridge stopped (no more feeds) an unconfirmed change goes back by itself after the 3 s hold, even on a control that still has the focus', gone, '');
+        await p.close();
+      }
+      // (n) review fixes: an edit made while Streamer.bot is unreachable is sent after the reconnect; the pill blames Streamer.bot, not the sidecar
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, inVoice({ hb: 400 }));
+        await wait(p, () => !document.getElementById('dvoNeonBlink').disabled, null, 6000);
+        await x.api.clear();
+        await fetch(x.api.base + '/mock/drop?ms=5000').then((r) => r.arrayBuffer());
+        await wait(p, () => /offline|cannot connect/i.test(document.getElementById('sbStatus').textContent), null, 6000);
+        await edit(p, 'dvoAvatarPx', '99');
+        await sleep(1000);
+        const during = await p.evaluate(() => ({ sb: document.getElementById('sbStatus').textContent, v: document.getElementById('dvoAvatarPx').value }));
+        await sleep(3500); // past the 3 s stale mark of a feed that stopped because Streamer.bot is gone
+        const pillOffline = await p.evaluate(() => document.getElementById('dvoStatus').textContent);
+        check('R21n: while Streamer.bot is unreachable the SB pill promises the edit will be sent on reconnect, and the Discord pill does not blame the sidecar ("feed stale")', /sent on reconnect/.test(during.sb) && !/feed stale/.test(pillOffline) && /Streamer\.bot/.test(pillOffline), JSON.stringify({ during, pillOffline }));
+        await wait(p, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 20000);
+        let sent = [];
+        for (let i = 0; i < 24 && !sent.length; i++) { await sleep(250); sent = (await settingsCmds(x)).filter((c) => c.value && c.value.avatarPx === 99); }
+        const field = await p.evaluate(() => document.getElementById('dvoAvatarPx').value);
+        check('R21n2: …and it is sent after the reconnect (the edit made while offline is not lost), and the field keeps it', sent.length === 1 && field === '99', JSON.stringify({ sent, field }));
+        await p.close();
+      }
+      // (o) review fixes: LOAD shows its mode, and leaves it
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, inVoice());
+        await wait(p, () => document.querySelectorAll('#dvoFavorites .dvo-fav-item').length === 2, null, 6000);
+        const label = () => p.evaluate(() => document.getElementById('dvoSaveFav').textContent);
+        const before = await label();
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav1"] button[data-action="load"]');
+        const loaded = await label();
+        const newBtn = await visible(p, '#dvoSaveNew');
+        check('R21o: after LOAD the Save button says what it will do ("Update "Main Hang"") and a "New instead" button offers the way out', before === 'Save favorite' && /Update/.test(loaded) && /Main Hang/.test(loaded) && newBtn, JSON.stringify({ before, loaded, newBtn }));
+        await p.click('#dvoSaveNew');
+        const after = await label();
+        await edit(p, 'dvoServerId', '555555555555555555'); await edit(p, 'dvoChannelId', '666666666666666666');
+        await p.fill('#dvoName', 'Brand new');
+        await x.api.clear();
+        await p.click('#dvoSaveFav');
+        await sleep(400);
+        const out = (await cmdsOf(x)).filter((c) => c.command === 'favorite-add' || c.command === 'favorite-update');
+        check('R21o2: "New instead" leaves the edit: Save then adds (the loaded favorite is not overwritten)', after === 'Save favorite' && out.length === 1 && out[0].command === 'favorite-add', JSON.stringify({ after, out }));
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav1"] button[data-action="load"]');
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav2"] button[data-action="use"]');
+        const afterUse = await label();
+        check('R21o3: USE on a favorite also leaves the edit', afterUse === 'Save favorite', afterUse);
+        await p.close();
+      }
+      // (p) review fixes: an action error is cleared by an update of the same kind only
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await wait(p, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 8000);
+        const shownNow = () => p.evaluate(() => !document.getElementById('actionError').hidden);
+        await x.api.broadcast({ type: 'vdo:error', message: 'vdo trouble' });
+        await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
+        push(x, inVoice({ hb: 5000, users: {} })); // (no guests in the call: the page adds no directory entry, so it pushes no VDO state of its own, which would be a good VDO update)
+        await sleep(700);
+        const surv = await shownNow();
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(DISCORD_SLOT_VDO) });
+        const clearedByVdo = await wait(p, () => document.getElementById('actionError').hidden, null, 4000);
+        check('R21p: a vdo:error survives a Discord update (it is not wiped by the next heartbeat) and is cleared by the next VDO update', surv && clearedByVdo, JSON.stringify({ surv, clearedByVdo }));
+        await x.api.broadcast({ type: 'discord:voice:error', message: 'bridge trouble' });
+        await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(DISCORD_SLOT_VDO) });
+        await sleep(700);
+        const surv2 = await shownNow();
+        push(x, inVoice({ hb: 5000 }));
+        const clearedByDiscord = await wait(p, () => document.getElementById('actionError').hidden, null, 4000);
+        check('R21p2: …and a discord:voice:error survives a VDO update and is cleared by the next Discord update', surv2 && clearedByDiscord, JSON.stringify({ surv2, clearedByDiscord }));
+        await p.close();
+      }
+      // (q) review fixes: a cancelled remove leaves the list free to repaint; a Save of a channel that is already saved says so
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.addInitScript('window.__DVO_SAVE_MS = 700;');
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, inVoice());
+        await wait(p, () => document.querySelectorAll('#dvoFavorites .dvo-fav-item').length === 2, null, 6000);
+        p.on('dialog', (d) => d.dismiss());
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav1"] button[data-action="remove"]'); // declined
+        push(x, inVoice({ hostInChannel: false }));
+        const repainted = await wait(p, () => [...document.querySelectorAll('#dvoFavorites .dvo-fav-item button[data-action="use"]')].every((b) => b.textContent === 'USE'), null, 4000);
+        check('R21q: after a declined remove the favorites list still repaints from the next feed (the × does not keep the focus and freeze it)', repainted, '');
+        await edit(p, 'dvoServerId', ID1); await edit(p, 'dvoChannelId', CH1);
+        await p.fill('#dvoName', 'Other name');
+        await p.click('#dvoSaveFav');
+        push(x, inVoice()); // the bridge's push after it ignored the repeated add
+        await sleep(1100);
+        const msg = await p.evaluate(() => (document.getElementById('dvoFavMsg').hidden ? '' : document.getElementById('dvoFavMsg').textContent));
+        check('R21q2: saving a channel that is already saved (under another name) says "Already saved as …" and does not claim the bridge is down', /Already saved as "Main Hang"/.test(msg) && !/is the bridge running/.test(msg), msg);
+        await p.close();
+      }
+      // (r) review fixes for the labels: the live dot's name follows the in-place update, the inputs have clean names
+      {
+        const x = await startExtra({});
+        const seed = { enabled: true, room: 'testroom', password: 'pw1', viewFlags: VIEWFLAGS, slots: [slot(1, { label: 'ALPHA' }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' }, directory: DIRECTORY };
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await wait(p, () => document.querySelectorAll('.vdo-dir-row').length >= 2, null, 8000);
+        push(x, inVoice());
+        await wait(p, () => document.querySelectorAll('.dir-dot.live').length >= 1, null, 6000);
+        const dots = await p.evaluate(() => [...document.querySelectorAll('.dir-dot')].map((d) => ({ live: d.classList.contains('live'), same: d.getAttribute('aria-label') === d.title })));
+        check('R21r: after a voice update the live dot\'s accessible name follows its title (no stale "not live")', dots.some((d) => d.live) && dots.every((d) => d.same), JSON.stringify(dots));
+        await p.click('.vdo-dir-row .dir-toggle');
+        const names = await p.evaluate(() => {
+          const row = document.querySelector('.vdo-dir-row.open');
+          const get = (s) => (row.querySelector(s) || {}).getAttribute ? row.querySelector(s).getAttribute('aria-label') : null;
+          return { label: get('.vdo-dir-label'), disc: get('.vdo-dir-discord-id'), soc: get('.vdo-dir-socials'), disp: get('.vdo-dir-display') };
+        });
+        check('R21r2: the directory\'s inputs carry their own clean names (the pick list in the same label does not leak into them)', Object.values(names).every((n) => typeof n === 'string' && n.length > 3 && !/in channel|live/.test(n)), JSON.stringify(names));
+        await p.close();
+      }
+      // (k) GRN-175: at a 460 px dock width nothing is cut off or runs off the side, in every pill state and with every line showing
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 460, height: 1900 });
+        await p.addInitScript(SKEW);
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        const longName = 'A very long favorite name that keeps going on stream night';
+        const longFavs = [{ id: 'fav1', name: longName, serverId: ID1, channelId: CH1 }];
         const longErr = 'That channel is not a regular voice channel: pick a regular voice channel the bot can join (View Channel and Connect), or the bot stays where it is';
-        const states = [
-          ['error + lines', inVoice({ rpc: { enabled: true, hasToken: true, error: longErr, speakingStale: true, configWarning: 'The saved config could not be used (it is not valid JSON): a copy was kept as discord-voice-config.json.corrupt-1234 and the bridge runs on its defaults' }, bridgeVersion: '1.0.10' })],
-          ['moved', inVoice({ channelId: '999999999999999999' })],
-          ['live', inVoice()],
-        ];
+        const seed = { enabled: true, room: 'testroom', password: 'pw1', viewFlags: VIEWFLAGS, slots: [slot(1, { mode: 'discord', discordUserId: STREAMER }), slot(2), slot(3), slot(4)], invite: { passwordMode: 'hash' }, directory: DIRECTORY };
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        const measure = () => p.evaluate(() => {
+          const w = document.documentElement.clientWidth;
+          const shown = [...document.querySelectorAll('.pill, .warn, .hint.warn, #actionError')].filter((e) => e.offsetParent !== null && !e.hidden && e.getBoundingClientRect().width > 0);
+          const clipped = shown.filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => (e.id || e.className) + ': ' + e.textContent.slice(0, 40));
+          const off = shown.filter((e) => e.getBoundingClientRect().right > w + 1).map((e) => e.id || e.className);
+          const pick = document.querySelector('.vdo-slot-row[data-slot="1"] .vdo-discord-pick');
+          const row = document.querySelector('.vdo-slot-row[data-slot="1"]');
+          return { scrollW: document.documentElement.scrollWidth, w, clipped, off, pickOff: pick ? pick.getBoundingClientRect().right > w : 'no pick', rowClipped: row ? row.scrollWidth > row.clientWidth + 1 : 'no row' };
+        });
         const results = [];
-        await x.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON, and a long tail to make the line wrap on a narrow dock' });
+        const noFeed = await measure();
+        results.push(Object.assign({ name: 'no feed' }, noFeed));
+        const states = [
+          ['in voice, long target', inVoice({ favorites: longFavs })],
+          ['bot online, long target', inVoice({ favorites: longFavs, connected: true, hostInChannel: false })],
+          ['reconnecting', inVoice({ rpc: { enabled: true, hasToken: true, error: null, reconnecting: true } })],
+          ['refused', inVoice({ connected: true, hostInChannel: false, currentRefused: true })],
+          ['moved', inVoice({ channelId: '999999999999999999' })],
+          ['stopped', inVoice({ stopped: true, hb: 0, users: {}, connected: false, hostInChannel: false })],
+          ['error + lines', inVoice({ rpc: { enabled: true, hasToken: true, error: longErr, speakingStale: true, configWarning: 'The saved config could not be used (it is not valid JSON): a copy was kept as discord-voice-config.json.corrupt-1234 and the bridge runs on its defaults' }, bridgeVersion: '1.0.10' })],
+        ];
         for (const [name, st] of states) {
           push(x, st);
-          await sleep(900);
-          results.push(Object.assign({ name }, await p.evaluate(() => {
-            const w = document.documentElement.clientWidth;
-            const pills = [...document.querySelectorAll('.pill')].filter((e) => e.offsetParent !== null).map((e) => Math.round(e.getBoundingClientRect().right));
-            return { scrollW: document.documentElement.scrollWidth, w, maxRight: Math.max(...pills), headerBottom: Math.round(document.querySelector('header').getBoundingClientRect().bottom) };
-          })));
+          await sleep(800);
+          results.push(Object.assign({ name }, await measure()));
         }
-        const okAll = results.every((r) => r.scrollW <= r.w && r.maxRight <= r.w);
-        check('R21l: at a 460 px dock width the header and Discord pills wrap and no pill, warning or note runs off the side (error with three lines, moved, live)', okAll, JSON.stringify(results));
+        push(x, inVoice({ hb: 400 }));
+        await sleep(500);
+        await p.evaluate(() => { window.__skew += 60000; });
+        await sleep(1500);
+        results.push(Object.assign({ name: 'stale' }, await measure()));
+        await x.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON, and a long tail to make the line wrap on a narrow dock' });
+        await sleep(500);
+        results.push(Object.assign({ name: 'with an action error' }, await measure()));
+        const bad = results.filter((r) => r.scrollW > r.w || r.clipped.length || r.off.length || r.pickOff === true || r.rowClipped === true);
+        check('R21l: at a 460 px dock width, in every pill state (no feed, in voice and bot online with a long target, reconnecting, refused, moved, stopped, stale, error with three lines, an action error) no pill or line is cut off or runs off the side, and the slot row with its pick list fits', bad.length === 0, JSON.stringify(bad));
         await p.close();
       }
     }

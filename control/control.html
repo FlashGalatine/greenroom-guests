@@ -73,7 +73,7 @@
   /* An error or a warning is read whole: it wraps (and never runs wider than the dock) instead of being cut at 46 characters. */
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.warn { color: var(--amber); border-color: var(--amber); }
-  .pill.error, .pill.warn { white-space: normal; max-width: min(100%, 90ch); border-radius: 12px; }
+  .pill.error, .pill.warn, #dvoStatus { white-space: normal; max-width: min(100%, 90ch); border-radius: 12px; }
   input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
   .action-error { display: flex; gap: 8px; align-items: flex-start; padding: 6px 10px; margin: 0 0 12px; border: 1px solid var(--amber); border-radius: 8px; background: var(--panel); }
   .action-error span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -329,6 +329,7 @@
       <input type="text" id="dvoServerId" size="17" placeholder="Server ID" inputmode="numeric" />
       <input type="text" id="dvoChannelId" size="17" placeholder="Voice Channel ID" inputmode="numeric" />
       <button id="dvoSaveFav">Save favorite</button>
+      <button id="dvoSaveNew" type="button" hidden title="Leave the edit: Save then adds a new favorite and the loaded one stays as it is">New instead</button>
     </div>
     <div id="dvoFavMsg" class="warn" role="status" hidden></div>
     <div class="row" style="margin-top:10px">
@@ -342,6 +343,7 @@
       <label><input type="checkbox" id="dvoScanlines" /> scanlines</label>
       <label><input type="checkbox" id="dvoNeonBlink" /> blink</label>
     </div>
+    <div id="dvoSettingsMsg" class="warn" role="status" hidden></div>
     <div class="hint">Settings ride the <code>discord:voice:update</code> payload — the roster
       overlay re-styles live (URL params on the overlay override them; docs/THEMING.md).</div>
   </section>
@@ -518,6 +520,8 @@
   let unsent = false;         // a push could not be sent (Streamer.bot unreachable): the edit is kept, and sent after the reconnect (GRN-11)
   let lostPossible = false;   // the socket closed with a push still waiting for its echo: it may not have arrived
   const MSG_UNSENT = 'SB offline, changes will be sent on reconnect';
+  let settingsUnsent = false; // a Discord settings edit could not be sent (Streamer.bot unreachable): it is kept and sent after the reconnect
+  const anyUnsent = () => unsent || lostPossible || settingsUnsent;
   let adoptedForeign = false; // another writer's state was just adopted: a difference in stream IDs alone is corrected after two polls (GRN-64)
   let corrSig = '', corrPolls = 0, lastCorrectionAt = 0;
   let pushSeq = 0;          // pushes actually sent (a gesture asks whether a push already left)
@@ -763,7 +767,8 @@
     };
     sock.onopen = () => {
       // (an authentication notice from the last connection stays until a healthy session replaces it)
-      if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, unsent || lostPossible ? MSG_UNSENT : 'SB: connected', unsent || lostPossible ? 'error' : 'live'); }
+      if (pillFault !== 'auth') { pillFault = ''; setPill(els.sbStatus, anyUnsent() ? MSG_UNSENT : 'SB: connected', anyUnsent() ? 'error' : 'live'); }
+      if (dFed) dLastFeedAt = performance.now(); // the Discord feed's silence is counted from the reconnect, not from before Streamer.bot went away
       refusedSig = '';
       subId = String(++msgId);
       // Lowercase `general` — the SB Subscribe case gotcha.
@@ -849,7 +854,7 @@
         pillFault = '';
         // A push still waiting for its echo may not have reached Streamer.bot: if the reconnect replay does not show it, it is sent again.
         lostPossible = revs.inflight.length > 0;
-        setPill(els.sbStatus, unsent || lostPossible ? MSG_UNSENT : 'SB: offline — retrying', 'error');
+        setPill(els.sbStatus, anyUnsent() ? MSG_UNSENT : 'SB: offline — retrying', 'error');
       }
       renderSyncStatus();
       scheduleReconnect();
@@ -861,7 +866,7 @@
     if (d.type === 'vdoninja:update') {
       const v = frameState(d, 'vdoninja', 'vdoninjaJson');
       if (!v) return; // no usable state in the frame: drop it, never mark the page synced
-      clearActionError(); // (the next good update takes an action error's line away)
+      clearActionError('vdo'); // (the next good VDO update takes a VDO action error's line away)
       // What is this? Its rev and writer say (control/vdo-rev.js): this page's own push coming back, something older than a state this
       // page already holds, or a newer (or legacy, rev-less) write to adopt.
       const cls = revs.receive(v);
@@ -913,15 +918,17 @@
     } else if (d.type === 'vdo:sync:empty') {
       // VDO Sync found no saved vdo.state: nothing to adopt, and nothing to overwrite.
       if (!synced) syncedByMarker = true;
+      clearActionError('vdo');
       markSynced();
       renderAll();
     } else if (d.type === 'discord:voice:update') {
       const dv = frameState(d, 'discordVoice', 'discordVoiceJson');
       if (!dv) return;
       discord = dv;
-      clearActionError();
+      clearActionError('discord');
       noteDiscordFeed(d);
       if (isPlainObject(dv.settings)) hydrateDiscordForm(); // GRN-211: the settings controls wait for the bridge's own values
+      if (settingsUnsent && !sendTimer) flushSettings(); // an edit made while Streamer.bot was unreachable goes out before this update is shown
       renderDiscordSection();
       renderSlots(); // pick-from-channel options (membership-sig guarded)
       // New face in the voice channel → placeholder directory entry (auto-add).
@@ -937,26 +944,31 @@
       // knows what to remove or rename. Any other error is not blamed on them.
       const bad = /DateTime/i.test(d.message || '') ? dateShapedEntries() : [];
       if (bad.length) text += ` · date-like text in ${bad.map((b) => '"' + b + '"').join(', ')}: remove or rename it`;
-      showActionError(text); // on a line of its own: the SB pill is for the socket, and keeps saying "SB: connected" while it is
+      showActionError(text, d.type === 'vdo:error' ? 'vdo' : 'discord'); // on a line of its own: the SB pill is for the socket, and keeps saying "SB: connected" while it is
     }
   }
 
-  // An error an action reported (GRN-107): a dismissible line with the whole message in its title. The next good vdoninja:update or
-  // discord:voice:update takes it away, and so does the time (20 s; window.__ACTION_ERR_MS shortens it for tests).
+  // An error an action reported (GRN-107): a dismissible line with the whole message in its title. The next good update OF THE SAME KIND
+  // takes it away (a VDO error: a vdoninja:update; a Discord error: a discord:voice:update; the bridge's heartbeat must not wipe a VDO
+  // error), and so does the time (20 s; window.__ACTION_ERR_MS shortens it for tests) or the close button.
   let actionErrTimer = null;
-  function showActionError(text) {
+  let actionErrSource = '';
+  function showActionError(text, source) {
     els.actionErrorText.textContent = text;
     els.actionError.title = text;
     els.actionError.hidden = false;
+    actionErrSource = source || '';
     clearTimeout(actionErrTimer);
-    actionErrTimer = setTimeout(clearActionError, Number(window.__ACTION_ERR_MS) || 20000);
+    actionErrTimer = setTimeout(() => clearActionError(), Number(window.__ACTION_ERR_MS) || 20000);
   }
-  function clearActionError() {
+  function clearActionError(source) {
+    if (source && actionErrSource && source !== actionErrSource) return;
     clearTimeout(actionErrTimer);
     actionErrTimer = null;
+    actionErrSource = '';
     if (!els.actionError.hidden) { els.actionError.hidden = true; els.actionErrorText.textContent = ''; els.actionError.title = ''; }
   }
-  $('actionErrorClose').addEventListener('click', clearActionError);
+  $('actionErrorClose').addEventListener('click', () => clearActionError());
 
   // The directory entries and slot labels whose text looks like a date (GRN-60).
   function dateShapedEntries() {
@@ -1018,7 +1030,7 @@
   // The saved config replaces the form: whatever could not be sent before it arrived is gone with the form.
   function dropUnsent() {
     unsent = false; lostPossible = false;
-    if (els.sbStatus.textContent === MSG_UNSENT) setPill(els.sbStatus, 'SB: connected', 'live');
+    if (els.sbStatus.textContent === MSG_UNSENT && !settingsUnsent) setPill(els.sbStatus, 'SB: connected', 'live');
   }
 
   // What this page compares its own state with right after it adopted `v` (another writer's push, a replay, an Import). A page that is
@@ -1073,7 +1085,7 @@
     lastPushedSig = sig;
     unsent = false; lostPossible = false; adoptedForeign = false; corrPolls = 0;
     if (isCorrection) lastCorrectionAt = Date.now();
-    if (els.sbStatus.textContent === MSG_UNSENT) setPill(els.sbStatus, 'SB: connected', 'live');
+    if (els.sbStatus.textContent === MSG_UNSENT && !settingsUnsent) setPill(els.sbStatus, 'SB: connected', 'live');
     pushSeq++;
     watchUnconfirmed(stamped.rev);
     return true;
@@ -1141,7 +1153,13 @@
   window.addEventListener('message', (e) => directorLoop.onMessage(e));
 
   // ── Rendering (focus-guarded, signature-deduped) ──────────────────────────
-  function setPill(el, text, cls) { el.textContent = text; el.title = text; el.className = 'pill' + (cls ? ' ' + cls : ''); } // (the title carries what a narrow dock clips)
+  // (the title carries what a narrow dock clips; a pill whose text and class are unchanged is left alone, so a status role does not announce it again)
+  function setPill(el, text, cls) {
+    const klass = 'pill' + (cls ? ' ' + cls : '');
+    if (el.textContent !== text) el.textContent = text;
+    if (el.title !== text) el.title = text;
+    if (el.className !== klass) el.className = klass;
+  }
   function setIfNotFocused(el, val) { if (document.activeElement !== el && el.value !== val) el.value = val; }
   function setCheck(el, val) { if (document.activeElement !== el) el.checked = !!val; }
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -1509,7 +1527,7 @@
       if (!entry) continue;
       const st = entryLive(entry, liveSet, users);
       const dot = row.querySelector('.dir-dot');
-      if (dot) { dot.classList.toggle('live', st.any); dot.title = dotTitle(st); }
+      if (dot) { dot.classList.toggle('live', st.any); dot.title = dotTitle(st); dot.setAttribute('aria-label', dot.title); }
       const meta = row.querySelector('.dir-meta');
       if (meta) { meta.textContent = metaText(entry, entry.discordUserId ? users[entry.discordUserId] : null) || 'no match key yet'; meta.title = meta.textContent + ' — click to edit'; }
       const lp = row.querySelector('select.vdo-dir-label-pick');
@@ -1649,6 +1667,7 @@
       dispIn.className = 'vdo-dir-display';
       dispIn.placeholder = 'On-stream display name';
       dispIn.title = 'The name shown on stream';
+      dispIn.setAttribute('aria-label', `On-stream display name for ${who}`);
       dispIn.value = String(entry.displayName ?? '');
 
       const meta = document.createElement('span');
@@ -1705,6 +1724,7 @@
       labelIn.className = 'vdo-dir-label';
       labelIn.placeholder = 'VDO label';
       labelIn.spellcheck = false;
+      labelIn.setAttribute('aria-label', `VDO label for ${who}`); // (their own names: the label around them also holds a pick list, whose option text would leak into the name)
       labelIn.value = String(entry.vdoLabel ?? '');
 
       const discIn = document.createElement('input');
@@ -1712,6 +1732,7 @@
       discIn.className = 'vdo-dir-discord-id';
       discIn.placeholder = 'Discord User ID';
       discIn.inputMode = 'numeric';
+      discIn.setAttribute('aria-label', `Discord user ID for ${who}`);
       discIn.value = String(entry.discordUserId ?? '');
 
       const socialsTa = document.createElement('textarea');
@@ -1720,6 +1741,7 @@
       socialsTa.spellcheck = false;
       socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social\n(one per line: platform, then handle)';
       socialsTa.title = 'One per line: platform, then handle. ' + SOCIAL_PLATFORMS; // a placeholder is gone once something is typed
+      socialsTa.setAttribute('aria-label', `Social handles for ${who}`);
       socialsTa.value = GRDir.socialsToText(entry.socials);
 
       const body = document.createElement('div');
@@ -2489,8 +2511,9 @@
   if (!(window.crypto && crypto.subtle) || !window.isSecureContext) els.cryptoWarn.hidden = false;
 
   // ── Discord section ───────────────────────────────────────────────────────
+  // Returns whether the command was actually sent (false while the Streamer.bot socket is down).
   function sendCmd(command, value) {
-    doAction(CMD_ACTION, { command, value: typeof value === 'string' ? value : JSON.stringify(value || '') });
+    return doAction(CMD_ACTION, { command, value: typeof value === 'string' ? value : JSON.stringify(value || '') });
   }
 
   // The sidecar version shipped with this page (sidecar/package.json). A release that bumps the sidecar version sets this to the same
@@ -2513,7 +2536,9 @@
     dFed = true;
     dLastFeedAt = performance.now() - age;
   }
-  setInterval(() => { if (discord && discordStale() !== dWasStale) renderDiscordSection(); }, 1000); // a feed that just went stale shows it
+  // Once a second: a feed that has just gone stale shows it, a setting the bridge never confirmed goes back, and a favorites list that the
+  // focus was holding is painted. (An unchanged pill, line or list is not touched.)
+  setInterval(() => { if (discord) renderDiscordSection(); }, 1000);
 
   const NO_FEED_TEXT = 'bridge: no feed — is the sidecar running, and pointed at this SB port?';
   const tail4 = (id) => '…' + String(id).slice(-4);
@@ -2537,7 +2562,7 @@
     if (!have) return `This bridge reports no version this page can read${v ? ' (' + String(v).slice(0, 40) + ')' : ''}, so it is probably older than this page (${EXPECTED_BRIDGE_VERSION}): update the sidecar folder and restart it.`;
     return verBefore(have, verParts(EXPECTED_BRIDGE_VERSION)) ? `The bridge is version ${v}, older than the ${EXPECTED_BRIDGE_VERSION} this page was shipped with: update the sidecar folder and restart it.` : '';
   }
-  function setLine(el, text) { el.textContent = text || ''; el.hidden = !text; }
+  function setLine(el, text) { const t = text || ''; if (el.textContent !== t) el.textContent = t; if (el.hidden !== !t) el.hidden = !t; }
 
   // ── Discord settings: only what the operator changed is sent (GRN-33, GRN-112, GRN-211) ──
   // Pixel ranges are kept in step with clampInt in sidecar/settings.mjs and the inputs' min/max (avatarPx 24..128, streamerPx 32..160).
@@ -2553,19 +2578,23 @@
   function setDvoEnabled(on) { for (const el of DVO_KEYS.keys()) el.disabled = !on; }
   setDvoEnabled(false);
   function hydrateDiscordForm() { if (!discordHydrated) { discordHydrated = true; setDvoEnabled(true); } }
-  // Is `key` still being held against the feed? The bridge's echo of the value (or the time) ends it.
+  // Is `key` still being held against the feed? A value not sent yet stands (the 400 ms window is open, or Streamer.bot is unreachable and
+  // it will go after the reconnect); once sent, the bridge's echo of it, or 3 s, ends the hold. A feed that merely equals a value that has not
+  // been sent is not its echo.
   function heldNow(key, fed) {
     const h = heldSettings.get(key);
     if (!h) return false;
+    if (h.sentAt === null) return true;
     if (String(h.v) === String(fed)) { heldSettings.delete(key); return false; }
-    if (performance.now() - (h.sentAt ?? h.at) >= HOLD_MS) { heldSettings.delete(key); return false; }
+    if (performance.now() - h.sentAt >= HOLD_MS) { heldSettings.delete(key); return false; }
     return true;
   }
   function reflectSettings(s) {
+    // (a tick box or a select holds no typed text, so it follows the feed even while it has the focus)
     const text = (key, el, fed) => { if (!heldNow(key, fed)) setIfNotFocused(el, String(fed)); };
-    const tick = (key, el, fed) => { if (!heldNow(key, fed)) setCheck(el, fed); };
+    const tick = (key, el, fed) => { if (!heldNow(key, fed) && el.checked !== !!fed) el.checked = !!fed; };
     const accent = s.accent || 'cyan';
-    if (!heldNow('accent', accent) && document.activeElement !== dvo.accent) dvo.accent.value = accent;
+    if (!heldNow('accent', accent) && dvo.accent.value !== accent) dvo.accent.value = accent;
     text('avatarPx', dvo.avatarPx, s.avatarPx ?? 56);
     text('streamerPx', dvo.streamerPx, s.streamerPx ?? 72);
     text('streamerUserId', dvo.streamerId, s.streamerUserId ?? '');
@@ -2574,35 +2603,57 @@
     tick('neonBlink', dvo.neonBlink, s.neonBlink !== false);
     tick('exitOnSbClose', dvo.exitOnSbClose, !!s.exitOnSbClose); // opt-in: default off; a hand-edited 1 or "true" counts
   }
+  const setSettingsMsg = (t) => setLine($('dvoSettingsMsg'), t);
+  // Nothing is to be sent for `key`: forget the edit (even one made earlier in the same window) and show what the bridge has.
+  function cancelSetting(el, key) {
+    heldSettings.delete(key);
+    pendingSend.delete(key);
+    if (!pendingSend.size && sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+    const s = (discord && discord.settings) || {};
+    el.value = String(s[key] ?? (key === 'avatarPx' ? 56 : key === 'streamerPx' ? 72 : ''));
+  }
   function captureSetting(el) {
     if (!discordHydrated) return; // nothing is sent before the bridge has reported its settings (the form would be showing guesses)
     const key = DVO_KEYS.get(el);
+    setSettingsMsg('');
     let v;
     if (key === 'avatarPx' || key === 'streamerPx') {
       const raw = String(el.value).trim();
       const n = Number(raw);
-      if (raw === '' || !Number.isFinite(n)) { // blank or not a number: send nothing, show what the bridge has
-        heldSettings.delete(key);
-        const s = (discord && discord.settings) || {};
-        el.value = String(s[key] ?? (key === 'avatarPx' ? 56 : 72));
-        return;
-      }
+      if (raw === '' || !Number.isFinite(n)) { cancelSetting(el, key); return; } // blank or not a number: send nothing
       v = Math.max(DVO_PX[key][0], Math.min(DVO_PX[key][1], Math.round(n)));
       el.value = String(v);
-    } else if (key === 'streamerUserId') v = el.value.replace(/\D/g, '');
-    else if (key === 'accent') v = el.value || 'cyan';
+    } else if (key === 'streamerUserId') {
+      const digits = el.value.replace(/\D/g, '');
+      if (el.value.trim() !== '' && digits === '') { // a name, not an id: it would clear the saved id
+        cancelSetting(el, key);
+        setSettingsMsg('The streamer id is a number (in Discord: Settings > Advanced > Developer Mode, then right-click your name > Copy User ID). Leave the box empty to clear it.');
+        return;
+      }
+      v = digits;
+    } else if (key === 'accent') v = el.value || 'cyan';
     else v = !!el.checked;
     heldSettings.set(key, { v, at: performance.now(), sentAt: null });
     pendingSend.set(key, v);
     if (!sendTimer) sendTimer = setTimeout(flushSettings, SEND_WINDOW_MS);
   }
+  // One partial set-settings for the window. If Streamer.bot is unreachable the keys stay (the SB pill says they will go on reconnect) and
+  // are sent with the first Discord update after it, before that update is shown.
   function flushSettings() {
     sendTimer = null;
     if (!pendingSend.size) return;
-    const out = {};
-    for (const [k, v] of pendingSend) { out[k] = v; const h = heldSettings.get(k); if (h) h.sentAt = performance.now(); }
+    if (!sendCmd('set-settings', Object.fromEntries(pendingSend))) {
+      settingsUnsent = true;
+      setPill(els.sbStatus, MSG_UNSENT, 'error');
+      return;
+    }
+    const now = performance.now();
+    for (const k of pendingSend.keys()) { const h = heldSettings.get(k); if (h) h.sentAt = now; }
     pendingSend.clear();
-    sendCmd('set-settings', out);
+    if (settingsUnsent) {
+      settingsUnsent = false;
+      if (els.sbStatus.textContent === MSG_UNSENT && !unsent && !lostPossible) setPill(els.sbStatus, 'SB: connected', 'live');
+    }
   }
   for (const el of DVO_KEYS.keys()) el.addEventListener('change', () => captureSetting(el));
 
@@ -2611,13 +2662,27 @@
   let loadedFavId = '';      // LOAD put this favorite into the fields: Save updates it
   let favSaveTimer = null;
   function setFavMsg(text) { setLine(els.favMsg, text); }
+  // The Save button says what it will do: after LOAD it updates the loaded favorite (and a second button leaves that mode).
+  function renderSaveMode() {
+    const f = loadedFavId && discord && (discord.favorites || []).find((x) => x.id === loadedFavId);
+    if (loadedFavId && !f) loadedFavId = ''; // the loaded favorite is gone (removed, or another page did)
+    const saveBtn = $('dvoSaveFav');
+    const label = f ? `Update "${Array.from(String(f.name)).slice(0, 24).join('')}"` : 'Save favorite';
+    if (saveBtn.textContent !== label) saveBtn.textContent = label;
+    if ($('dvoSaveNew').hidden !== !f) $('dvoSaveNew').hidden = !f;
+  }
   function settleFavSave(favs) {
     if (!pendingFav) return;
     const p = pendingFav;
-    const hit = favs.find((f) => f.serverId === p.serverId && f.channelId === p.channelId && String(f.name) === p.name && (!p.id || f.id === p.id));
+    // An update is saved when that favorite shows the sent ids and name. An add is saved when a favorite with those ids shows: the bridge
+    // keeps the first favorite of a channel, so one that is already there under another name stands (and the page says so).
+    const hit = p.id
+      ? favs.find((f) => f.id === p.id && f.serverId === p.serverId && f.channelId === p.channelId && String(f.name) === p.name)
+      : favs.find((f) => f.serverId === p.serverId && f.channelId === p.channelId);
     if (!hit) return;
     pendingFav = null; loadedFavId = '';
     clearTimeout(favSaveTimer);
+    if (!p.id && String(hit.name) !== p.name) { setFavMsg(`Already saved as "${hit.name}": press LOAD on it to rename it.`); return; }
     if (els.favName.value.trim() === p.typed) els.favName.value = '';
     setFavMsg('');
   }
@@ -2633,15 +2698,16 @@
     let text = NO_FEED_TEXT, cls = '';
     if (!dv) { /* keep default */ }
     else if (dv.stopped) { text = 'bridge stopped'; }
+    else if (stale && !(ws && ws.readyState === 1)) { text = 'bridge: no news while Streamer.bot is offline'; } // the silence is Streamer.bot's, not the sidecar's
     else if (stale) { text = 'bridge: feed stale — is the sidecar running?'; cls = 'error'; }
     else if (rpc.error) { text = rpc.error; cls = 'error'; }
     else if (rpc.reconnecting) { text = 'reconnecting to Discord…'; }
     else if (dv.connected && dv.hostInChannel) {
       if (dv.current && dv.channelId && dv.channelId !== dv.current.channelId) { text = `moved in Discord · ${present} present — USE returns the bot`; cls = 'warn'; }
-      else { text = `in voice · ${tgt ? tgt + ' · ' : ''}${present} present`; cls = 'live'; }
+      else { text = `in voice · ${present} present${tgt ? ' · ' + tgt : ''}`; cls = 'live'; } // (the count first: a long name is what gets cut)
     }
     else if (dv.connected && dv.current && dv.currentRefused) { text = 'the saved channel is not joined (the bridge cannot use it): check it, or pick another and press USE'; cls = 'error'; }
-    else if (dv.connected) { text = tgt ? `bot online · ${tgt} · press USE to join` : 'bot online · pick a favorite and press USE'; cls = ''; }
+    else if (dv.connected) { text = tgt ? `bot online · press USE to join · ${tgt}` : 'bot online · pick a favorite and press USE'; cls = ''; }
     else if (rpc.enabled && !rpc.hasToken) { text = 'enabled — add a token to sidecar/discord-tokens.json'; cls = ''; }
     else if (rpc.enabled) { text = 'connecting…'; cls = ''; }
     else { text = 'bridge off'; cls = ''; }
@@ -2658,6 +2724,7 @@
     // Favorites list (rebuild only when favorites, the current target or the live channel change).
     const favs = (dv && Array.isArray(dv.favorites) ? dv.favorites : []);
     settleFavSave(favs);
+    renderSaveMode();
     const cur = dv && dv.current;
     const liveChannel = dv && dv.connected && dv.hostInChannel ? String(dv.channelId || '') : '';
     const sig = JSON.stringify({ favs, cur, liveChannel });
@@ -2688,25 +2755,33 @@
     if (!btn) return;
     const row = btn.closest('.dvo-fav-item');
     const fav = discord && (discord.favorites || []).find((f) => f.id === row.dataset.id);
-    if (!fav) return;
-    if (btn.dataset.action === 'load') {
-      els.favName.value = fav.name;
-      els.favServer.value = fav.serverId;
-      els.favChannel.value = fav.channelId;
-      loadedFavId = fav.id; // Save now updates this favorite
-      setFavMsg('');
-    } else if (btn.dataset.action === 'use') {
-      els.favServer.value = fav.serverId;
-      els.favChannel.value = fav.channelId;
-      sendCmd('set-current', { serverId: fav.serverId, channelId: fav.channelId });
-    } else if (btn.dataset.action === 'remove') {
-      if (!confirm(`Remove favorite "${fav.name}"?`)) return;
-      if (loadedFavId === fav.id) loadedFavId = '';
-      sendCmd('favorite-remove', { id: fav.id });
+    try {
+      if (!fav) return;
+      if (btn.dataset.action === 'load') {
+        els.favName.value = fav.name;
+        els.favServer.value = fav.serverId;
+        els.favChannel.value = fav.channelId;
+        loadedFavId = fav.id; // Save now updates this favorite (the button says so)
+        pendingFav = null;
+        setFavMsg('');
+        renderSaveMode();
+      } else if (btn.dataset.action === 'use') {
+        els.favServer.value = fav.serverId;
+        els.favChannel.value = fav.channelId;
+        loadedFavId = ''; renderSaveMode();
+        sendCmd('set-current', { serverId: fav.serverId, channelId: fav.channelId });
+      } else if (btn.dataset.action === 'remove') {
+        if (!confirm(`Remove favorite "${fav.name}"?`)) return;
+        if (loadedFavId === fav.id) { loadedFavId = ''; renderSaveMode(); }
+        sendCmd('favorite-remove', { id: fav.id });
+      }
+    } finally {
+      // The list is redrawn from the next update; a button that keeps the focus would make the redraw wait (GRN-184), so it never does,
+      // whichever way the click ended (a declined remove included).
+      btn.blur();
     }
-    // The list is redrawn from the next update; a button that keeps the focus would make the redraw wait (GRN-184).
-    btn.blur();
   });
+  $('dvoSaveNew').addEventListener('click', () => { loadedFavId = ''; renderSaveMode(); setFavMsg(''); });
 
   // A discord.com/channels/<server>/<channel> link (ptb., canary., discordapp.com too) pasted into either ID box fills both (GRN-133).
   const CHANNEL_LINK = /^\s*https?:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/channels\/(\d{17,20})\/(\d{17,20})(?:\/\d+)?\/?(?:[?#]\S*)?\s*$/i;

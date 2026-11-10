@@ -389,7 +389,11 @@ Invalid arguments and runtime exceptions are visible, not silent:
 `{"type":"vdo:error","message":…}` from `VDO Push`/`VDO Sync`,
 `{"type":"discord:voice:error","message":…}` from the Discord actions
 (`VDO Sync` reports a failed Discord replay as `discord:voice:error`). The control
-page surfaces them in its status pill. An error broadcast can only come from an action
+page shows them on a dismissible line under its header (the whole message in the
+line's title), not in the SB pill, which stays on the state of the socket. A
+`vdo:error` goes away with the next good `vdoninja:update` and a
+`discord:voice:error` with the next `discord:voice:update` (the bridge's heartbeat
+does not clear a VDO error), and any of them after about 20 seconds. An error broadcast can only come from an action
 that compiled: one that failed to compile is silent (see `DoAction` above), and
 `Discord Bridge Start` broadcasts nothing at all, it only logs, so look in Streamer.bot's
 log if the bridge does not come up.

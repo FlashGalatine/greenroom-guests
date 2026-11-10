@@ -28,8 +28,10 @@ bot token file.
   `<name>-overlay`, and `control` becomes `overlay` (case does not matter, and
   the case you used is kept). If your two prefixes do not pair up like that,
   the buttons assume `greenroom-overlay` and the page says so under the guest
-  slots; open the control page with `?overlay=<your overlay prefix>` (one name,
-  no slashes) to tell it. A control page opened under a LAN name builds
+  slots. (A control prefix that ends in `-control` is always taken to pair with
+  `-overlay`; the page cannot know if your overlay folder is mapped under another
+  name.) Open the control page with `?overlay=<your overlay prefix>` (one name,
+  no slashes) to tell it, in either case. A control page opened under a LAN name builds
   `127.0.0.1` addresses, because the OBS that uses them runs on this PC.
 
   **Keep both servers on `127.0.0.1`.** While `greenroom-control` and
@@ -295,9 +297,12 @@ Webcam-only users skip this whole section — nothing else depends on it.
    The size, colour and tick-box settings stay greyed out until the bridge has
    reported its settings, and only the setting you changed is sent. **Save
    favorite** takes a `discord.com/channels/<server>/<channel>` link pasted into
-   the Server ID box, or two ids of 17 to 20 digits; **LOAD** then **Save** edits
-   that favorite; the name is cleared once the list shows the favorite, and a hint
-   says so if it never does.
+   the Server ID box, or two ids of 17 to 20 digits; after **LOAD** the button
+   reads `Update "<name>"` and edits that favorite (**New instead** leaves that
+   mode, and so does **USE**); the name is cleared once the list shows the
+   favorite, and a hint says so if it never does. A channel that is already saved
+   keeps its first name (the page says so). A setting you change while
+   Streamer.bot is unreachable is sent when it is back.
 
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.
