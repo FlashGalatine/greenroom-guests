@@ -1634,10 +1634,19 @@ async function main() {
       const themeRows = [...theming.matchAll(/^\|\s*`(--[a-z-]+)`/gm)].map((m) => m[1]);
       check('GRN-201: docs/THEMING.md\'s :root table lists no variable the page sets itself at runtime (--accent, --avatar-px, --streamer-px) and says they are set at runtime',
         themeRows.length > 3 && !themeRows.some((v) => ['--accent', '--avatar-px', '--streamer-px'].includes(v)) && /sets\s+`--accent`, `--avatar-px` and `--streamer-px` itself, at runtime/.test(theming), JSON.stringify(themeRows));
-      check('GRN-230: no document or comment says a capitalized Subscribe key receives nothing, and the protocol says lowercase is the convention and Streamer.bot 1.0.7 accepts any casing',
-        !/capitalized Subscribe[^.\n]*(NOTHING|nothing)/i.test(protocol + setup + readme) && /lowercase 'general' is this project's convention/.test(protocol) && /matches the key case-insensitively/.test(protocol));
-      check('GRN-214/235: the README and the setup guide say plainly that the live checklist was run on Streamer.bot 1.0.4 on 2026-07-10 and has not been re-run on 1.0.7 or OBS 33.0.1 (no tested range is claimed that was not run)',
-        /not been re-run/.test(readme) && /Tested on:\*\* Streamer\.bot 1\.0\.4/.test(readme) && /has \*\*not been run again\*\* on 1\.0\.7/.test(setup));
+      // the Subscribe casing: no document and no code comment says a capitalized key 'receives nothing' (the wording may break across a line and a comment marker)
+      const subFiles = ['overlay/panel-client-sb.js', 'control/control.html', 'sidecar/discord-bridge.mjs', 'backup.mjs', 'mock-discord-bridge.mjs', 'mock-sb-server.mjs'];
+      let subText = protocol + setup + readme;
+      for (const rel of subFiles) subText += '\n' + await readFile(resolve(__dirname, rel), 'utf8');
+      check('GRN-230: no document or code comment says a capitalized Subscribe key receives nothing, and the protocol says lowercase is the convention and Streamer.bot 1.0.7 accepts any casing',
+        !/capitali[sz]ed[\s/*]*(?:`?General`?[\s/*]*)?Subscribe[\s\S]{0,60}?nothing/i.test(subText) && /lowercase 'general' is this project's convention/.test(protocol) && /matches the key case-insensitively/.test(protocol));
+      // what is said to be tested: every Streamer.bot version the README's "Tested on" line names is one the setup guide's section 6 says was run, and unless that
+      // includes 1.0.7 both documents say plainly that it was not
+      const testedOn = (/Tested on:\*\*([^\n]*)/.exec(readme) || [])[1] || '';
+      const named = testedOn.match(/\b\d+\.\d+\.\d+\b/g) || [];
+      const section6 = (/\*\*Tested versions\.\*\*([\s\S]*?)What the offline harness/.exec(setup) || [])[1] || '';
+      check('GRN-214/235: the versions the README says it was tested on are the ones the setup guide\'s section 6 says were run, and while 1.0.7 and OBS 33.0.1 are not among them both documents say they were not',
+        named.length > 0 && named.every((v) => section6.includes(v)) && (named.includes('1.0.7') || (/not been re-run/.test(readme) && /not been run again\*\* on 1\.0\.7/.test(section6))), JSON.stringify({ named, section6: section6.slice(0, 80) }));
     }
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────

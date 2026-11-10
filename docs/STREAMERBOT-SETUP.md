@@ -2,7 +2,7 @@
 
 Verified pattern: Streamer.bot **1.0.4** on Windows ("Tested versions" in §6 says what has and has not been run on newer ones).
 Setup, in order: two Streamer.bot servers and two HTTP path maps (§1); four pasted actions, plus an
-optional fifth that needs one References-tab assembly, on their own queue (§2); the OBS sources (§3); then the
+optional fifth that needs one References-tab assembly, three of them on their own blocking queue (§2); the OBS sources (§3); then the
 **first run** of the control page (§4): room and password, Save, director on, invite, bind the slots.
 Only if you use Discord slots or the roster: one `npm install` and a bot token file (§5). Updating an
 existing install is in the README ("Updating").
@@ -57,16 +57,19 @@ existing install is in the README ("Updating").
     address (`&sbport=` after an existing `?`). The control page's Copy and Open buttons
     carry it for the addresses they build **only when the control page itself was opened
     with it**; the roster and director-min addresses you add by hand.
-  - Give the bridge the address on its command line: `--sb-ws-url=ws://127.0.0.1:<port>/` on
-    the `node` line of an edited `start-discord-bridge.bat`, or in `psi.Arguments` of
-    `Discord Bridge Start` (`psi.Arguments = "discord-bridge.mjs --sb-ws-url=ws://127.0.0.1:<port>/";`).
+  - Give the bridge the address on its command line: start the `.bat` with it
+    (`start-discord-bridge.bat --sb-ws-url=ws://127.0.0.1:<port>/`: the `.bat` passes its arguments to both of its
+    `node` lines), or put it in `psi.Arguments` of `Discord Bridge Start`
+    (`psi.Arguments = "discord-bridge.mjs --sb-ws-url=ws://127.0.0.1:<port>/";`).
     `SB_WS_URL` and `SB_WS_PORT` still work from a console, or as a Windows user variable plus
-    a Streamer.bot restart. **Do not call `Environment.SetEnvironmentVariable` inside the action**:
-    that changes Streamer.bot's own environment for every program it starts afterwards.
-  - Two more settings live in the same places: the single-instance guard port
-    (`--guard-port=` / `GREENROOM_GUARD_PORT`, default 7495) and how long the bridge waits for
-    Streamer.bot to come back before it leaves voice and exits when exit-on-close is on
-    (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms, never less than 1000).
+    a Streamer.bot restart (which survives an update, unlike an edit of the `.bat` or the action).
+    **Do not call `Environment.SetEnvironmentVariable` inside the action**: that changes Streamer.bot's own
+    environment for every program it starts afterwards.
+  - Two more settings: the single-instance guard port (`--guard-port=` on the same command line, or
+    `GREENROOM_GUARD_PORT`, default 7495), and how long the bridge waits for Streamer.bot to come back before it
+    leaves voice and exits when exit-on-close is on (`GREENROOM_SB_EXIT_GRACE_MS`, default 8000 ms, never less
+    than 1000): that one is an environment variable only (a console, or a Windows user variable plus a
+    Streamer.bot restart).
   - **Open the pages as `http://127.0.0.1:<port>/…` (or `http://localhost:<port>/…`), never by
     LAN address or computer name.** Those are not secure contexts: vdo.ninja refuses an insecure
     parent page, so the director does not start (the pill says "director: needs a secure page
@@ -108,8 +111,8 @@ stale state back on the pages. Serialise the three:
 3. Restart Streamer.bot once and check that the queue is still **Blocking** and
    the three actions are still assigned to it.
 
-The queue orders the actions; Greenroom's pages do not yet reject a stale
-broadcast, so this queue is the only protection against that race today.
+The queue orders the actions. The control pages drop a state older than the one they hold (the revision stamps,
+since 1.0.63), but the overlays do not, so this queue is what protects them from a stale replay.
 
 **Updating the three state actions: do it in this order.** The current `VDO Push`,
 `VDO Sync` and `Discord Voice Push` broadcast the state as an escaped string field
@@ -146,7 +149,8 @@ Streamer.bot's persisted `vdo.state`.
   defaults; it does not close that window.
 - Take an **Export config** (control page) or `npm run backup` **before every
   Streamer.bot upgrade**, and keep the file private: it contains the room
-  password. Updating Greenroom itself: the README's **Updating** section.
+  password. Inside an OBS dock the download may save silently or not at all: copy the text from the box the
+  page shows. Updating Greenroom itself: the README's **Updating** section.
 
 **Discord Bridge Start extras** (skip for webcam-only setups):
 1. Edit the `BUNDLE` const (it reads `C:\path\to\greenroom-guests\sidecar` until you do, and the
@@ -184,14 +188,15 @@ All **Browser Source → URL** (never "Local file"):
 | Guest slot 1–4 | `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`): use the control page's per-slot **Copy** buttons; a `?slot=` other than 1 to 4 shows nothing |
 | Guest nameplate *(optional)* | `http://127.0.0.1:7474/greenroom-overlay/nameplate.html?slot=1` — freely positioned name + socials plate (e.g. under the cam frame). The slot overlay also has a built-in lower-third; `?nameplate=0` hides it (docs/THEMING.md) |
 | Discord roster | `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row`: give the source room for your busiest call (a member takes up to about 120 px of width in a row at the default sizes with names showing, about 86 px with `?labels=0`; so 1450 × 140 holds 12 people with the longest names; a grid wraps, so give it height). Members that do not fit are folded into a `+N` chip automatically, the streamer first; `?max=` caps it lower. If the Discord feed stops (the bridge died: three missed heartbeats, about 15 seconds) the roster hides as if nobody were there. It can come back for up to 15 seconds each time another source or a dock page connects, because VDO Sync replays the last push, which looks fresh to the page: a known limit until the replay carries its age |
-| Always-on director | `http://127.0.0.1:7474/greenroom-control/director-min.html` as a **1×1 px** source in a scene that is **always shown** (§4): OBS throttles a source that is hidden, which slows its polling |
+| Always-on director | `http://127.0.0.1:7474/greenroom-control/director-min.html` as a **1×1 px** source in a scene that is **always shown** (§4): OBS may suspend a source that is not shown |
 
 Every page fires the `VDO Sync` action on connect, so a source added mid-stream
 paints immediately.
 
 **Start Streamer.bot (its HTTP and WebSocket servers) before OBS.** A source or dock that loads
-while the HTTP server is down shows a failed page. Sources retry on their own; for a dock click
-**Retry** on that page, or use **Refresh cache of current page** on a source.
+while the HTTP server is down does not show the page. A source may stay blank for a long time (it retries
+with growing delays, and not while it is hidden): use **Refresh cache of current page**; for a dock click
+**Retry** on its "failed to load" page.
 
 **Audio (the four guest-slot sources only).** In each guest-slot source's properties tick
 **Control audio via OBS**, so the guest has a meter and a fader of their own in the mixer. To hear
@@ -204,7 +209,7 @@ nameplate, roster and director-min sources carry no audio.
 Existing** or **Paste (Reference)**, never with a new source or **Paste (Duplicate)**: every copy
 is one more viewer of that guest, and the guest's PC sends one more full video stream for it. A
 different look in another scene is a `nameplate.html?slot=N` source (it carries no video). The
-control page's **Open preview** costs one more stream while it is open.
+control page's per-slot **Open** button (the preview) costs one more stream while it is open.
 
 `?sbport=<n>` (a development knob: it points a page at a Streamer.bot WebSocket on
 another port) accepts only a port number from 1 to 65535, and the host is always
@@ -218,13 +223,15 @@ or an OBS **Custom Browser Dock** (Docks → Custom Browser Docks…).
 
 ### First run (a fresh install, once)
 
-1. Open `control.html`. Until Streamer.bot has a saved config the page says "No saved config has come back
-   from Streamer.bot: this is a fresh install, or VDO Sync is missing or not compiled" and pushes nothing on its
-   own. (If you had a config before and see this, `VDO Sync` is not compiled: fix that first, then **Import**
-   your backup.)
-2. Type the **Room** and the **Password** and press **Save**. On a fresh install the first Save asks once to
-   confirm ("Streamer.bot has not returned your saved config; saving now replaces it"): there is nothing to
-   replace yet, so confirm. If you did have a config, do not confirm: restore it instead.
+1. Open `control.html`. With `VDO Sync` compiled, a fresh install shows no warning: the action tells the page that
+   nothing is saved yet and the page pushes nothing on its own until you save. If the page instead says "No saved
+   config has come back from Streamer.bot: this is a fresh install, or VDO Sync is missing or not compiled", `VDO Sync`
+   did not answer: open the action and **Compile** it. If you had a config before, wait about 15 seconds or reload the
+   page: the saved config comes back by itself once `VDO Sync` answers. **Import** a backup only if it still does not
+   (a Streamer.bot reinstall or wiped globals).
+2. Type the **Room** and the **Password** and press **Save**. It goes straight through. Only when `VDO Sync` has not
+   answered does Save ask first ("Streamer.bot has not returned your saved config; saving now replaces it"): then do
+   **not** confirm unless you are sure nothing is saved; fix `VDO Sync` first.
 3. Tick **director enabled**. The pill goes `director: connecting…` and then `director: connected · N guests`.
    `director: idle` means no room is set or the box is not ticked. `director-min.html` says `no saved config yet`
    until a config has been saved once (and `connected to SB — waiting for state` while Streamer.bot has not answered).
@@ -240,7 +247,7 @@ What the invite options do ("Invite & Director Links"):
 
 - **password mode** — *hash (private)*: the link carries vdo.ninja's own 4-character check of the password
   (`&hash=`), which is **not** the password: each guest is still asked to type it, so use a long room name and a
-  password you can dictate. *plaintext*: the link carries `&password=…`. *none*: the link carries a bare
+  long password. *plaintext*: the link carries `&password=…`. *none*: the link carries a bare
   `&password`, so vdo.ninja asks the guest to type it (send it separately); a hash link that cannot be
   computed falls back to the same bare `&password`.
 - **fps**, **video bitrate**, **audio bitrate** cap what the guest *sends* (`&maxframerate`,
@@ -249,9 +256,9 @@ What the invite options do ("Invite & Director Links"):
   link: vdo.ninja has no sender-side flag for them.
 - **viewFlags** (Room & Director) are the flags Greenroom puts on the view address of each slot. The default is
   `&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish` (**reset to default** puts it back). A
-  leading `&` is added when you leave it off, `&solo` is always kept (a view without it would show the whole
-  room), and flags that load script or style, send events away, or name the room, stream or password are
-  dropped, with a warning under the field.
+  leading `&` is added when you leave it off, flags that load script or style, send events away, or name the room,
+  stream or password are dropped (with a warning under the field), and the overlay adds `&solo` to each slot's view
+  address unless the flags already hold `solo` or `scene` (a view without either would show the whole room).
 
 Auto-follow needs **one long-lived director** (it hosts the hidden
 vdo.ninja director iframe that re-resolves labels → streamIDs every 2.5 s): the
@@ -262,12 +269,12 @@ and has limited control; see "The Manage link" below.
 Deployment options, best first:
 
 1. **1×1 OBS Browser Source running `director-min.html`, in a scene that is always shown** —
-   recommended. A source retries a page that failed to load on its own, a dock waits on its "failed to load" page
-   until you click **Retry**, and the director keeps running whether or not the dock is open. **Keep it shown whenever slots are live**: OBS
-   throttles a source that is hidden, so its polling slows and auto-follow lags. Open `control.html` (the
+   recommended: the director keeps running whether or not the dock is open, and a source that loaded while Streamer.bot
+   was down needs only **Refresh cache of current page** (a dock needs **Retry**). Not yet confirmed live (§6). **Keep it shown whenever slots are live**: OBS
+   may suspend a source that is not shown, and auto-follow then stops following. Open `control.html` (the
    dock) only to edit, and **tick "director-min.html is my always-on director"** in the
-   dock's Room & Director section (it is saved with the config): the dock is then for editing, not a
-   second director. The dock then
+   dock's Room & Director section (it is saved with the config): the dock still connects its own hidden director, but only
+   director-min follows guests and pushes; the dock is for editing. The dock then
    sends only your own edits (carrying the stream IDs Streamer.bot holds, not
    its own view of them) and leaves following the guests, and adding them to
    the directory, to director-min; it warns "director-min is designated but not
@@ -443,7 +450,9 @@ is logged and the bridge keeps running. The bot token is never written to the lo
 
 ## 6. Live-validation results (2026-07-10, real Streamer.bot 1.0.4)
 
-**Tested versions.** Everything below was run on **Streamer.bot 1.0.4** on 2026-07-10. The action names and
+**Tested versions.** Everything below was run on **Streamer.bot 1.0.4** on 2026-07-10, with the first release (Greenroom
+0.1.0). The offline suites cover what changed since (the escaped-string broadcast format, the authentication handshake, the
+action pre-flights), but no later release has been run on a real Streamer.bot. The action names and
 the `CPH` calls the actions use were checked by name against **1.0.7**, and the offline suites do not depend on the
 Streamer.bot version, but this checklist has **not been run again** on 1.0.7 or on later 1.0.x, nor on OBS 33.0.1
 and its embedded browser (the dock checks in particular). Streamer.bot 1.1.x (argument isolation) has not
@@ -512,7 +521,8 @@ Do this only after **every** piece is updated (the overlay folder, the control f
    addresses from the control page: its Copy and Open buttons carry `sbpass` (already
    encoded) once the control page itself was opened with it. OBS keeps a source's
    address in the scene collection and a dock's in its own settings (the custom
-   browser docks list), so the password is in both; that is the accepted cost (and
+   browser docks list), so the password is in both, and the **Open** buttons (and a control page opened in a
+   browser tab) put the address in that browser's history too; that is the accepted cost (and
    the reason the password is never on the bus or in a log). A page that gets no
    greeting from Streamer.bot within about a second carries on without a password.
 3. Put `"sbPassword": "<password>"` into `sidecar/discord-tokens.json` (next to
@@ -534,16 +544,18 @@ enforced", it has none.
   the pill says `director: idle` until a room is set and the box ticked), action name typo (must match
   exactly), C# not compiled (open the action, Compile), or SB WS Authentication with Enforce ON and
   no `?sbpass=` on the source (the console says "SB auth enforced").
-- **A dock says "failed to load"** → Streamer.bot's HTTP server was not up when OBS loaded it: start
-  Streamer.bot first, then click **Retry** on the dock (sources retry on their own; or **Refresh cache of
-  current page**).
-- **"director: not responding, retrying"**, or `director: connecting…` that turns into "still connecting…"
-  after about 15 seconds → the hidden director is getting no reply from vdo.ninja: check the room name, the
-  password, and that vdo.ninja is reachable from this PC. Auto-follow is paused until the director answers.
+- **A dock says "failed to load"**, or a source stays blank after OBS started before Streamer.bot → Streamer.bot's HTTP
+  server was not up when OBS loaded it: start Streamer.bot first, then click **Retry** on the dock, or use
+  **Refresh cache of current page** on the source.
+- **"director: not responding"** (after about 8 seconds), then "…· check the room, the password and that vdo.ninja is
+  reachable" (after about 15), then "director: not responding, retrying" → the hidden director is getting no reply
+  from vdo.ninja: check the room name, the password, and that vdo.ninja is reachable from this PC. Auto-follow is
+  paused until the director answers. (`director-min.html` says "still connecting… check the room, the password and that
+  vdo.ninja is reachable".)
 - **A slot is empty but its nameplate shows** → refresh that guest-slot browser source (right-click →
   **Refresh cache of current page**).
-- **The slots stop following guests while the director-min source is hidden** → OBS throttles a source that is not
-  shown, so its polling slows. Keep the director-min source in a scene that is always shown (§4).
+- **The slots stop following guests while the director-min source is hidden** → OBS may suspend a source that is not
+  shown. Keep the director-min source in a scene that is always shown (§4).
 - **I hear guests but viewers don't** → the guest-slot source must have **Control audio via OBS** ticked
   (it is off by default), so the guest has its own mixer track and meter. If you hear the guest only because
   OBS monitors it, check that **Audio Monitoring** is **Monitor and Output** (**Monitor Only** keeps the guest

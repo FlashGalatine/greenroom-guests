@@ -211,11 +211,11 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   stereo, requireApproval, roomCap) are carried through but no longer used.
 - **`viewFlags`** is the flag string the overlay puts on each slot's solo view address (default
   `&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish`). The control pages and the overlay
-  (`vdo-url.js`, an identical copy in each folder) normalise it the same way: a missing leading `&` is added;
-  `&solo` is added unless `solo` or `scene` is already there (a view without it would show the whole room);
-  flags that load script or style, send events away, or name the room, the stream or the password
-  (`js`, `css`, `invite`, `api`, `room`, `password`, `hash`, `view`, …) are dropped, and everything after a
-  `#` is cut.
+  (`vdo-url.js`, an identical copy in each folder) read it the same way: the control page saves it with a missing
+  leading `&` added; flags that load script or style, send events away, or name the room, the stream or the password
+  (`js`, `css`, `invite`, `api`, `room`, `password`, `hash`, `view`, …) are dropped, and everything after a `#` is
+  cut. The overlay, when it builds a slot's view address, also adds `&solo` unless `solo` or `scene` is already there
+  (a view without either would show the whole room).
 - `label`, `enabled`, and `invite` exist so the persisted `vdo.state` doubles as
   the config store — the control page rehydrates from a `VDO Sync` replay and
   holds no authoritative state of its own. The guest overlay reads only

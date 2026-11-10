@@ -71,13 +71,14 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
    **Add Existing** or **Paste (Reference)**, never **Paste (Duplicate)** or a new source:
    every copy is one more full stream the guest's PC has to send.
 3. **First run.** Open `http://127.0.0.1:7474/greenroom-control/control.html`, type your room +
-   password and press **Save** (on a fresh install the first Save asks once to confirm: nothing is
-   saved yet), tick **director enabled**, send the guest link from **Invite & Director Links**
+   password and press **Save** (it asks to confirm only if `VDO Sync` has not answered: compile it first),
+   tick **director enabled**, send the guest link from **Invite & Director Links**
    (each guest is asked for a display name), and when a guest is live pick them in a **Guest
    Slot** dropdown. Keep exactly one director running: a 1×1 source running `director-min.html`
-   **in a scene that is always shown** (OBS throttles a hidden source, which slows its polling)
+   **in a scene that is always shown** (OBS may suspend a source that is not shown)
    is the recommended, set-and-forget one; tick "director-min.html is my always-on director" in
-   the dock, which is then for editing, not a second director. A second director page, the
+   the dock, which then only edits (it still connects its own hidden director, but only director-min follows guests).
+   Not yet confirmed live (setup guide, §6). A second director page, the
    invite builder's Manage link included, does not own the room (docs/STREAMERBOT-SETUP.md, §4,
    which also explains the invite options and what each state of the pill means).
 4. *(optional)* Give guests on-stream names + socials in **Nameplates & Guest
@@ -148,7 +149,7 @@ to keep a file copy:
   buttons. Export downloads a JSON snapshot; Import loads one and re-pushes it to
   SB (so it persists like an edit — it *replaces* the current config). Inside an **OBS dock**
   the download may save silently (OBS 33) or not at all (OBS 32 and older): the page then shows
-  the snapshot in a box under the buttons, with a **Copy** button: copy it and save it in a file yourself.
+  the snapshot in a box in the Room & Director section, with a **Copy** button: copy it and save it in a file yourself.
 - **CLI** (your real Streamer.bot must be running; it needs Node 22.12+ and a one-time `npm install --omit=dev` in this folder, which installs `ws`. The development mock is not a place to keep a backup):
   ```
   npm run backup                                   # → backups/vdo-state-<timestamp>.json
@@ -180,14 +181,18 @@ roster is intentionally not snapshotted.
    `quit` onwards; it leaves the call and exits), otherwise end its `node.exe` in Task Manager (a hidden one that
    `Discord Bridge Start` launched too).
 3. **Extract the new version over the old folder** (the download holds no `sidecar/discord-tokens.json`,
-   `sidecar/discord-voice-config.json` or `backups/`, so extracting over the folder keeps them). If you extract
-   into a new folder instead, first copy those three across, and then point the Streamer.bot Path → Folder
-   maps and `BUNDLE` (below) at the folder you now use.
+   `sidecar/discord-voice-config.json` or `backups/`, so extracting over the folder keeps them; an edited
+   `start-discord-bridge.bat` is replaced, so put your options back). If you extract into a new folder instead, first
+   copy those across (and any `vdo-state-*.json` backups lying in the root), point the Streamer.bot Path → Folder maps
+   and `BUNDLE` at the new folder, and delete the old folder once it works: it still holds the token file and the backups.
 4. Run `npm install` in `sidecar/` again (and in this folder once, `npm install --omit=dev`, for the backup CLI).
-5. **Re-paste the C# actions the CHANGELOG lists** and compile each. After re-pasting `Discord Bridge Start`,
-   **set `BUNDLE` again**: the pasted code carries the placeholder. The HTTP path maps and `BUNDLE` stay on the folder in use.
-6. Start the bridge again, reload the dock and `director-min`, and **refresh every Greenroom OBS source** (a page that
-   was loaded before the update keeps running the old code until it is reloaded).
+5. **Reload the dock and `director-min`, and refresh every Greenroom OBS source first** (a page that was loaded before
+   the update keeps running the old code until it is reloaded), **then** re-paste: for the three state actions the
+   order matters (setup guide, §2: an old page cannot read the new frames).
+6. **Re-paste the C# actions the CHANGELOG lists** and compile each. After re-pasting `Discord Bridge Start`,
+   **set `BUNDLE` again** (the pasted code carries the placeholder) and put back what you had added to
+   `psi.Arguments` (`--sb-ws-url`, `--guard-port`). The HTTP path maps and `BUNDLE` stay on the folder in use.
+7. Start the bridge again.
 
 ## Verification (no Streamer.bot, Discord, or camera needed)
 
@@ -238,7 +243,8 @@ OBS-dock CEF question) was exercised on **2026-07-10** on a real Streamer.bot **
 rig — including the OBS Custom Browser Dock running the director, a real-room
 drop/rejoin auto-follow, and live Discord speaking events. Not exercised live: Streamer.bot's
 action queue under a rowdy multi-speaker feed, the standalone 1×1 `director-min` source,
-multi-director safety, guest audio. **Tested on:** Streamer.bot 1.0.4 (live, that date). The checklist has
+multi-director safety, guest audio. **Tested on:** Streamer.bot 1.0.4 with Greenroom 0.1.0 (live, that date); no later release has been run on
+a real Streamer.bot. The checklist has
 **not been re-run** on Streamer.bot 1.0.7 or OBS 33.0.1 (the action names and `CPH` calls were checked against 1.0.7
 by name only); recheck it after a Streamer.bot or OBS major update, and 1.1.x (argument isolation) has not been
 validated. Results: [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-results-2026-07-10-real-streamerbot-104).
