@@ -191,6 +191,10 @@ npm run mock:bridge  # token-less fake Discord bridge (drives the roster live). 
                      #      (bash)        SB_WS_URL=ws://127.0.0.1:8080/ npm run mock:bridge -- --allow-real-sb
 ```
 
+The C# in `actions/` is only text-checked by `npm run verify` (section [6]); where a .NET Framework C# compiler is found,
+`npm run verify:cs` (the three state actions) and verify section [6b] (Discord Bridge Start and Discord Voice Command) also compile
+it and run it against a stub of Streamer.bot. No suite compiles it inside Streamer.bot, and the mock never launches the bridge.
+
 The mocks prove the protocol and the pixels; what only a live session can prove
 (real vdo.ninja shapes, real bot voice handshake, SB action-queue latency, the
 OBS-dock CEF question) was then exercised on a real Streamer.bot 1.0.4 rig —

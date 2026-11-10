@@ -16,8 +16,10 @@ const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7477;
 const WS_PORT = Number(process.env.SB_WS_PORT) || 8083;
 const BASE = `http://127.0.0.1:${HTTP_PORT}`;
 
-const STREAMER = '110457699291906048';
-const embed = (n) => `https://cdn.discordapp.com/embed/avatars/${n}.png`;
+const STREAMER = '100000000000000001';
+// Neutral local avatars (a letter on a flat colour as a data: SVG): the shots show no Discord default avatar and load nothing from Discord.
+const initial = (ch, bg) => 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="${bg}"/><text x="32" y="44" font-family="Arial,sans-serif" font-size="34" font-weight="bold" text-anchor="middle" fill="#fff">${ch}</text></svg>`);
+const embed = (n) => [initial('A', '#3a6ea5'), initial('G', '#8a5a9e'), initial('H', '#4f8a5b')][n - 1];
 
 function startMock() {
   return new Promise((res, rej) => {
@@ -59,6 +61,7 @@ async function main() {
     prod = await producer();
 
     prod.doAction('VDO Push', { payload: JSON.stringify({
+      // 'greenroom-demo' / 'demo' are throwaway values for these screenshots: never use them for a real session.
       enabled: true, room: 'greenroom-demo', password: 'demo',
       viewFlags: '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish',
       slots: [
@@ -85,15 +88,16 @@ async function main() {
       settings: { streamerUserId: STREAMER, avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
       rpc: { enabled: true, hasToken: true, error: null },
       favorites: [
-        { id: 'f1', name: 'Commentary', serverId: '259501535484968970', channelId: '222' },
-        { id: 'f2', name: 'Lobby Night', serverId: '259501535484968970', channelId: '333' },
+        { id: 'f1', name: 'Commentary', serverId: '500000000000000001', channelId: '222' },
+        { id: 'f2', name: 'Lobby Night', serverId: '500000000000000001', channelId: '333' },
       ],
-      current: { serverId: '259501535484968970', channelId: '222' },
+      current: { serverId: '500000000000000001', channelId: '222' },
     }) });
 
     const shoot = async (url, viewport, file, settleMs = 1200, fullPage = false) => {
       const page = await browser.newPage({ viewport, deviceScaleFactor: 2 });
-      await page.route(/vdo\.ninja/, (r) => r.abort()); // keep shots offline (avatars still load from Discord CDN)
+      await page.route(/vdo\.ninja/, (r) => r.abort()); // keep shots offline
+      await page.route(/discordapp\.com/, (r) => r.abort()); // nothing is loaded from Discord's CDN either
       await page.goto(url, { waitUntil: 'load' });
       await page.evaluate(() => document.fonts.ready);
       await new Promise((r) => setTimeout(r, settleMs));

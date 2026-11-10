@@ -240,7 +240,7 @@
     <div id="vdoDirectory" class="dir-list"></div>
     <div class="hint" style="margin:8px 0">Rows show the <b>on-stream display name</b> — click a row to
       edit its match keys (vdo.ninja <b>label</b> and/or Discord user) and its rotating social handles
-      (one per line: <code>platform handle</code>, e.g. <code>twitch TyrannyTimeTV</code>). Matched
+      (one per line: <code>platform handle</code>, e.g. <code>twitch SampleStreamer</code>). Matched
       guests get a lower-third inside their slot overlay (hide with <code>?nameplate=0</code>) and on
       the standalone <code>nameplate.html?slot=N</code> source. No entry &rarr; no nameplate.</div>
     <div class="row">
@@ -1823,7 +1823,7 @@
       socialsTa.className = 'vdo-dir-socials';
       socialsTa.rows = 2;
       socialsTa.spellcheck = false;
-      socialsTa.placeholder = 'twitch TyrannyTimeTV\nbluesky @john.bsky.social\n(one per line: platform, then handle)';
+      socialsTa.placeholder = 'twitch SampleStreamer\nbluesky @john.bsky.social\n(one per line: platform, then handle)';
       socialsTa.title = 'One per line: platform, then handle. ' + SOCIAL_PLATFORMS; // a placeholder is gone once something is typed
       socialsTa.setAttribute('aria-label', `Social handles for ${who}`);
       socialsTa.value = GRDir.socialsToText(entry.socials);

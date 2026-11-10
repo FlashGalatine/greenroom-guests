@@ -37,7 +37,7 @@ const RECONNECT_MS = 3000;
 const SB_PASSWORD = process.env.GREENROOM_SB_PASSWORD || ''; // for a mock Streamer.bot started with SB_PASSWORD (never printed)
 const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
 
-const STREAMER_ID = '110457699291906048';
+const STREAMER_ID = '100000000000000001';
 
 const DEFAULT_SETTINGS = {
   streamerUserId: STREAMER_ID,

@@ -107,7 +107,7 @@ function producer(port = WS_PORT, password = '') {
 }
 
 const VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
-const STREAMER = '110457699291906048';
+const STREAMER = '100000000000000001';
 const slot = (n, extra) => Object.assign({ slot: n, label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' }, extra);
 
 // Guest directory: 'alpha' is lowercase ON PURPOSE — the live label is 'ALPHA',
@@ -307,7 +307,7 @@ async function main() {
     check('mute + deaf badges shown on the right members', badges.mute && badges.deaf && badges.muteBadgeShown && badges.deafBadgeShown, JSON.stringify(badges));
     // The sync replay carries DISCORD_SLOT_VDO.directory, so the streamer's chip
     // is labeled with the directory override, not the live Discord name.
-    const label = await rosterPage.evaluate(() => document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent);
+    const label = await rosterPage.evaluate(() => document.querySelector(`.member[data-uid="${'100000000000000001'}"] .name`)?.textContent);
     check("directory override labels the streamer chip ('Ashe of Outland')", label === 'Ashe of Outland', label);
     const rawLabel = await rosterPage.evaluate(() => document.querySelector('.member[data-uid="200000000000000001"] .name')?.textContent);
     check("no directory entry → live username ('Guest One')", rawLabel === 'Guest One', rawLabel);
@@ -471,7 +471,7 @@ async function main() {
     }, null, 5000);
     check(`search "bravo" filters ${totalRows} rows down to the one match`, searched,
       await ctrlPage.evaluate(() => document.querySelectorAll('.vdo-dir-row').length));
-    await ctrlPage.fill('#dirSearch', '110457699291906048'); // by Discord ID
+    await ctrlPage.fill('#dirSearch', '100000000000000001'); // by Discord ID
     const searchedById = await wait(ctrlPage, () => {
       const rows = [...document.querySelectorAll('.vdo-dir-row')];
       return rows.length === 1 && rows[0].querySelector('input.vdo-dir-display')?.value === 'Ashe of Outland';
@@ -914,11 +914,11 @@ async function main() {
       await sleep(700);
       return dlgI.slice();
     };
-    // A numeric ID is already rounded by JSON.parse (110457699291906048 → 110457699291906050).
-    let r = await importObj('{"room":"r","directory":[{"vdoLabel":"A","discordUserId":110457699291906048,"displayName":"Alpha"}]}');
+    // A numeric ID is already rounded by JSON.parse (100000000000000001 → 100000000000000000).
+    let r = await importObj('{"room":"r","directory":[{"vdoLabel":"A","discordUserId":100000000000000001,"displayName":"Alpha"}]}');
     check('R9b: a numeric discordUserId in a directory entry is rejected with a message (not coerced)',
       r.length === 1 && r[0].type === 'alert' && /Discord/i.test(r[0].msg) && /number/i.test(r[0].msg), JSON.stringify(r));
-    r = await importObj('{"room":"r","slots":[{"slot":1,"label":"A","discordUserId":110457699291906048}]}');
+    r = await importObj('{"room":"r","slots":[{"slot":1,"label":"A","discordUserId":100000000000000001}]}');
     check('R9b: a numeric discordUserId in a slot is rejected too', r.length === 1 && r[0].type === 'alert' && /Discord/i.test(r[0].msg), JSON.stringify(r));
     r = await importObj({ room: 123, slots: [] });
     check('R9b: a non-string room is rejected', r.length === 1 && r[0].type === 'alert' && /room/i.test(r[0].msg), JSON.stringify(r));
@@ -1159,7 +1159,7 @@ async function main() {
       await rB.goto(`${wireS.api.base}/overlay/discord-roster.html?layout=row&sbport=${wireS.ws}`, { waitUntil: 'load' });
       check('R10b: the roster renders discordVoiceJson and uses the directory name from vdoninjaJson',
         await wait(rB, () => document.querySelectorAll('#roster .member').length === 3
-          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
+          && document.querySelector(`.member[data-uid="${'100000000000000001'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
       const nB = await newPage(browser, { width: 420, height: 120 });
       await nB.goto(`${wireS.api.base}/overlay/nameplate.html?slot=1&sbport=${wireS.ws}`, { waitUntil: 'load' });
       check('R10b: the standalone nameplate renders a string-field frame',
@@ -1175,7 +1175,7 @@ async function main() {
         await gB.evaluate(() => document.getElementById('frame')?.getAttribute('src')));
       check('R10b: …and the roster keeps its members and name',
         await rB.evaluate(() => document.querySelectorAll('#roster .member').length === 3
-          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland'));
+          && document.querySelector(`.member[data-uid="${'100000000000000001'}"] .name`)?.textContent === 'Ashe of Outland'));
       await gB.close(); await rB.close(); await nB.close();
 
       // The same overlays against the OLD wire (a nested vdoninja / discordVoice object, as an actions paste
@@ -1190,7 +1190,7 @@ async function main() {
       await rO.goto(`${wireO.api.base}/overlay/discord-roster.html?layout=row&sbport=${wireO.ws}`, { waitUntil: 'load' });
       check('R10b: the roster still renders the old wire (members and the directory name)',
         await wait(rO, () => document.querySelectorAll('#roster .member').length === 3
-          && document.querySelector(`.member[data-uid="${'110457699291906048'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
+          && document.querySelector(`.member[data-uid="${'100000000000000001'}"] .name`)?.textContent === 'Ashe of Outland', null, 6000));
       await gO.close(); await rO.close();
       const plain = await startExtra({});
       await seedBoth(plain, { ...SEED_CONN, slots: [null, slot(2, { label: 'BRAVO', streamID: 'bbb222' }), slot(3), slot(4)] });

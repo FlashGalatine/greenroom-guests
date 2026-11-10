@@ -13,7 +13,7 @@ export function fuzzRows(seedStart = 12345) {
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
   const pick = (a) => a[Math.floor(rnd() * a.length)];
   const NASTY = ['', BS, BS + BS, '"', BS + '"', '}', ']', '{', '[', '},"type":"x"', '\n', '\r\n', '\t', '\u0000', '\u001f', '\u007f',
-    ' ', ' ', '😀', '\ud800', '\udfff', 'é', '日本', '</script>', BS + 'u0041', 'TyrannyTimeTV', ' ', '"}', BS + '"}', 'a' + BS, '﻿'];
+    ' ', ' ', '😀', '\ud800', '\udfff', 'é', '日本', '</script>', BS + 'u0041', 'SampleStreamer', ' ', '"}', BS + '"}', 'a' + BS, '﻿'];
   const str = () => { let s = ''; const n = Math.floor(rnd() * 4); for (let i = 0; i < n; i++) s += pick(NASTY); return s; };
   const num = () => pick([0, -0, 1, -1, 3.14, 1e21, 1e-7, -2.5e-300, 9007199254740993, 123456789012, 0.1]);
   const val = (d) => {
@@ -27,7 +27,7 @@ export function fuzzRows(seedStart = 12345) {
   const VDO = { enabled: true, room: 'myroom', password: 'p"w' + BS + 'd', viewFlags: '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish',
     slots: [1, 2, 3, 4].map((n) => ({ slot: n, label: 'G' + n, streamID: 'abc' + n, mirror: n % 2 === 0, mode: 'webcam', discordUserId: '' })),
     invite: { passwordMode: 'hash', label: '', push: '', stereo: false, extraFlags: '&x=1' },
-    directory: [{ vdoLabel: 'John-T', discordUserId: '', displayName: 'John "the" Tyrant 😀', auto: false, socials: [{ platform: 'twitch', handle: 'TyrannyTimeTV' }] }],
+    directory: [{ vdoLabel: 'John-T', discordUserId: '', displayName: 'John "the" Tyrant 😀', auto: false, socials: [{ platform: 'twitch', handle: 'SampleStreamer' }] }],
     directoryAutoAdd: true, directoryIgnored: [] };
   const DISC = { channelId: '222', connected: true, hostInChannel: true, users: { '111': { name: 'Ashe', avatarUrl: 'https://cdn.discordapp.com/x.png', speaking: true } },
     settings: { exitOnSbClose: true }, rpc: { enabled: false, hasToken: false, error: null }, favorites: [{ id: 'fav1', name: 'Main Hang', serverId: '111', channelId: '222' }], current: { serverId: '111', channelId: '222' } };

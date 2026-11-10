@@ -72,8 +72,9 @@
 //       SB_DROP=1               accept each connection, greet it, answer no request, and close it ~100 ms later
 //       GET /mock/conns[?clear=1] -> the WebSocket connect times, [{t}]
 //
-//   • WebSocket Server on :8084 (not SB's 8080) — speaks SB's envelope and implements the FIVE
-//     Greenroom action semantics (mirroring the C# in actions/):
+//   • WebSocket Server on :8084 (not SB's 8080) — speaks SB's envelope and implements the semantics of four of
+//     the five Greenroom actions (mirroring the C# in actions/). Discord Bridge Start is NOT modelled: the mock
+//     acks it like any known action and launches nothing, so the launch is only ever tested by verify [6b]:
 //       VDO Push              broadcast {type:'vdoninja:update', vdoninjaJson:'<payload>'}, THEN
 //                             cache args.payload as vdo.state (persisted analog)
 //       Discord Voice Push    broadcast {type:'discord:voice:update', discordVoiceJson:'<payload>'},

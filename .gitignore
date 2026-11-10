@@ -12,13 +12,10 @@ sidecar/*.corrupt-*
 backups/
 
 # verify scratch files
-.verify-bridge-config.json
-.verify-bridge-tokens.json
-.verify-backup.json
-.verify-backup-object.json
+.verify-*.json
 
 # verify-render screenshots (docs/ screenshots ARE committed)
-roster-check.png
-control-check.png
-nameplate-check.png
-.verify-backup-oor.json
+/*-check.png
+
+# the state files the backup tools may leave at the root
+vdo-state-*.json

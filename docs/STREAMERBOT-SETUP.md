@@ -356,7 +356,8 @@ is logged and the bridge keeps running. The bot token is never written to the lo
 
 ## 6. Live-validation results (2026-07-10, real Streamer.bot 1.0.4)
 
-What the offline harness (64 protocol + 23 render checks) **cannot** prove was
+What the offline harness **cannot** prove (at that date it was 64 protocol + 23 render checks; the suites are far larger now, and the
+counts of each release are in the CHANGELOG) was
 exercised on a live rig. Outcomes, faithfully:
 
 - [x] **Real SB wiring** — the four core actions compile and broadcast (verified

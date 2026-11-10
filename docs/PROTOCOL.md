@@ -124,7 +124,7 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   "directory": [                    // guest directory → nameplates (optional)
     { "vdoLabel": "John-T", "discordUserId": "",
       "displayName": "John the Tyrant", "auto": false,
-      "socials": [ { "platform": "twitch", "handle": "TyrannyTimeTV" } ] }
+      "socials": [ { "platform": "twitch", "handle": "SampleStreamer" } ] }
   ],
   "directoryAutoAdd": true,         // auto-populate new guests (absent → true)
   "directoryIgnored": [ "vdo:lurker", "discord:200000000000000009" ],
@@ -287,7 +287,7 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
 
 ```jsonc
 {
-  "channelId": "1197…" | null,
+  "channelId": "…" | null,
   "connected": true,               // bot logged in to the gateway
   "hostInChannel": true,           // bot joined + receiving in the channel
   "users": {

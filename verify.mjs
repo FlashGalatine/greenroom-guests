@@ -19,6 +19,8 @@
 //   [6] HTTP + tripwires — SB-style Path->Folder serving, load-bearing strings in
 //       every wired file (incl. the nameplate surfaces + the director-min
 //       directory strip-guard), and control.html must NOT contain "botToken".
+//   [6b] the two launching C# actions are compiled and run against a stubbed Streamer.bot.
+//   [6c] fixtures and packaging: no real-looking Discord IDs, the screenshot tool is offline, package.json is private.
 //
 // It does NOT render pixels; verify-render.mjs does that in a real browser.
 
@@ -224,7 +226,7 @@ const VDO_PAYLOAD = {
   slots: [
     { slot: 1, label: 'ALPHA', streamID: 'aaa111', mirror: false, mode: 'webcam', discordUserId: '' },
     { slot: 2, label: 'BRAVO', streamID: 'bbb222', mirror: true, mode: 'webcam', discordUserId: '' },
-    { slot: 3, label: '', streamID: '', mirror: false, mode: 'discord', discordUserId: '110457699291906048' },
+    { slot: 3, label: '', streamID: '', mirror: false, mode: 'discord', discordUserId: '100000000000000001' },
     { slot: 4, label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' },
   ],
   invite: {
@@ -235,24 +237,24 @@ const VDO_PAYLOAD = {
   directory: [
     { vdoLabel: 'ALPHA', discordUserId: '', displayName: 'Alpha Prime',
       socials: [{ platform: 'twitch', handle: 'AlphaPrimeTV' }, { platform: 'bluesky', handle: '@alpha.bsky' }] },
-    { vdoLabel: '', discordUserId: '110457699291906048', displayName: 'Ashe of Outland', socials: [], auto: true },
+    { vdoLabel: '', discordUserId: '100000000000000001', displayName: 'Ashe of Outland', socials: [], auto: true },
   ],
   directoryAutoAdd: true,
   directoryIgnored: ['discord:200000000000000009', 'vdo:leavemealone'],
 };
 
 const DISCORD_PAYLOAD = {
-  channelId: '1197596470245871696',
+  channelId: '600000000000000001',
   connected: true,
   hostInChannel: true,
   users: {
-    '110457699291906048': { speaking: false, username: 'Ashe', avatarUrl: 'https://cdn.discordapp.com/embed/avatars/1.png', mute: false, deaf: false },
+    '100000000000000001': { speaking: false, username: 'Ashe', avatarUrl: 'https://cdn.discordapp.com/embed/avatars/1.png', mute: false, deaf: false },
     '200000000000000001': { speaking: true, username: 'Guest One', avatarUrl: 'https://cdn.discordapp.com/embed/avatars/2.png', mute: true, deaf: false },
   },
-  settings: { streamerUserId: '110457699291906048', avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
+  settings: { streamerUserId: '100000000000000001', avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
   rpc: { enabled: true, hasToken: true, error: null },
-  favorites: [{ id: 'fav1', name: 'NFC Commentary', serverId: '259501535484968970', channelId: '1197596470245871696' }],
-  current: { serverId: '259501535484968970', channelId: '1197596470245871696' },
+  favorites: [{ id: 'fav1', name: 'Commentary Room', serverId: '500000000000000001', channelId: '600000000000000001' }],
+  current: { serverId: '500000000000000001', channelId: '600000000000000001' },
 };
 
 // The C# actions explain themselves in long comments that quote the very strings these checks look for, so a
@@ -327,13 +329,13 @@ async function main() {
       typeof w1.vdoninjaJson === 'string' && w1.vdoninjaJson === JSON.stringify(VDO_PAYLOAD) && !('vdoninja' in w1), JSON.stringify(w1).slice(0, 160));
     check('room/password/viewFlags carried', v1.vdoninja.room === 'testroom' && v1.vdoninja.password === 'pw1' && v1.vdoninja.viewFlags.includes('&solo'));
     check('slot 1 label+streamID intact (superset field `label`)', v1.vdoninja.slots[0].label === 'ALPHA' && v1.vdoninja.slots[0].streamID === 'aaa111');
-    check('slot 3 discord mode + discordUserId intact', v1.vdoninja.slots[2].mode === 'discord' && v1.vdoninja.slots[2].discordUserId === '110457699291906048');
+    check('slot 3 discord mode + discordUserId intact', v1.vdoninja.slots[2].mode === 'discord' && v1.vdoninja.slots[2].discordUserId === '100000000000000001');
     check('invite block carried (control-page rehydration source)', v1.vdoninja.invite && v1.vdoninja.invite.passwordMode === 'hash' && v1.vdoninja.enabled === true);
     check('directory carried (guest-directory/nameplate source)',
       Array.isArray(v1.vdoninja.directory) && v1.vdoninja.directory.length === 2
       && v1.vdoninja.directory[0].displayName === 'Alpha Prime'
       && v1.vdoninja.directory[0].socials[0].platform === 'twitch'
-      && v1.vdoninja.directory[1].discordUserId === '110457699291906048');
+      && v1.vdoninja.directory[1].discordUserId === '100000000000000001');
     check('auto-add companions carried (auto flag + directoryAutoAdd + directoryIgnored)',
       v1.vdoninja.directory[1].auto === true && v1.vdoninja.directoryAutoAdd === true
       && Array.isArray(v1.vdoninja.directoryIgnored) && v1.vdoninja.directoryIgnored.length === 2
@@ -357,7 +359,7 @@ async function main() {
     check('users map intact (2 users, mute flag)', Object.keys(d1.discordVoice.users).length === 2 && d1.discordVoice.users['200000000000000001'].mute === true);
     check('settings block carried (roster overlay input)', d1.discordVoice.settings && d1.discordVoice.settings.accent === 'cyan' && d1.discordVoice.settings.hideWhenAbsent === true);
     check('rpc block carried (control-page status source)', d1.discordVoice.rpc && d1.discordVoice.rpc.hasToken === true);
-    check('favorites + current carried', d1.discordVoice.favorites[0].name === 'NFC Commentary' && d1.discordVoice.current.channelId === '1197596470245871696');
+    check('favorites + current carried', d1.discordVoice.favorites[0].name === 'Commentary Room' && d1.discordVoice.current.channelId === '600000000000000001');
 
     const shimC = await runShim();
     await shimC.inbox.next(4000, byType('vdoninja:update'), 'replay vdoninja:update');
@@ -830,14 +832,14 @@ async function main() {
     const D = globalThis.GRDir;
 
     const sanitized = D.sanitizeDirectory([
-      { vdoLabel: '  ALPHA  ', discordUserId: '<@110457699291906048>', displayName: ' Alpha Prime ',
+      { vdoLabel: '  ALPHA  ', discordUserId: '<@100000000000000001>', displayName: ' Alpha Prime ',
         socials: [{ platform: ' Twitch ', handle: ' AlphaPrimeTV ' }, { platform: '', handle: 'dropme' }], auto: 1 },
       { vdoLabel: 'NONAME', discordUserId: '', displayName: '   ' },     // no displayName → dropped
       { vdoLabel: '', discordUserId: '', displayName: 'No Keys' },       // no match key → dropped
       null,
     ]);
     check('sanitizeDirectory: trims, digit-strips ids, lowercases platforms, drops keyless/nameless',
-      sanitized.length === 1 && sanitized[0].vdoLabel === 'ALPHA' && sanitized[0].discordUserId === '110457699291906048'
+      sanitized.length === 1 && sanitized[0].vdoLabel === 'ALPHA' && sanitized[0].discordUserId === '100000000000000001'
       && sanitized[0].displayName === 'Alpha Prime' && sanitized[0].socials.length === 1
       && sanitized[0].socials[0].platform === 'twitch' && sanitized[0].auto === true,
       JSON.stringify(sanitized));
@@ -868,9 +870,9 @@ async function main() {
     check('carrySocialExtras gives an unchanged social its unknown fields back, and a new one none',
       carried[0].url === 'u1' && !('url' in carried[1]), JSON.stringify(carried));
 
-    const ign = D.sanitizeIgnored(['vdo:ALPHA', 'vdo:alpha', 'discord:110457699291906048', 'discord:nope', 'junk', '', null]);
+    const ign = D.sanitizeIgnored(['vdo:ALPHA', 'vdo:alpha', 'discord:100000000000000001', 'discord:nope', 'junk', '', null]);
     check('sanitizeIgnored: lowercases labels, dedupes, sorts, drops junk keys',
-      JSON.stringify(ign) === JSON.stringify(['discord:110457699291906048', 'vdo:alpha']), JSON.stringify(ign));
+      JSON.stringify(ign) === JSON.stringify(['discord:100000000000000001', 'vdo:alpha']), JSON.stringify(ign));
     check('ignore keys are built the same way the pages match them',
       D.labelKey(' Alpha ') === 'vdo:alpha' && D.userKey('<@1104>') === 'discord:1104');
 
@@ -882,7 +884,7 @@ async function main() {
       D.parseSocialsText(D.socialsToText(socialsRt)).length === 3);
 
     const AUTO_USERS = {
-      '110457699291906048': { username: 'Ashe' },
+      '100000000000000001': { username: 'Ashe' },
       '200000000000000001': { username: 'Guest One' },
       '200000000000000009': { username: 'Blocked Guy' },   // in directoryIgnored below
     };
@@ -908,19 +910,19 @@ async function main() {
     check('autoPopulate: a Discord name matching a CURATED entry does not fill its id (decision 6): no twin, the entry untouched, exactly one suggestion reported',
       auto1.directory.filter((e) => e.displayName === 'Ashe of Outland').length === 1
       && auto1.directory.find((e) => e.displayName === 'Ashe of Outland').discordUserId === ''
-      && auto1.suggested.length === 1 && auto1.suggested[0].id === '110457699291906048' && auto1.suggested[0].index === 1);
+      && auto1.suggested.length === 1 && auto1.suggested[0].id === '100000000000000001' && auto1.suggested[0].index === 1);
     check('autoPopulate: reported changed=true and left the operator\'s names alone',
       auto1.changed === true && auto1.directory[0].displayName === 'Alpha Prime' && auto1.directory[0].auto === false);
     const auto2 = D.autoPopulate({ directory: auto1.directory, ignored: ['discord:200000000000000009', 'vdo:lurker'],
       labels: ['ALPHA', 'BRAVO'], users: AUTO_USERS });
     // skip (GRN-65 step 2): labels / users this page has already auto-added are not appended a second time, but a Discord id is still filled in
     const sk = D.autoPopulate({ directory: [{ vdoLabel: '', discordUserId: '', displayName: 'Ashe of Outland', socials: [], auto: true }], ignored: [],
-      labels: ['BRAVO', 'CHARLIE'], users: { '110457699291906048': { username: 'Ashe of Outland' }, '200000000000000001': { username: 'Guest One' } },
+      labels: ['BRAVO', 'CHARLIE'], users: { '100000000000000001': { username: 'Ashe of Outland' }, '200000000000000001': { username: 'Guest One' } },
       skip: ['vdo:BRAVO', 'discord:200000000000000001'] });
     check('autoPopulate: a label or user in opts.skip is not appended again (a label Streamer.bot rewrites cannot loop)',
       !sk.directory.some((e) => /^bravo$/i.test(e.vdoLabel)) && !sk.directory.some((e) => e.discordUserId === '200000000000000001') && sk.directory.some((e) => e.vdoLabel === 'CHARLIE'), JSON.stringify(sk.directory));
     check('autoPopulate: …while skip leaves the fill of a Discord id on an existing entry alone',
-      sk.directory.find((e) => e.displayName === 'Ashe of Outland').discordUserId === '110457699291906048');
+      sk.directory.find((e) => e.displayName === 'Ashe of Outland').discordUserId === '100000000000000001');
     check('autoPopulate is a fixpoint: a second pass over the same room changes nothing',
       auto2.changed === false && JSON.stringify(auto2.directory) === JSON.stringify(auto1.directory));
     const auto3 = D.autoPopulate({ directory: autoBase, ignored: ['discord:200000000000000009', 'vdo:lurker'],
@@ -1540,6 +1542,44 @@ async function main() {
     check('control.html: exit-on-SB-close toggle wired (exitOnSbClose set-setting)', ctrlBody.includes('exitOnSbClose'));
     check('control.html: config Export/Import wired (backup buttons + file input + envelope)',
       ctrlBody.includes('btnCfgExport') && ctrlBody.includes('cfgImportFile') && ctrlBody.includes('greenroom-vdo-backup'));
+
+    // ── 6c. fixtures and packaging (Sprint 19: GRN-47, 46, 45, 229) ─────────────
+    console.log('\n[6c] Fixtures and packaging: no real-looking Discord IDs, the shot tool is offline, the packaging guards');
+    {
+      // A tracked text file may hold a 17-20 digit number only if it is plainly made up: nine or more zeros in a row, one repeated
+      // digit, or a run that counts up (…234567890123…). The one bare-number favourite fixture is named on purpose.
+      const synthetic = (d) => /0{9,}/.test(d) || /^(\d)\1+$/.test(d) || [...d.slice(1)].every((c, i, a) => i === 0 || Number(c) === (Number(a[i - 1]) + 1) % 10) || d === '223456789012345679';
+      const textExt = /\.(mjs|cjs|js|html|md|json|cs|bat|txt|yml|yaml)$/i;
+      const walk = async (dir, acc) => {
+        for (const e of await readdir(dir, { withFileTypes: true })) {
+          if (e.name === 'node_modules' || e.name === '.git' || e.name === 'backups' || e.name.startsWith('.verify-') || e.name === 'package-lock.json') continue;
+          const p = resolve(dir, e.name);
+          if (e.isDirectory()) await walk(p, acc); else if (textExt.test(e.name)) acc.push(p);
+        }
+        return acc;
+      };
+      const idFiles = await walk(__dirname, []);
+      const odd = [];
+      for (const f of idFiles) {
+        const t = await readFile(f, 'utf8');
+        for (const m of t.matchAll(/(?<![\d.])\d{17,20}(?!\d)/g)) if (!synthetic(m[0])) odd.push(f.slice(__dirname.length + 1) + ': ' + m[0]);
+      }
+      check('GRN-47: no source, test or doc file holds a real-looking Discord ID (every 17-20 digit number is a made-up one)', idFiles.length > 30 && odd.length === 0, odd.slice(0, 5).join('; '));
+      // the three IDs the earlier fixtures held, written in pieces so this file does not carry them
+      const old = ['1104576' + '99291906048', '2595015' + '35484968970', '11975964' + '70245871696'];
+      const withOld = [];
+      for (const f of idFiles) { const t = await readFile(f, 'utf8'); if (old.some((o) => t.includes(o))) withOld.push(f.slice(__dirname.length + 1)); }
+      check('GRN-47: the three IDs the old fixtures held are gone from every file', withOld.length === 0, withOld.join(', '));
+      const shots = await readFile(resolve(__dirname, 'tools', 'shots.mjs'), 'utf8');
+      check('GRN-45/46: tools/shots.mjs shows neutral local avatars, aborts any request to Discord\'s CDN, and says its room and password are throwaway',
+        !/https:\/\/cdn\.discordapp\.com/.test(shots) && /page\.route\(\/discordapp\\\.com\//.test(shots) && /data:image\/svg\+xml/.test(shots) && /throwaway/.test(shots) && /never use them for a real session/.test(shots));
+      const pkgJson = JSON.parse(await readFile(resolve(__dirname, 'package.json'), 'utf8'));
+      const gi = (await readFile(resolve(__dirname, '.gitignore'), 'utf8')).split(/\r?\n/);
+      const ga = existsSync(resolve(__dirname, '.gitattributes')) ? (await readFile(resolve(__dirname, '.gitattributes'), 'utf8')).split(/\r?\n/) : [];
+      check('GRN-229: package.json is "private" (npm publish refuses), .gitignore holds the one .verify-*.json pattern, /*-check.png and vdo-state-*.json, and .gitattributes keeps *.bat at CRLF',
+        pkgJson.private === true && gi.includes('.verify-*.json') && gi.includes('/*-check.png') && gi.includes('vdo-state-*.json') && !gi.includes('.verify-bridge-config.json') && ga.includes('*.bat text eol=crlf'),
+        JSON.stringify({ private: pkgJson.private, gi: gi.filter((l) => /verify|check|vdo-state/.test(l)), ga }));
+    }
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
     // Proves discord-bridge.mjs's whole bus layer (subscribe, initial push, command
@@ -2923,7 +2963,7 @@ async function main() {
               + '{ "id": "short", "name": "Short", "serverId": "900", "channelId": "910" }, '
               + '{ "id": "num", "name": "Num", "serverId": 123456789012345678, "channelId": 223456789012345679 }, '
               + '{ "id": "ok", "name": "Twin", "serverId": "' + S1 + '", "channelId": "523456789012345678" } ], '
-              + '"current": null, "settings": { "avatarPx": "abc", "streamerPx": true, "accent": "red", "scanlines": "no", "streamerUserId": 110457699291906048, "height": 180, "junk": 1, "exitOnSbClose": "yes", "neonBlink": false } }';
+              + '"current": null, "settings": { "avatarPx": "abc", "streamerPx": true, "accent": "red", "scanlines": "no", "streamerUserId": 100000000000000001, "height": 180, "junk": 1, "exitOnSbClose": "yes", "neonBlink": false } }';
             const t = await rig({ cfgText: bad, env: STRICT });
             const names = t.last.favorites.map((f) => f.name);
             const ids = t.last.favorites.map((f) => f.id);
@@ -2931,7 +2971,7 @@ async function main() {
             const dropped = (await corrupt(t)).length;
             check('GRN-198: favorites that are skipped at load are named in rpc.configWarning and the file is kept as a .corrupt-<time> copy (the next save would have dropped them without a trace)', dropped === 1 && /2 favorite\(s\)/.test(warn(t.last)) && /Bad/.test(warn(t.last)), JSON.stringify({ dropped, warn: warn(t.last) }));
             const s = t.last.settings;
-            check('GRN-167/196/43: settings of the wrong type load as defaults (avatarPx, streamerPx, accent, scanlines, exitOnSbClose), a bare-number streamerUserId keeps its exact digits, a valid false stays false, and unknown keys and the old height are dropped', s.avatarPx === 56 && s.streamerPx === 72 && s.accent === 'cyan' && s.scanlines === true && s.exitOnSbClose === false && s.neonBlink === false && s.streamerUserId === '110457699291906048' && !('height' in s) && !('junk' in s), JSON.stringify(s));
+            check('GRN-167/196/43: settings of the wrong type load as defaults (avatarPx, streamerPx, accent, scanlines, exitOnSbClose), a bare-number streamerUserId keeps its exact digits, a valid false stays false, and unknown keys and the old height are dropped', s.avatarPx === 56 && s.streamerPx === 72 && s.accent === 'cyan' && s.scanlines === true && s.exitOnSbClose === false && s.neonBlink === false && s.streamerUserId === '100000000000000001' && !('height' in s) && !('junk' in s), JSON.stringify(s));
             t.cmd('set-settings', JSON.stringify({ avatarPx: null, streamerPx: '', accent: 7, neonBlink: 0, scanlines: 'x', exitOnSbClose: 'true', junk: 5 }));
             await nap(500);
             const s2 = t.last.settings;
