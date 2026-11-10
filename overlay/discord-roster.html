@@ -55,9 +55,11 @@
   body { font-family: var(--name-font); }
   body.absent #stage { display: none; }
   body.offline #stage { opacity: .35; filter: grayscale(1); }
-  #stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transition: opacity .3s ease; }
+  /* flex-start + margin:auto centres the roster while it fits and, if it ever does not (the automatic +N fold normally prevents it), clips only
+     the trailing end instead of both ends (GRN-78). */
+  #stage { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: flex-start; transition: opacity .3s ease; }
 
-  #roster { display: flex; gap: var(--gap); align-items: flex-start; justify-content: center; }
+  #roster { display: flex; gap: var(--gap); align-items: flex-start; justify-content: center; margin: auto; }
   #roster.layout-row { flex-wrap: nowrap; }
   #roster.layout-grid { flex-wrap: wrap; max-width: 100%; }
 
@@ -145,10 +147,21 @@
   };
 
   const roster = document.getElementById('roster');
+  const stageEl = document.getElementById('stage');
   let lastDiscord = null;
   let directory = []; // sanitized guest directory (rides vdoninja:update)
   let lastSig = '';
-  const nodes = new Map(); // uid -> { root, img, name }
+  const nodes = new Map(); // uid -> { root, img, name, wantUrl }
+
+  // Feed liveness (GRN-34): the bridge pushes at least every `hb` ms; three missed beats and the feed is stale, which counts as nobody
+  // there. A payload without `hb` (an older bridge, the mock bridge, a single replayed push) is never stale. `age` (how old the push already
+  // was when it reached us) is used when a producer sends it. hb and age are not part of the roster's DOM signature.
+  let lastFeedAt = 0;
+  let wasStale = false;
+  const feedHb = () => { const n = Number(lastDiscord && lastDiscord.hb); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const isStale = () => { const hb = feedHb(); return hb > 0 && lastFeedAt > 0 && Date.now() - lastFeedAt > 3 * hb; };
+  const noteFeed = (msg) => { lastFeedAt = Date.now() - (Number(msg && msg.age) || 0); };
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
   function defaultAvatar(userId) {
     let idx = 0;
@@ -159,13 +172,16 @@
   // Effective config: URL param > payload settings > default.
   function effective(settings) {
     const s = settings || {};
+    // A size from the payload is clamped to the range the control page offers (any bus client, or an older bridge, can send anything);
+    // a size from the URL is the operator's own.
+    const px = (v, d, lo, hi) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
     return {
       layout: URL_CFG.layout === 'grid' ? 'grid' : 'row',
       labels: boolOr(URL_CFG.labels, true),
-      avatarPx: numOr(URL_CFG.avatarPx, numOr(s.avatarPx, 56)),
-      streamerPx: numOr(URL_CFG.streamerPx, numOr(s.streamerPx, 72)),
+      avatarPx: numOr(URL_CFG.avatarPx, px(s.avatarPx, 56, 24, 128)),
+      streamerPx: numOr(URL_CFG.streamerPx, px(s.streamerPx, 72, 32, 160)),
       accent: accentTriplet(URL_CFG.accent) || accentTriplet(s.accent) || ACCENTS.cyan,
-      streamer: (URL_CFG.streamer || s.streamerUserId || '').trim(),
+      streamer: String(URL_CFG.streamer || s.streamerUserId || '').trim(), // (a number from a hand-edited config must not throw on every render)
       hideWhenAbsent: boolOr(URL_CFG.hideWhenAbsent, s.hideWhenAbsent !== false),
       scanlines: s.scanlines !== false,
       neonBlink: s.neonBlink !== false,
@@ -174,6 +190,7 @@
     };
   }
 
+  // The mute and deafen badge glyphs below are original drawings for this kit (not taken from another icon set), so they carry no notice.
   const SVG_MUTE = '<svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5.5-3a5.5 5.5 0 0 1-8.9 4.32l1.45-1.45A3.5 3.5 0 0 0 15.5 11H17.5zm-11 0c0 .6.1 1.19.28 1.73l-1.55 1.55A7.4 7.4 0 0 1 4.5 11h2zM12 18.4c.72 0 1.41-.12 2.06-.33l1.62 1.62A7.9 7.9 0 0 1 13 20.43V22h-2v-1.57a8 8 0 0 1-6.32-5.19l1.62-.6A6.4 6.4 0 0 0 12 18.4zM4.27 3 21 19.73 19.73 21 3 4.27 4.27 3z"/></svg>';
   const SVG_DEAF = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5.06A7 7 0 0 1 12 5a7 7 0 0 1 6.94 7H17a2 2 0 0 0-2 2v1.1l4.86 4.86c.66-.55 1.14-1.37 1.14-2.36v-5a9 9 0 0 0-9-9zM4.27 4 21 20.73 19.73 22 3 5.27 4.27 4z"/></svg>';
 
@@ -187,9 +204,12 @@
     const img = document.createElement('img');
     img.className = 'avatar';
     img.alt = '';
+    const node = { root, img, name: null, wantUrl: '' };
+    // A picture that fails to load shows the default avatar, and is tried again a minute later (not on every update, and not never).
     img.addEventListener('error', () => {
       const fb = defaultAvatar(uid);
       if (img.getAttribute('src') !== fb) img.src = fb;
+      setTimeout(() => { node.wantUrl = ''; }, 60000);
     });
     const badges = document.createElement('div');
     badges.className = 'badges';
@@ -203,15 +223,17 @@
 
     root.appendChild(wrap);
     root.appendChild(name);
-    return { root, img, name };
+    node.name = name;
+    return node;
   }
 
   function shownName(uid, u) {
     const d = GRNameplate.findByUserId(directory, uid);
-    return (d && !d.auto && d.displayName) || (u && u.username) || (d && d.displayName) || uid;
+    return String((d && !d.auto && d.displayName) || (u && u.username) || (d && d.displayName) || uid);
   }
   function orderedIds(users, streamerId) {
-    return Object.keys(users).sort((a, b) => {
+    // (an entry that is not an object, from a hand-edited feed or a bus client, is skipped)
+    return Object.keys(users).filter((k) => isObj(users[k])).sort((a, b) => {
       if (a === streamerId) return -1;
       if (b === streamerId) return 1;
       const ua = String(shownName(a, users[a])).toLowerCase();
@@ -220,9 +242,15 @@
     });
   }
 
-  function render() {
+  // The automatic +N fold (GRN-78): the most members that fit the stage, measured after layout; 0 = everyone fits. It is worked out afresh
+  // after every message (a message resets it), and only lowered by fit() while the roster overflows.
+  let fitCap = 0;
+  let warnedFit = false;
+
+  function render(keepFit) {
+    if (!keepFit) fitCap = 0;
     const dv = lastDiscord;
-    const cfg = effective(dv && dv.settings);
+    const cfg = effective(dv && isObj(dv.settings) ? dv.settings : null);
 
     // Theme/effect classes + variables (cheap; applied every render so a
     // set-settings push restyles live).
@@ -236,15 +264,21 @@
     document.body.classList.toggle('fx-scanlines', cfg.scanlines && !cfg.plain);
     roster.className = 'layout-' + cfg.layout;
 
-    const users = (dv && dv.users) || {};
-    const absent = !dv || !dv.connected || !dv.hostInChannel || Object.keys(users).length === 0;
+    // A feed that has stopped (the bridge died: three heartbeats missed) counts as nobody there, so hideWhenAbsent applies.
+    const stale = isStale();
+    wasStale = stale;
+    const users = !stale && dv && isObj(dv.users) ? dv.users : {};
+    // hideWhenAbsent follows the streamer when one is set (documented behaviour): the roster hides when they are not in the call.
+    const streamerGone = !!cfg.streamer && !isObj(users[cfg.streamer]);
+    const absent = !dv || !dv.connected || !dv.hostInChannel || Object.keys(users).length === 0 || streamerGone;
     document.body.classList.toggle('absent', cfg.hideWhenAbsent && absent);
 
     let ids = orderedIds(users, cfg.streamer);
     let overflow = 0;
-    if (cfg.max > 0 && ids.length > cfg.max) {
-      overflow = ids.length - cfg.max;
-      ids = ids.slice(0, cfg.max);
+    const cap = Math.min(cfg.max > 0 ? cfg.max : Infinity, fitCap > 0 ? fitCap : Infinity);
+    if (ids.length > cap) {
+      overflow = ids.length - cap;
+      ids = ids.slice(0, cap);
     }
 
     // Membership-keyed DOM diff: rebuild only when the member list (or order)
@@ -271,8 +305,10 @@
       const u = users[uid];
       const n = nodes.get(uid);
       if (!u || !n) continue;
-      const avatarUrl = u.avatarUrl || defaultAvatar(uid);
-      if (n.img.getAttribute('src') !== avatarUrl) n.img.src = avatarUrl;
+      const avatarUrl = typeof u.avatarUrl === 'string' && u.avatarUrl ? u.avatarUrl : defaultAvatar(uid);
+      // Compared with what we asked for, not with the src (which a failed load replaced by the default avatar): a bad picture is not asked
+      // for again on every update (the error handler clears wantUrl after a minute).
+      if (n.wantUrl !== avatarUrl) { n.wantUrl = avatarUrl; n.img.src = avatarUrl; }
       // Directory override happens here (outside the membership sig) so a
       // directory edit restyles chips live without a rebuild.
       const label = shownName(uid, u);
@@ -282,6 +318,38 @@
       n.root.classList.toggle('muted', !!u.mute);
       n.root.classList.toggle('deafened', !!u.deaf);
     }
+    fit(ids.length);
+  }
+
+  // Measure after layout: if the members (and the +N chip) do not fit the stage, lower the cap to what fits, fold the rest into "+N" (the
+  // streamer is first, so is never the one folded) and say so once (GRN-78). Row layout compares the width, grid layout the height.
+  function fit(shown) {
+    if (shown < 1) { return; }
+    const kids = [...roster.children];
+    const grid = roster.classList.contains('layout-grid');
+    const gap = parseFloat(getComputedStyle(roster).columnGap) || 0;
+    const room = grid ? stageEl.clientHeight : stageEl.clientWidth;
+    if (!room) return; // not laid out (hidden): nothing to measure
+    const over = grid
+      ? roster.offsetHeight > room + 1
+      : kids.reduce((w, k, i) => w + k.offsetWidth + (i ? gap : 0), 0) > room + 1;
+    if (!over) return;
+    let n = shown;
+    if (grid) n = Math.max(1, shown - 1);
+    else {
+      const chipW = 64; // room kept for the "+N" chip
+      let w = 0; n = 0;
+      for (let i = 0; i < shown && i < kids.length; i++) {
+        const next = w + kids[i].offsetWidth + (i ? gap : 0);
+        if (next + gap + chipW > room && n >= 1) break;
+        w = next; n = i + 1;
+      }
+      n = Math.max(1, Math.min(n, shown - 1));
+    }
+    if (n >= shown) return;
+    if (!warnedFit) { warnedFit = true; console.warn('[greenroom] the Discord roster does not fit this source: ' + (shown - n) + ' member(s) are folded into "+N". Make the browser source larger, or lower ?max=.'); }
+    fitCap = n;
+    render(true);
   }
 
   window.addEventListener('svc:message', (e) => {
@@ -289,6 +357,7 @@
     if (!msg) return;
     if (msg.type === 'discord:voice:update') {
       lastDiscord = msg.discordVoice || null;
+      noteFeed(msg);
       render();
     } else if (msg.type === 'vdoninja:update') {
       // Stored and applied on every render — VDO Sync promises no order between
@@ -297,10 +366,14 @@
       render();
     } else if (msg.type === 'sync') {
       if (msg.vdoninja !== undefined) directory = GRNameplate.sanitizeDirectory(msg.vdoninja && msg.vdoninja.directory);
-      if (msg.discordVoice !== undefined) lastDiscord = msg.discordVoice || null;
+      if (msg.discordVoice !== undefined) { lastDiscord = msg.discordVoice || null; noteFeed(msg); }
       render();
     }
   });
+
+  // The stage was resized (OBS source resized): fit again from scratch. And once a second: a feed that just went stale redraws as absent.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => render()).observe(stageEl);
+  setInterval(() => { if (isStale() !== wasStale) render(); }, 1000);
 
   render(); // initial paint (absent state) so hideWhenAbsent applies before first push
 })();

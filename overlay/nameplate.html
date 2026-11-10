@@ -58,8 +58,10 @@
   'use strict';
 
   const P = new URLSearchParams(location.search);
-  const n = parseInt(P.get('slot'), 10);
-  const SLOT = Number.isFinite(n) && n >= 1 ? n : 1;
+  // The slot is 1 to 4, written exactly (no ?slot means slot 1); anything else shows nothing and says so in the console (GRN-144).
+  const rawSlot = P.has('slot') ? String(P.get('slot') ?? '').trim() : '1';
+  const SLOT = /^[1-4]$/.test(rawSlot) ? Number(rawSlot) : 0;
+  if (SLOT === 0) console.warn('[greenroom] this nameplate source has a bad slot (' + JSON.stringify(rawSlot) + '): use ?slot=1 to 4. It shows nothing.');
   const ALIGN = ['left', 'right'].includes(P.get('align')) ? P.get('align') : 'center';
 
   const stage = document.getElementById('stage');
@@ -75,6 +77,13 @@
 
   function render() {
     plate.setEntry(GRNameplate.resolvePlateEntry(lastVdo, SLOT));
+    if (SLOT === 0 && P.get('sbdebug') === '1' && !document.getElementById('slothint')) {
+      const h = document.createElement('div');
+      h.id = 'slothint';
+      h.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;padding:8px 10px;background:rgba(0,0,0,.75);color:#ffb454;font:14px/1.4 Consolas,monospace;border:1px solid #ffb454;z-index:10';
+      h.textContent = 'Bad slot in this source\'s URL: use ?slot=1 to 4. It shows nothing.';
+      document.body.appendChild(h);
+    }
   }
 
   // Only the vdoninja payload matters here — resolvePlateEntry never needs the

@@ -39,7 +39,7 @@ Per-source overrides; precedence is **URL param → payload settings → default
 | `?streamer=` | user id | streamer-first ordering override |
 | `?hidewhenabsent=` | `1` \| `0` | hide everything when the streamer isn't in voice |
 | `?theme=plain` | — | the second look (below) |
-| `?max=` | n | cap rendered members; the rest collapse into a `+N` chip |
+| `?max=` | n | cap rendered members; the rest collapse into a `+N` chip. Even without it, members that do not fit the browser source are folded into the `+N` chip automatically (the streamer stays first) |
 | `?sbport=` / `?sbdebug=1` | port 1-65535 / — | transport knobs (overlay/panel-client-sb.js); a bad `?sbport` is refused, never a different host |
 
 ## The plain theme

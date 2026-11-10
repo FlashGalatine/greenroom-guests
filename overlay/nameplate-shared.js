@@ -13,6 +13,14 @@ window.GRNameplate = (function () {
 
   // Platform icons — fill follows CSS `color` via currentColor. Unknown
   // platforms fall back to the `website` globe.
+  //
+  // Provenance and licences of the glyphs (THIRD_PARTY_NOTICES.md has the notices):
+  //   tiktok   Boxicons 2.1.4 (bxl-tiktok), MIT, Copyright (c) 2015-2021 Aniket Suvarna; the path is byte-identical to the Boxicons one.
+  //   twitch   derived from the Boxicons 2.1.4 Twitch glyph (MIT, as above).
+  //   discord  Material Icons / Material Design Icons Discord glyph, Apache License 2.0.
+  //   twitter (X), bluesky, youtube, instagram   source unconfirmed: the platforms' own marks are trademarks of their owners, drawn here only
+  //            to say which service a handle is on (not affiliated with or endorsed by them). Replace with a confirmed-source glyph if in doubt.
+  //   website  an original globe drawn for this kit.
   const ICONS = {
     twitch: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.265 3 3 6.236v13.223h4.502V21.5h2.531l2.27-2.041h3.476L20.5 14.94V3H4.265zm1.49 1.5H19v9.69l-2.752 2.478h-4.253L9.726 18.89v-2.222H5.755V4.5zM10.478 7.5h1.49V12h-1.49zm4.273 0h1.49V12h-1.49z"/></svg>',
     discord: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.36-.76-.54-1.09-.01-.02-.04-.03-.07-.03-1.5.26-2.93.71-4.27 1.33-.01 0-.02.01-.03.02-2.72 4.07-3.47 8.03-3.1 11.95 0 .02.01.04.03.05 1.8 1.32 3.53 2.12 5.24 2.65.03.01.06 0 .07-.02.4-.55.76-1.13 1.07-1.74.02-.04 0-.08-.04-.09-.57-.22-1.11-.48-1.64-.78-.04-.02-.04-.08-.01-.11.11-.08.22-.17.33-.25.02-.02.05-.02.07-.01 3.44 1.57 7.15 1.57 10.55 0 .02-.01.05-.01.07.01.11.09.22.17.33.26.04.03.04.09-.01.11-.52.31-1.07.56-1.64.78-.04.01-.05.06-.04.09.32.61.68 1.19 1.07 1.74.02.03.05.03.07.02 1.72-.53 3.45-1.33 5.24-2.65.02-.01.03-.03.03-.05.44-4.53-.73-8.46-3.1-11.95-.01-.01-.02-.02-.04-.02zM8.52 14.91c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.84 2.12-1.89 2.12zm6.97 0c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.83 2.12-1.89 2.12z"/></svg>',
@@ -246,13 +254,13 @@ window.GRNameplate = (function () {
       'background:var(--np-bg, rgba(10,14,18,.72));' +
       'border-left:3px solid rgb(var(--np-accent, 34, 211, 238));' +
       'border-radius:var(--np-radius, 10px);padding:var(--np-pad, 8px 14px);' +
-      "font-family:var(--np-name-font, 'Segoe UI', system-ui, sans-serif);max-width:100%}" +
+      "font-family:var(--np-name-font, 'Segoe UI', system-ui, sans-serif);max-width:100%;box-sizing:border-box}" +
     '.np-plate[hidden]{display:none}' +
     '.np-name{font-size:var(--np-name-size, 20px);font-weight:var(--np-name-weight, 700);' +
       'color:var(--np-name-color, #eef2f5);line-height:1.2;white-space:nowrap;' +
       'overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.7)}' +
     '.np-plate.no-socials .np-socials{display:none}' +
-    '.np-rot{display:inline-flex;align-items:center;gap:6px;' +
+    '.np-rot{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;' +
       'color:var(--np-handle-color, #b9c4cd);font-size:var(--np-handle-size, 13px);' +
       'transition:opacity .24s ease, transform .24s ease}' +
     '.np-rot svg{width:var(--np-icon-size, 15px);height:var(--np-icon-size, 15px);' +

@@ -129,9 +129,9 @@ All **Browser Source → URL** (never "Local file"):
 
 | Source | URL |
 |---|---|
-| Guest slot 1–4 | `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`) |
+| Guest slot 1–4 | `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…`2`,`3`,`4`): use the control page's per-slot **Copy** buttons; a `?slot=` other than 1 to 4 shows nothing |
 | Guest nameplate *(optional)* | `http://127.0.0.1:7474/greenroom-overlay/nameplate.html?slot=1` — freely positioned name + socials plate (e.g. under the cam frame). The slot overlay also has a built-in lower-third; `?nameplate=0` hides it (docs/THEMING.md) |
-| Discord roster | `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row` |
+| Discord roster | `http://127.0.0.1:7474/greenroom-overlay/discord-roster.html?layout=row`: give the source room for your busiest call (about 90 px of width per member in a row at the default sizes, e.g. 1200 × 140 for 12 people; a grid wraps, so give it height). Members that do not fit are folded into a `+N` chip automatically, the streamer first; `?max=` caps it lower. If the Discord feed stops (the bridge died: three missed heartbeats) the roster hides as if nobody were there |
 | Always-on director | `http://127.0.0.1:7474/greenroom-control/director-min.html` as a **1×1 px** source |
 
 Every page fires the `VDO Sync` action on connect, so a source added mid-stream

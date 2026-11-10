@@ -60,7 +60,9 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
    `overlay` to this repo's folders, paste the 4 core actions (skip
    `Discord Bridge Start`).
 2. Add OBS Browser Sources:
-   `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…2, 3, 4).
+   `http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1` (…2, 3, 4): the
+   control page's per-slot **Copy** buttons give the exact URL. A slot is 1 to 4; any
+   other `?slot=` shows nothing (and the browser console says why).
 3. Open `http://127.0.0.1:7474/greenroom-control/control.html`, set your room + password,
    enable the director, and bind slots to guest labels. Keep exactly one director
    running (a 1×1 source running `director-min.html` is the set-and-forget option;
@@ -239,5 +241,9 @@ sidecar depends on [discord.js](https://discord.js.org) +
 [@discordjs/voice](https://github.com/discordjs/discord.js/tree/main/packages/voice)
 (Apache-2.0) and [libsodium-wrappers](https://github.com/jedisct1/libsodium.js)
 (ISC). The guest dock drives [VDO.ninja](https://vdo.ninja) via its public
-IFrame API — nothing from VDO.ninja is vendored here. Greenroom is not
-affiliated with Streamer.bot, VDO.ninja, or Discord.
+IFrame API — nothing from VDO.ninja is vendored here. A few nameplate glyphs come
+from other icon sets under their own licences: see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Twitch, Discord, TikTok, X, Bluesky,
+YouTube and Instagram are trademarks of their owners, shown only to say which service
+a handle is on; Greenroom is not affiliated with or endorsed by any of them, nor by
+Streamer.bot or VDO.ninja.
