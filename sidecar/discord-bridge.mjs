@@ -41,16 +41,18 @@
 // ONE POLICY FOR CRASHES AND EXITS (GRN-129): every way out goes through shutdown(code): signals, the quit
 // command, exit-on-SB-close and a crash. It sets `stopping` first (nothing else is pushed), closes the guard,
 // leaves voice once, sends ONE clearing state (stopped, hb 0, no users) to Streamer.bot and exits from the send
-// callback (not sooner than 300 ms, not later than 1.5 s). An unhandled rejection is logged and the bridge goes on;
+// callback (not sooner than 300 ms, not later than 3.5 s: the config and token writes in flight get up to 2 s to land first).
+// An unhandled rejection is logged and the bridge goes on;
 // an uncaught exception shuts down with code 1 and the error in rpc.error.
 
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, open, rename, rm, copyFile } from 'node:fs/promises';
 import { readFileSync, writeSync } from 'node:fs';
 import { createServer, connect as netConnect } from 'node:net';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import WebSocket from 'ws';
+import { DEFAULT_SETTINGS, sanitizeSettings, digitsOnly, cutName, parseJson, SNOWFLAKE_RE } from './settings.mjs';
 
 // Node first, then the heavy imports: an old Node says so instead of failing inside discord.js (GRN-22).
 {
@@ -122,22 +124,6 @@ const cmpVersion = (a, b) => {
 // restart reconnects well inside this window and cancels the shutdown. The
 // behaviour itself is opt-in (settings.exitOnSbClose or the env override below).
 const SB_EXIT_GRACE_MS = Math.max(1000, Number(process.env.GREENROOM_SB_EXIT_GRACE_MS) || 8000);
-
-const DEFAULT_SETTINGS = {
-  streamerUserId: '', // set yours in the control page (streamer-first roster order)
-  avatarPx: 56,
-  streamerPx: 72,
-  height: 180,
-  accent: 'cyan', // 'cyan' | 'magenta' | 'neon-green'
-  scanlines: true,
-  neonBlink: true,
-  hideWhenAbsent: true,
-  // Lifecycle (not a render setting): when true, the sidecar gracefully leaves
-  // the voice call and exits once Streamer.bot closes — so the bot doesn't linger
-  // in the channel after you close SB. The env var GREENROOM_EXIT_ON_SB_CLOSE
-  // overrides this when set. Opt-in (default off preserves reconnect-forever).
-  exitOnSbClose: false,
-};
 
 let state = {
   favorites: [],      // [{ id, name, serverId, channelId }]
@@ -212,85 +198,164 @@ const guardSockets = new Set();
 const logins = new WeakMap(); // Client -> { settled, destroyWanted }: a client is destroyed only after its login settles (GRN-130)
 let loginRetryTimer = null;   // the backoff before the next login attempt after a failed one (GRN-52)
 
-async function init() {
-  let loaded = false;
-  try {
-    const raw = await readFile(CONFIG_PATH, 'utf-8');
-    adoptConfig(JSON.parse(raw));
-    loaded = true;
-    log(`Loaded ${state.favorites.length} favorite(s)`);
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      // A file that exists but cannot be read (a trailing comma after a hand edit): keep it, do not replace it with the example.
-      const kept = `${CONFIG_PATH}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-      log(`Could not load config: ${err.message}`);
-      try { await rename(CONFIG_PATH, kept); rpc.error = `The saved config could not be read (${clean(err.message, 80)}); it was kept as ${kept} and the example is used instead.`; }
-      catch { rpc.error = `The saved config could not be read (${clean(err.message, 80)}).`; }
+// ── Files: loading, writing, and what is kept when a file is bad (GRN-19, 93, 77, 92, 68) ──────────────────────────────────────────
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const TRANSIENT_FS = new Set(['EBUSY', 'EPERM', 'EACCES']); // a lock that usually goes away: a scanner, OneDrive, an editor
+// Saved ids are 17 to 20 digits. The tests' fixtures use short ones, so they switch the strictness off (test hooks only).
+const ID_RE = TEST_HOOKS && process.env.GREENROOM_LOOSE_IDS === '1' ? /^\d{1,20}$/ : SNOWFLAKE_RE;
+const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// One reader for every JSON file: a Buffer, decoded as UTF-16 (a BOM FF FE or FE FF: what PowerShell's `>` writes) or UTF-8 (a BOM is
+// stripped), parsed with ids kept as text. It says WHY it failed: missing (ENOENT: the only case that is seeded from the example), unreadable
+// (locked or refused for about 2 s: EBUSY, EPERM, EACCES) or invalid (not JSON, or not a file that can be read).
+async function loadJson(path) {
+  let buf = null, lastErr = null;
+  for (let i = 0; i < 11 && !buf; i++) {
+    try { buf = await readFile(path); }
+    catch (e) {
+      if (e && e.code === 'ENOENT') return { status: 'missing' };
+      lastErr = e;
+      if (!(e && TRANSIENT_FS.has(e.code))) return { status: 'invalid', error: e };
+      await sleep(200);
     }
   }
-  if (!loaded) {
-    // First run: seed the gitignored config from the tracked example.
-    try {
-      adoptConfig(JSON.parse(await readFile(EXAMPLE_PATH, 'utf-8')));
-      await persist();
-      log('Seeded discord-voice-config.json from the example');
-    } catch { /* example missing — defaults stand */ }
-  }
-
-  // Load the gitignored bot token and, if enabled, start the bot at startup.
+  if (!buf) return { status: 'unreadable', error: lastErr };
+  let text;
   try {
-    const raw = await readFile(TOKENS_PATH, 'utf-8');
-    const t = JSON.parse(raw);
-    creds = {
-      botToken: String(t.botToken ?? '').trim(),
-      enabled: !!t.enabled,
-    };
-    if (creds.enabled && creds.botToken) startBot();
-  } catch (err) {
-    if (err.code !== 'ENOENT') log(`Could not load discord-tokens.json: ${err.message}`);
-    else log('No discord-tokens.json yet — create it to enable the bot (docs/STREAMERBOT-SETUP.md)');
+    if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) text = buf.subarray(2).toString('utf16le');
+    else if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) { const sw = Buffer.from(buf.subarray(2)); sw.swap16(); text = sw.toString('utf16le'); }
+    else text = buf.toString('utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    return { status: 'ok', value: parseJson(text) };
+  } catch (e) { return { status: 'invalid', error: e }; }
+}
+
+// Write a file so that a crash or a lock never leaves half of it: a temp file written and flushed, renamed over the target (a few retries
+// while the target is locked), and if the rename keeps failing a flushed in-place write. The temp file is always removed.
+async function atomicWrite(path, text) {
+  const tmp = path + '.tmp';
+  const flushTo = async (p) => { const fh = await open(p, 'w'); try { await fh.writeFile(text, 'utf8'); await fh.sync(); } finally { await fh.close(); } };
+  try {
+    await flushTo(tmp);
+    for (let i = 0; ; i++) {
+      try { await rename(tmp, path); return; }
+      catch (e) { if (!(e && TRANSIENT_FS.has(e.code)) || i >= 4) throw e; await sleep(50 * (i + 1)); }
+    }
+  } catch {
+    await flushTo(path); // (throws when this fails too: that error is the one reported)
+  } finally {
+    try { await rm(tmp, { force: true }); } catch { /* gone */ }
   }
 }
 
+// Writes happen one at a time per file, in the order they were asked for, each of the state as it is when the write starts. The queue is what
+// persist() and persistTokens() return, so a command that pushes after its save has landed pushes the saved state; the exit waits for it.
+const writeChains = new Map(); // path -> the tail of that file's queue
+function enqueueWrite(path, job) {
+  const run = (writeChains.get(path) || Promise.resolve()).then(job);
+  writeChains.set(path, run.catch(() => {}));
+  return run;
+}
+
+// Problems with the files, in fixed words (never an error's own text: this goes to every bus client). Load problems stay for the session; a
+// write problem goes when the next write of that file works. Sent as rpc.configWarning, which nothing else clears (rpc.error is cleared by a login).
+const configWarnings = new Map();
+function setWarning(key, text) { if (configWarnings.get(key) !== text) { configWarnings.set(key, text); log(`config warning: ${text}`); } schedulePush(); }
+function clearWarning(key) { if (configWarnings.delete(key)) schedulePush(); }
+let configReadOnly = false; // the config could be neither read nor copied aside: it is left alone for the whole session
+
+const TOKENS_BAD = 'discord-tokens.json exists but is not valid JSON: re-save it as UTF-8 (no BOM) with { "botToken": "…", "enabled": true }.';
+const NO_TOKEN = 'No bot token — create sidecar/discord-tokens.json (docs/STREAMERBOT-SETUP.md), then press Connect again.';
+
+// discord-tokens.json as a whole object (S17 reads the SB password from it too), or why not.
+async function loadTokens() {
+  const r = await loadJson(TOKENS_PATH);
+  if (r.status === 'ok') return isObject(r.value) ? { status: 'ok', tokens: r.value } : { status: 'invalid' };
+  return { status: r.status }; // 'missing' | 'unreadable' | 'invalid'
+}
+
+async function init() {
+  // A temp file left by a crash in the middle of a write.
+  for (const p of [CONFIG_PATH, TOKENS_PATH]) { try { await rm(p + '.tmp', { force: true }); } catch { /* fine */ } }
+
+  const res = await loadJson(CONFIG_PATH);
+  if (res.status === 'ok' && isObject(res.value)) {
+    adoptConfig(res.value);
+    log(`Loaded ${state.favorites.length} favorite(s)`);
+  } else if (res.status === 'missing') {
+    // First run: seed the gitignored config from the tracked example. Only a MISSING file is seeded: a bad one is kept.
+    const ex = await loadJson(EXAMPLE_PATH);
+    if (ex.status === 'ok' && isObject(ex.value)) {
+      adoptConfig(ex.value);
+      try { await persist(); log('Seeded discord-voice-config.json from the example'); } catch (e) { log(`Could not write the first config (${e && e.code}): the settings stay in memory`); }
+    } // (the example missing: the defaults stand)
+  } else {
+    // It exists and cannot be used (not JSON, a literal null, an array, locked): keep a copy, run on the defaults, and do not write it again
+    // this session if even the copy fails.
+    const why = res.status === 'ok' ? 'it is not a JSON object' : res.status === 'unreadable' ? 'it could not be read' : 'it is not valid JSON';
+    log(`Could not load config: ${why}`);
+    const kept = `${CONFIG_PATH}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    try {
+      await copyFile(CONFIG_PATH, kept);
+      setWarning('config-load', `The saved config could not be used (${why}): a copy was kept as ${basename(kept)} and the bridge runs on its defaults. Fix the file, or delete it to start fresh.`);
+    } catch {
+      configReadOnly = true;
+      setWarning('config-load', `The saved config could not be used (${why}) and a copy could not be made, so it is left as it is and nothing is saved this session.`);
+    }
+  }
+
+  // Load the gitignored bot token and, if enabled, start the bot at startup.
+  const t = await loadTokens();
+  if (t.status === 'ok') {
+    creds = { botToken: String(t.tokens.botToken ?? '').trim(), enabled: !!t.tokens.enabled };
+    if (creds.enabled && creds.botToken) startBot();
+  } else if (t.status === 'missing') log('No discord-tokens.json yet — create it to enable the bot (docs/STREAMERBOT-SETUP.md)');
+  else { rpc.error = TOKENS_BAD; log('discord-tokens.json exists but could not be read as JSON'); }
+}
+
+// What a saved config is held to: its favorites need a 17 to 20 digit server id and channel id (as text; a bare number keeps its digits
+// through parseJson), repeated ids are made new, names are cut by code point, settings go through sanitizeSettings.
 function adoptConfig(parsed) {
-  state = {
-    favorites: Array.isArray(parsed.favorites)
-      ? parsed.favorites
-          .filter((f) => f && typeof f === 'object')
-          .map((f) => ({
-            id: String(f.id ?? makeId()),
-            name: String(f.name ?? '').slice(0, 80),
-            serverId: String(f.serverId ?? '').replace(/\D/g, ''),
-            channelId: String(f.channelId ?? '').replace(/\D/g, ''),
-          }))
-          .filter((f) => f.serverId && f.channelId)
-      : [],
-    current: parsed.current && typeof parsed.current === 'object'
-      ? {
-          serverId: String(parsed.current.serverId ?? '').replace(/\D/g, ''),
-          channelId: String(parsed.current.channelId ?? '').replace(/\D/g, ''),
-        }
-      : null,
-    settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
-  };
+  const favorites = [];
+  const ids = new Set();
+  for (const f of Array.isArray(parsed.favorites) ? parsed.favorites : []) {
+    if (!isObject(f)) continue;
+    const serverId = typeof f.serverId === 'string' ? f.serverId : '', channelId = typeof f.channelId === 'string' ? f.channelId : '';
+    if (!ID_RE.test(serverId) || !ID_RE.test(channelId)) { log(`config: the favorite "${clean(f.name ?? '?', 40)}" was skipped: its server id and channel id must be 17 to 20 digits, as text`); continue; }
+    let id = String(f.id ?? '');
+    if (!id || ids.has(id)) { if (id) log(`config: the favorite id "${clean(id, 40)}" repeats: a new id was made`); do { id = makeId(); } while (ids.has(id)); }
+    ids.add(id);
+    favorites.push({ id, name: cutName(f.name ?? '', 80), serverId, channelId });
+  }
+  const cur = isObject(parsed.current) ? { serverId: digitsOnly(parsed.current.serverId), channelId: digitsOnly(parsed.current.channelId) } : null;
+  state = { favorites, current: cur && cur.serverId && cur.channelId ? cur : null, settings: sanitizeSettings(DEFAULT_SETTINGS, parsed.settings) };
 }
 
 async function addFavorite(name, serverId, channelId) {
   const fav = sanitizeFavorite({ name, serverId, channelId });
   if (!fav) return null;
+  // A repeated Save adds nothing: the favorite that names the same server and channel stays (GRN-133).
+  const same = state.favorites.find((f) => f.serverId === fav.serverId && f.channelId === fav.channelId);
+  if (same) return same;
   fav.id = makeId();
   state.favorites.push(fav);
   await persist();
   return fav;
 }
 
+// A change is built as a candidate and checked before it touches the favorite: a change that would leave it without a server or a channel
+// is refused (and says so) and the favorite stays as it was (GRN-138).
 async function updateFavorite(id, updates) {
   const f = state.favorites.find((x) => x.id === String(id));
-  if (!f) return false;
-  if (updates.name !== undefined) f.name = String(updates.name).slice(0, 80);
-  if (updates.serverId !== undefined) f.serverId = String(updates.serverId).replace(/\D/g, '');
-  if (updates.channelId !== undefined) f.channelId = String(updates.channelId).replace(/\D/g, '');
-  if (!f.serverId || !f.channelId) return false;
+  if (!f || !isObject(updates)) return false;
+  const cand = {
+    name: updates.name !== undefined ? cutName(updates.name, 80) : f.name,
+    serverId: updates.serverId !== undefined ? digitsOnly(updates.serverId) : f.serverId,
+    channelId: updates.channelId !== undefined ? digitsOnly(updates.channelId) : f.channelId,
+  };
+  if (!cand.serverId || !cand.channelId) { refuse('That favorite needs a server ID and a channel ID: the change was not kept.', 'favorite update'); return false; }
+  Object.assign(f, cand);
   await persist();
   return true;
 }
@@ -370,10 +435,10 @@ function joinErrorText(e) {
 }
 
 // The refusal of a USE goes on the status line for a while (REFUSAL_MS), then clears itself if nothing replaced it.
-function refuse(text) {
+function refuse(text, what = 'USE') {
   rpc.error = text;
   refusalText = text;
-  log(`USE refused: ${text}`);
+  log(`${what} refused: ${text}`);
   if (refusalTimer) clearTimeout(refusalTimer);
   refusalTimer = setTimeout(() => {
     refusalTimer = null;
@@ -399,17 +464,11 @@ async function setCurrent(serverId, channelId) {
     if (seq !== useSeq) return state.current;
     if (checked.error) { refuse(checked.error); return state.current; }
   }
-  const prev = state.current, prevRefused = currentRefused;
   state.current = next;
   currentRefused = false;
-  try { await persist(); }
-  catch (e) {
-    if (state.current === next) { state.current = prev; currentRefused = prevRefused; }
-    log(`config not saved: ${e.message}`);
-    rpc.error = 'Could not save the config (' + clean(e.message, 120) + ') — the channel was not changed.';
-    schedulePush();
-    return state.current;
-  }
+  // The change is used whatever the write result (GRN-68): the save is started first (it is queued, so the order of saves is the order of
+  // commands), and if it fails rpc.configWarning says the change is not kept after a restart.
+  const saved = persist().catch((e) => log(`config not saved: ${e && e.code}`));
   if (next) wantVoice = true; // picking a channel means "be in voice"
   voiceParked = false;        // USE is the operator acting: a bot that was parked after a kick may rejoin (GRN-49)
   cancelVoiceRejoin();
@@ -418,88 +477,79 @@ async function setCurrent(serverId, channelId) {
     rpc.error = '';
     joinCurrentChannel(checked).catch((e) => log(`rejoin failed: ${e.message}`));
   }
+  await saved;
   return state.current;
 }
 
 async function setSettings(updates) {
-  if (!updates || typeof updates !== 'object') return false;
-  const next = { ...state.settings };
-  if (updates.streamerUserId !== undefined) {
-    next.streamerUserId = String(updates.streamerUserId).replace(/\D/g, '');
-  }
-  if (updates.avatarPx !== undefined) next.avatarPx = clampInt(updates.avatarPx, 24, 128, DEFAULT_SETTINGS.avatarPx);
-  if (updates.streamerPx !== undefined) next.streamerPx = clampInt(updates.streamerPx, 32, 160, DEFAULT_SETTINGS.streamerPx);
-  if (updates.height !== undefined) next.height = clampInt(updates.height, 100, 400, DEFAULT_SETTINGS.height);
-  if (updates.accent !== undefined) {
-    const accent = String(updates.accent);
-    if (['cyan', 'magenta', 'neon-green'].includes(accent)) next.accent = accent;
-  }
-  if (updates.scanlines !== undefined) next.scanlines = !!updates.scanlines;
-  if (updates.neonBlink !== undefined) next.neonBlink = !!updates.neonBlink;
-  if (updates.hideWhenAbsent !== undefined) next.hideWhenAbsent = !!updates.hideWhenAbsent;
-  if (updates.exitOnSbClose !== undefined) next.exitOnSbClose = !!updates.exitOnSbClose;
-  state.settings = next;
+  if (!isObject(updates)) return false;
+  state.settings = sanitizeSettings(state.settings, updates);
   await persist();
   return true;
 }
 
 function sanitizeFavorite({ name, serverId, channelId }) {
-  const sId = String(serverId ?? '').replace(/\D/g, '');
-  const cId = String(channelId ?? '').replace(/\D/g, '');
+  const sId = digitsOnly(serverId);
+  const cId = digitsOnly(channelId);
   if (!sId || !cId) return null;
   return {
-    name: String(name ?? '').slice(0, 80) || `${sId.slice(-4)}/${cId.slice(-4)}`,
+    name: cutName(name ?? '', 80) || `${sId.slice(-4)}/${cId.slice(-4)}`,
     serverId: sId,
     channelId: cId,
   };
-}
-
-function clampInt(v, min, max, fallback) {
-  const n = Math.round(Number(v));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }
 
 function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// One write at a time, each of the state as it is when the write starts: two commands that save together (two quick USEs, a USE and a
-// settings change) cannot interleave their writes into one file, and the last write is the newest state.
-let persistChain = Promise.resolve();
+// The config goes through the queue and the atomic write above. A failure rejects (the caller decides what to do) after it has put the fixed
+// message in rpc.configWarning; when the config is read-only for the session the write is skipped, with a warning.
 function persist() {
-  const run = persistChain.then(() => writeFile(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8'));
-  persistChain = run.catch(() => {});
-  return run;
+  return enqueueWrite(CONFIG_PATH, async () => {
+    if (configReadOnly) { setWarning('config-write', 'The saved config is left as it is this session (it could not be read or copied aside): the change is not kept after a restart.'); return; }
+    try { await atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2)); clearWarning('config-write'); }
+    catch (e) { setWarning('config-write', `Could not save discord-voice-config.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`); throw e; }
+  });
 }
 
-async function persistTokens() {
-  const out = { botToken: creds.botToken, enabled: creds.enabled };
-  await writeFile(TOKENS_PATH, JSON.stringify(out, null, 2), 'utf-8');
+// The token file is never written from memory: the file as it is now is read, only `enabled` is set, and the whole object is written back (so
+// botToken and every other field survive). A file that cannot be parsed is not replaced.
+function persistTokens() {
+  return enqueueWrite(TOKENS_PATH, async () => {
+    const t = await loadTokens();
+    if (t.status !== 'ok') { log('discord-tokens.json was not updated: it is missing or not valid JSON'); return; }
+    try { await atomicWrite(TOKENS_PATH, JSON.stringify({ ...t.tokens, enabled: creds.enabled }, null, 2)); clearWarning('tokens-write'); }
+    catch (e) { setWarning('tokens-write', `Could not save discord-tokens.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`); throw e; }
+  });
 }
 
 // ── Operator commands (arrive over the bus; see dispatch() below) ────────────
 
-// Operator clicked "Connect" — (re)start the bot with the FILE token. There is no
-// token-over-the-bus path by design.
+// Operator clicked "Connect" — (re)start the bot with the FILE token. There is no token-over-the-bus path by design. The file is read again
+// every time: a corrected token is adopted, an empty one or a deleted file forgets the token (a bot that is running with it is stopped), and
+// a file that exists but cannot be parsed is reported, the token held in memory (if any) serving for this Connect (GRN-77, GRN-92).
 async function connectRpc() {
+  const t = await loadTokens();
+  let note = '';
+  if (t.status === 'ok') creds.botToken = String(t.tokens.botToken ?? '').trim();
+  else if (t.status === 'missing') creds.botToken = '';
+  else note = TOKENS_BAD;
   if (!creds.botToken) {
-    rpc.error = 'No bot token — create sidecar/discord-tokens.json (docs/STREAMERBOT-SETUP.md), then restart the bridge or press Connect again.';
-    // The token file may have appeared since boot — try a quiet reload once.
-    try {
-      const t = JSON.parse(await readFile(TOKENS_PATH, 'utf-8'));
-      creds.botToken = String(t.botToken ?? '').trim();
-    } catch { /* still missing */ }
-    if (!creds.botToken) { schedulePush(); return; }
+    stopBot();
+    rpc.error = note || NO_TOKEN;
+    schedulePush();
+    return;
   }
   creds.enabled = true;
-  rpc.error = '';
   wantVoice = true;
   voiceParked = false; // Connect is the operator acting: a bot that was parked after a kick may rejoin
   loginStep = 0;
-  await persistTokens();
+  rpc.error = note;
+  const saved = persistTokens().catch((e) => log(`tokens not saved: ${e && e.code}`)); // (rpc.configWarning says so; the bot starts whatever the write result, GRN-68)
   stopBot();
   startBot();
+  await saved;
 }
 
 // Gracefully leave the voice channel but stay logged in — proper voice
@@ -532,12 +582,13 @@ function leaveGateway(guildId) {
   } catch (e) { log(`voice: could not send the leave: ${e && e.message}`); }
 }
 
-// Forget the saved bot token (the file keeps `enabled` but loses the token).
+// Reset auth: disable the bot and stop it. The token file is NOT blanked (a forged bus command must not be able to erase the token; deleting
+// the file by hand forgets it): only `enabled` goes to false (GRN-18). The bot is stopped before the file is written, and whatever the write result (GRN-68).
 async function resetAuth() {
-  creds.botToken = '';
-  await persistTokens();
+  creds.enabled = false;
   stopBot();
   schedulePush();
+  try { await persistTokens(); } catch (e) { log(`tokens not saved: ${e && e.code}`); }
 }
 
 // ── Bot lifecycle ────────────────────────────────────────────────────────────
@@ -1196,7 +1247,7 @@ function shouldExitOnSbClose() {
   if (arg !== undefined && arg !== '') return /^(1|true|yes|on)$/i.test(arg.trim());
   const env = process.env.GREENROOM_EXIT_ON_SB_CLOSE;
   if (env !== undefined && env !== '') return /^(1|true|yes|on)$/i.test(env.trim());
-  return !!state.settings.exitOnSbClose;
+  return state.settings.exitOnSbClose === true;
 }
 
 // SB's WS just dropped. If the operator opted in and we had actually been
@@ -1229,7 +1280,7 @@ function armSbGoneTimer() {
 // pre-serialized (docs/PROTOCOL.md).
 function dispatch(command, value) {
   if (stopping) return;
-  const parsed = (() => { try { return value ? JSON.parse(value) : null; } catch { return null; } })();
+  const parsed = (() => { try { return value ? parseJson(value) : null; } catch { return null; } })();
   const done = (p) => p && typeof p.then === 'function'
     ? p.then(() => schedulePush()).catch((e) => { log(`command ${command} failed: ${e.message}`); schedulePush(); })
     : schedulePush();
@@ -1282,7 +1333,7 @@ function payloadOut() {
     // Superset fields (overlays ignore them; the control page + roster overlay
     // consume them): renderer settings, bot status, and the channel book-keeping.
     settings: { ...state.settings },
-    rpc: { enabled: creds.enabled, hasToken: !!creds.botToken, error: clean(rpc.error, 300), reconnecting: !!rpc.reconnecting, speakingStale: speakingStale() },
+    rpc: { enabled: creds.enabled, hasToken: !!creds.botToken, error: clean(rpc.error, 300), reconnecting: !!rpc.reconnecting, speakingStale: speakingStale(), configWarning: clean([...configWarnings.values()].join(' '), 400) },
     favorites: state.favorites.map((f) => ({ ...f })),
     current: state.current ? { ...state.current } : null,
     // The saved current channel failed its check at login (a Stage, a channel the bot cannot join, …), so it is not joined; false once the
@@ -1383,8 +1434,11 @@ function shutdown(code, why) {
     const die = (ok) => { if (!ok) { try { process.kill(process.pid, 'SIGKILL'); } catch { /* fall through to exit */ } } process.exit(code); };
     flushLog(250).then(die, () => die(false));
   };
-  setTimeout(finish, 1500).unref?.();            // never later than 1.5 s
-  pushFinal(() => setTimeout(finish, Math.max(0, 300 - (Date.now() - t0)))); // never sooner than 300 ms: the leave frames flush
+  setTimeout(finish, 3500).unref?.();            // never later than 3.5 s (the wait for the writes below is part of it)
+  // A save that is still running when the exit begins (a USE a moment ago) gets up to 2 s to land before the final push.
+  Promise.race([Promise.all([...writeChains.values()]), sleep(2000)]).then(() => {
+    pushFinal(() => setTimeout(finish, Math.max(0, 300 - (Date.now() - t0)))); // never sooner than 300 ms: the leave frames flush
+  });
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

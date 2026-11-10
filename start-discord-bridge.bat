@@ -6,7 +6,11 @@ rem `npm run bridge` from the repo root. Running it twice is harmless - the
 rem second instance sees the single-instance guard port and exits (a NEWER build replaces an
 rem older one). Options can be added to the node line below: --sb-ws-url=ws://127.0.0.1:8080/
 rem --guard-port=7495 --exit-on-sb-close=1 (an argument wins over the environment variable).
-cd /d "%~dp0sidecar"
+cd /d "%~dp0sidecar" || (
+  echo Could not open the sidecar folder next to this file: %~dp0sidecar
+  pause
+  exit /b 1
+)
 rem UTF-8 for the console, so the log's dashes and accents are not garbled
 chcp 65001 >nul
 where node >nul 2>nul
@@ -15,14 +19,21 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-if not exist node_modules (
-  echo First run: installing the discord.js stack into sidecar\node_modules ...
-  call npm install --no-audit --no-fund
-  if errorlevel 1 (
-    echo npm install failed - see the output above.
+rem The dependencies are (re)installed when they are missing, when one of the three the bridge needs cannot be found, or when
+rem package-lock.json is not the one the last good install used (a copy is kept inside node_modules after each good install).
+set NEED_INSTALL=
+if not exist node_modules set NEED_INSTALL=1
+if not defined NEED_INSTALL node -e "for (const m of ['ws','discord.js','@discordjs/voice']) require.resolve(m)" >nul 2>nul || set NEED_INSTALL=1
+if not defined NEED_INSTALL fc /b package-lock.json node_modules\.greenroom-package-lock.json >nul 2>nul || set NEED_INSTALL=1
+if defined NEED_INSTALL (
+  echo Installing the discord.js stack into sidecar\node_modules ...
+  rem npm can fail with a negative exit code, which "if errorlevel 1" does not see: test the call itself.
+  call npm ci --no-fund || (
+    echo npm ci failed - see the output above.
     pause
     exit /b 1
   )
+  copy /y package-lock.json node_modules\.greenroom-package-lock.json >nul
 )
 echo Do not click in this window: a click starts a text selection that freezes the console (the title shows Select). Press Esc if it does.
 node discord-bridge.mjs %*

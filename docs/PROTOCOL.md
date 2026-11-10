@@ -283,12 +283,13 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
     "<userId>": { "speaking": false, "username": "Ashe",
                   "avatarUrl": "https://cdn.discordapp.com/…", "mute": false, "deaf": false }
   },
-  "settings": { "streamerUserId": "", "avatarPx": 56, "streamerPx": 72, "height": 180,
+  "settings": { "streamerUserId": "", "avatarPx": 56, "streamerPx": 72,
                 "accent": "cyan", "scanlines": true, "neonBlink": true, "hideWhenAbsent": true,
                 "exitOnSbClose": false },
   "rpc": { "enabled": true, "hasToken": true, "error": "",
            "reconnecting": false,   // the gateway is resuming or re-identifying (additive)
-           "speakingStale": false },// speaking detection looks dead (additive)
+           "speakingStale": false,  // speaking detection looks dead (additive)
+           "configWarning": "" },   // a problem with discord-voice-config.json / discord-tokens.json (additive, sticky)
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
   "current": { "serverId": "…", "channelId": "…" } | null,
   "currentRefused": false,        // the saved `current` failed its check (at login or a rejoin) for a configuration reason and is not joined (additive)
@@ -314,6 +315,8 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   linger in the channel after you close SB. The env var
   `GREENROOM_EXIT_ON_SB_CLOSE=1/0` overrides the setting when set, and the argument
   `--exit-on-sb-close=1/0` overrides both. The grace window is never shorter than 1 s.
+- `rpc.configWarning` is a sticky, fixed-words message about the files (never an error's own text: this goes to every bus client), and nothing else clears it: "The saved config could not be used (…): a copy was kept as discord-voice-config.json.corrupt-<time> and the bridge runs on its defaults" (a file that is not JSON, is `null`, is an array, or is locked; the copy is made before anything is written, and when even the copy fails the file is left alone and nothing is saved that session), or "Could not save discord-voice-config.json (EPERM): the change is not kept after a restart" (the changes are used all the same; the warning goes when a later write works). The bridge reads UTF-8 and UTF-16 files with or without a BOM, writes through a temp file and a rename (the files never end up half-written), writes one at a time per file in the order commands arrived, and waits up to 2 s for a write in flight when it exits. Hand-edited favorites need 17 to 20 digit server and channel ids as text (a bare number keeps its digits); the saved settings are held to the same rules as `set-settings`. The control page shows the warning in Sprint 16.
+- Streamer.bot re-serialises broadcast text, and a lone surrogate in it (half of an emoji) comes back as U+FFFD, so a client must not recognise its own echo by byte equality (favorite names are cut by code point so the bridge never creates one).
 - `rpc.reconnecting` is true while Discord's gateway is resuming or re-identifying
   (`connected` stays true: the roster overlay hides on `!connected`, and a resume
   replays what was missed). `rpc.speakingStale` is true when the bot is in the
@@ -358,12 +361,12 @@ absent, is dropped (only the types are logged): anyone on the bus can send any J
 |---|---|---|
 | `connect` | — | (re)start the bot with the FILE token; visible error if none |
 | `leave` | — | leave voice gracefully, stay logged in, clear the rejoin intent and cancel a pending rejoin (the intent is kept in memory only: a bridge restart wants voice again). With no connection to close, a bot that Discord still shows in the call is told to leave (a gateway voice-state update with no channel) |
-| `reset-auth` | — | forget the saved token (file keeps `enabled`) |
+| `reset-auth` | — | disable the bot (`enabled` false) and stop it. The token file is **not** blanked: a forged bus command must not be able to erase the token. Deleting `discord-tokens.json` by hand forgets it; **Connect** re-reads the file every time |
 | `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live; empty ids leave). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join (View Channel + Connect, room under the user limit; guests count). A target that fails is refused with a message in `rpc.error` (it clears itself after about a minute) and **changes nothing**: the current channel, the saved file, the voice connection and the roster stay. A pick that cannot be saved to the config file is not applied either (`rpc.error` says so). When USEs overlap, the newest decides. Offline, the pick is saved (the reason the bot is offline stays in `rpc.error`) and the same check runs when the bot logs in and at every rejoin: a saved channel that fails it for a configuration reason (no such server or channel, a Stage, no View Channel + Connect) is not joined, stays `current`, and the payload says `currentRefused: true` until the pick changes; a full channel or a network problem is retried instead |
-| `favorite-add` | `{"name","serverId","channelId"}` | add favorite |
-| `favorite-update` | `{"id", …fields}` | edit favorite |
+| `favorite-add` | `{"name","serverId","channelId"}` | add favorite (a name is cut to 80 characters by code point; a favorite for a server and channel that already has one is not added again) |
+| `favorite-update` | `{"id", …fields}` | edit favorite; a change that would leave it without a server or a channel is refused (`rpc.error`) and the favorite stays as it was |
 | `favorite-remove` | `{"id"}` | remove favorite; removing the one that is the current channel clears the current channel and leaves voice (unless another favorite names the same channel) |
-| `set-settings` | partial settings object | merge + clamp + persist |
+| `set-settings` | partial settings object | merge by the rules in `sidecar/settings.mjs` + persist: only the known keys are taken (`streamerUserId` as digits, `avatarPx` 24..128, `streamerPx` 32..160, `accent` one of cyan/magenta/neon-green, the four booleans only for a real true/false); a value of the wrong type (null, an empty string, a number for an enum) changes nothing. The old `height` setting is gone |
 | `quit` | — | leave voice, send the clearing state and exit (code 0): the clean stop |
 
 ## Error broadcasts
@@ -383,7 +386,9 @@ Localhost-only, SB WS authentication assumed **off** (matching the prior PoCs).
 The room password travels in `vdoninja:update` by necessity (overlays embed it in
 view URLs) — same trust model as the toolkit it replaces. The Discord bot token
 is **file-only** (`sidecar/discord-tokens.json`, gitignored) and has no bus
-command that can read or write it. Do not expose SB's WS/HTTP beyond localhost
+command that can read or write it (`reset-auth` only turns `enabled` off; deleting the
+file by hand forgets the token). Bus commands can still stop and move the bot, so
+SB's WebSocket must stay localhost-only. Do not expose SB's WS/HTTP beyond localhost
 without adding SB's auth handshake to every client in this repo (unimplemented).
 Until it is implemented, any page running in OBS (a browser source or dock) or in
 a browser on the same PC can read the room password and drive Greenroom through

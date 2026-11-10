@@ -26,7 +26,7 @@ import { spawn } from 'node:child_process';
 import { createServer, connect as netConnect } from 'node:net';
 import { createServer as createHttp } from 'node:http';
 import { existsSync } from 'node:fs';
-import { readFile, rm, mkdtemp, writeFile, readdir, mkdir } from 'node:fs/promises';
+import { readFile, rm, mkdtemp, writeFile, readdir, mkdir, stat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -246,7 +246,7 @@ const DISCORD_PAYLOAD = {
     '110457699291906048': { speaking: false, username: 'Ashe', avatarUrl: 'https://cdn.discordapp.com/embed/avatars/1.png', mute: false, deaf: false },
     '200000000000000001': { speaking: true, username: 'Guest One', avatarUrl: 'https://cdn.discordapp.com/embed/avatars/2.png', mute: true, deaf: false },
   },
-  settings: { streamerUserId: '110457699291906048', avatarPx: 56, streamerPx: 72, height: 180, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
+  settings: { streamerUserId: '110457699291906048', avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
   rpc: { enabled: true, hasToken: true, error: null },
   favorites: [{ id: 'fav1', name: 'NFC Commentary', serverId: '259501535484968970', channelId: '1197596470245871696' }],
   current: { serverId: '259501535484968970', channelId: '1197596470245871696' },
@@ -1328,7 +1328,7 @@ async function main() {
     const ctrlBody = await ctrlRes.text();
     check('/control/control.html 200 + wired (VDO Push, Discord Voice Command, VDO Sync)',
       ctrlRes.status === 200 && ctrlBody.includes("'VDO Push'") && ctrlBody.includes("'Discord Voice Command'") && ctrlBody.includes("'VDO Sync'"));
-    check('TRIPWIRE: control.html contains no botToken string (token never leaves the sidecar)', !/botToken/.test(ctrlBody));
+    check('TRIPWIRE: control.html contains no botToken string (the page never handles the token)', !/botToken/.test(ctrlBody));
     check('control.html: directory UI wired (directory-core.js, search, live-only, auto-add)',
       ctrlBody.includes('directory-core.js') && ctrlBody.includes('dirSearch')
       && ctrlBody.includes('dirLiveOnly') && ctrlBody.includes('dirAutoAdd') && ctrlBody.includes('GRDir.autoPopulate'));
@@ -1467,7 +1467,7 @@ async function main() {
     const sErr = await shimF.inbox.next(4000,
       (d) => byType('discord:voice:update')(d) && d.discordVoice.rpc && /no bot token/i.test(d.discordVoice.rpc.error || ''),
       'sidecar no-token error');
-    check('connect without a token → visible file-onboarding error (token never on the bus)', !!sErr);
+    check('connect without a token → visible file-onboarding error (the token is only ever read from the file)', !!sErr);
 
     // ── 8. exit-on-SB-close lifecycle: closing SB leaves voice + quits (opt-in) ──
     // Isolated on its own SB (separate ports) so killing it doesn't disturb the
@@ -1523,13 +1523,18 @@ async function main() {
         const n = ++seq;
         const guardPort = opts.guardPort || await freePort();
         const env = { SB_WS_URL: sb.url, DISCORD_BRIDGE_CONFIG: resolve(s12, `cfg${n}.json`), DISCORD_BRIDGE_TOKENS: resolve(s12, `tok${n}.json`),
-          GREENROOM_GUARD_PORT: String(guardPort), GREENROOM_TEST_HOOKS: '1', ...(opts.env || {}) };
+          GREENROOM_GUARD_PORT: String(guardPort), GREENROOM_TEST_HOOKS: '1', GREENROOM_LOOSE_IDS: '1', ...(opts.env || {}) };
         if (opts.token) await writeFile(env.DISCORD_BRIDGE_TOKENS, JSON.stringify({ botToken: opts.token, enabled: false }));
+        if (opts.tokData !== undefined) await writeFile(env.DISCORD_BRIDGE_TOKENS, opts.tokData); // a string or a Buffer, written as it is
         if (opts.cfgText !== undefined) await writeFile(env.DISCORD_BRIDGE_CONFIG, opts.cfgText);
+        if (opts.cfgDir) await mkdir(env.DISCORD_BRIDGE_CONFIG); // the config path is a folder (it can be neither read nor copied)
+        if (opts.stale) { await writeFile(env.DISCORD_BRIDGE_CONFIG + '.tmp', 'x'); await writeFile(env.DISCORD_BRIDGE_TOKENS + '.tmp', 'x'); } // temp files a crash left behind
         const got = []; // every discordVoice payload, in order
+        const frames = []; // every raw frame the watcher received
         const watcher = new WebSocket(sb.url);
         await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
         watcher.on('message', (raw) => {
+          frames.push(raw.toString());
           try {
             const m = JSON.parse(raw.toString());
             if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') got.push(JSON.parse(d.discordVoiceJson)); }
@@ -1542,7 +1547,7 @@ async function main() {
         child.stderr.setEncoding('utf8'); child.stderr.on('data', (d) => { out += d; });
         child.on('exit', (c) => { code = c; });
         const r = {
-          sb, child, got, guardPort, env,
+          sb, child, got, frames, guardPort, env,
           get out() { return out; }, get code() { return code; }, get last() { return got[got.length - 1]; },
           cmd: (command, value = '') => watcher.send(JSON.stringify({ request: 'DoAction', id: 'c' + (++seq), action: { name: 'Discord Voice Command' }, args: { command, value } })),
           raw: (data) => fetch(`${sb.base}/mock/broadcast`, { method: 'POST', body: JSON.stringify(data) }).then((x) => x.arrayBuffer()),
@@ -1575,7 +1580,7 @@ async function main() {
         const socks = new Set();
         // gatewayFailNext: the next N REST lookups of the gateway URL (the first thing a login does) answer gatewayStatus (after gatewayDelay ms)
         // instead of the URL; gatewayHits counts them; connections counts gateway sockets accepted.
-        const st = { identifies: 0, resumes: 0, ops4: [], holdHelloMs: 0, seq: 0, restDelay: {}, gatewayFailNext: 0, gatewayStatus: 500, gatewayDelay: 0, gatewayHits: 0, connections: 0, omitGuildInReady: false };
+        const st = { authSeen: [], identifies: 0, resumes: 0, ops4: [], holdHelloMs: 0, seq: 0, restDelay: {}, gatewayFailNext: 0, gatewayStatus: 500, gatewayDelay: 0, gatewayHits: 0, connections: 0, omitGuildInReady: false };
         const send = (ws, t, d) => { try { ws.send(JSON.stringify({ op: 0, t, s: ++st.seq, d })); } catch { /* gone */ } };
         const gw = new WebSocketServer({ port: 0, host: '127.0.0.1' });
         const me = guild().members.find((m) => m.user.bot).user;
@@ -1597,7 +1602,7 @@ async function main() {
         await new Promise((res) => gw.once('listening', res));
         const rest = createHttp(async (req, res) => {
           res.setHeader('content-type', 'application/json');
-          if (/gateway\/bot/.test(req.url)) st.gatewayHits++;
+          if (/gateway\/bot/.test(req.url)) { st.gatewayHits++; st.authSeen.push(String(req.headers.authorization || '')); }
           if (/gateway\/bot/.test(req.url) && st.gatewayFailNext > 0) {
             st.gatewayFailNext--;
             if (st.gatewayDelay) await nap(st.gatewayDelay);
@@ -1721,11 +1726,11 @@ async function main() {
         await c2.exited(5000);
         check('GRN-16: a token that would be cut in half by the length limit does not leak its first characters into the pushed error or the log', !(c2.last && JSON.stringify(c2.last.rpc).includes(secret.slice(0, 8))) && !c2.out.includes(secret.slice(0, 8)), JSON.stringify(c2.last && c2.last.rpc).slice(-120));
         c2.close();
-        // a config file that cannot be read is kept (renamed), not silently replaced by the example (this predates the sprint)
+        // a config file that cannot be read is kept (copied aside as .corrupt-<time>), never silently replaced by the example (GRN-93)
         const bad = await rig({ cfgText: '{ "favorites": [ ' });
         await nap(300);
-        const kept = (await readdir(s12)).filter((n) => /\.bad-/.test(n));
-        check('the bridge keeps a config file it cannot read (renamed to .bad-<time>) and says so, instead of overwriting it with the example', kept.length === 1 && /could not be read/i.test((bad.last.rpc && bad.last.rpc.error) || ''), JSON.stringify({ kept, err: bad.last && bad.last.rpc && bad.last.rpc.error }));
+        const kept = (await readdir(s12)).filter((n) => /\.corrupt-/.test(n));
+        check('GRN-93: the bridge keeps a config file it cannot read (a copy named .corrupt-<time>) and says so in the sticky rpc.configWarning, instead of overwriting it with the example', kept.length === 1 && /could not be used/i.test((bad.last.rpc && bad.last.rpc.configWarning) || '') && /\{ "favorites": \[ /.test(await readFile(bad.env.DISCORD_BRIDGE_CONFIG, 'utf8')), JSON.stringify({ kept, warn: bad.last && bad.last.rpc && bad.last.rpc.configWarning }));
         bad.close();
         // an address that is not a ws:// URL is said at once, not retried forever in silence
         const badUrl = await rig({ args: ['--sb-ws-url=127.0.0.1:8080'], noWait: true });
@@ -1934,7 +1939,7 @@ async function main() {
           const token = 'AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBB.CCCCCCCCCCCCCCCCCCCCCCCCCCC';
           // These mock connections never get a voice server, so the stall watchdogs (Sprint 13b) are switched off here: [8d] tests them.
           const NO_WATCH = JSON.stringify({ notReadyMs: 0, stallWarnMs: 0, stallLostMs: 0 });
-          const cfgGood = JSON.stringify({ favorites: [{ id: 'f914', name: 'second', serverId: GUILD, channelId: '914' }], current: { serverId: GUILD, channelId: '910' }, settings: {} });
+          const cfgGood = JSON.stringify({ favorites: [{ id: 'f914', name: 'second', serverId: GUILD, channelId: '914' }, { id: 'f914dup', name: 'dup', serverId: GUILD, channelId: '914' }], current: { serverId: GUILD, channelId: '910' }, settings: {} });
           const t = await rig({ token, cfgText: cfgGood, env: { DISCORD_BRIDGE_API: md.api, GREENROOM_REFUSAL_MS: '2500', GREENROOM_TIMING: NO_WATCH } });
           try {
             t.cmd('connect');
@@ -1972,8 +1977,8 @@ async function main() {
             const saved2 = await savedCurrent();
             check('GRN-204: USE on a valid channel is accepted: it becomes the current channel, is saved, the roster is that channel\'s (empty) and the old error is gone', !!moved.current && moved.current.channelId === '914' && moved.channelId === '914' && Object.keys(moved.users).length === 0 && !(moved.rpc && moved.rpc.error) && !!saved2 && saved2.channelId === '914', JSON.stringify({ current: moved.current, channelId: moved.channelId, saved2, err: moved.rpc && moved.rpc.error }));
             check('GRN-204: a slow check for an OLDER pick (finishing after a newer USE was accepted) is dropped: no stale error on the status line, the newer pick stays', !(moved.rpc && moved.rpc.error) && moved.current.channelId === '914', JSON.stringify(moved.rpc));
-            // removing a duplicate of the active favorite does not make the bot leave; removing the last one does (GRN-153)
-            t.cmd('favorite-add', JSON.stringify({ name: 'dup', serverId: GUILD, channelId: '914' })); await nap(500);
+            // removing a duplicate of the active favorite does not make the bot leave; removing the last one does (GRN-153). (The duplicate is in the
+            // config by hand: favorite-add no longer makes one, GRN-133.)
             const dupFav = (t.last.favorites || []).find((f) => f.name === 'dup');
             t.cmd('favorite-remove', JSON.stringify({ id: dupFav && dupFav.id })); await nap(900);
             const afterDup = t.last;
@@ -2043,14 +2048,14 @@ async function main() {
             const refused = await use(GUILD, '912', 600);
             await nap(2700);
             check('GRN-204: a refusal is shown for a while and then clears (the bot is still working in its channel, so the status is not left red for the rest of the stream)', /regular voice channel/.test((refused.rpc && refused.rpc.error) || '') && !(t.last.rpc && t.last.rpc.error) && t.last.channelId === '910', JSON.stringify({ shown: refused.rpc, now: t.last.rpc, channelId: t.last.channelId }));
-            // a config file that cannot be written: the pick is not applied and the error says so
+            // a config file that cannot be written (GRN-68): the pick is used all the same and the sticky warning says it is not kept
             await rm(t.env.DISCORD_BRIDGE_CONFIG, { force: true });
             await mkdir(t.env.DISCORD_BRIDGE_CONFIG);
-            const failed = await use(GUILD, '914', 1100);
-            check('GRN-204: if the config cannot be saved the pick is not applied: the working channel and the current channel stay, and the status says the save failed', !!failed.current && failed.current.channelId === '910' && failed.channelId === '910' && /could not save/i.test((failed.rpc && failed.rpc.error) || ''), JSON.stringify({ current: failed.current, channelId: failed.channelId, err: failed.rpc && failed.rpc.error }));
+            const failed = await use(GUILD, '914', 2500);
+            check('GRN-68: if the config cannot be saved the pick is used all the same (the bot moves) and rpc.configWarning says the change is not kept after a restart', !!failed.current && failed.current.channelId === '914' && failed.channelId === '914' && /could not save discord-voice-config\.json/i.test((failed.rpc && failed.rpc.configWarning) || ''), JSON.stringify({ current: failed.current, channelId: failed.channelId, warn: failed.rpc && failed.rpc.configWarning, err: failed.rpc && failed.rpc.error }));
             await rm(t.env.DISCORD_BRIDGE_CONFIG, { recursive: true, force: true });
-            const saved4 = await use(GUILD, '914', 1100);
-            check('GRN-204: …and the next pick works once the file can be written', saved4.current.channelId === '914' && saved4.channelId === '914' && !(saved4.rpc && saved4.rpc.error) && (await savedCurrent()).channelId === '914', JSON.stringify({ current: saved4.current, channelId: saved4.channelId }));
+            const saved4 = await use(GUILD, '910', 1100);
+            check('GRN-68: …and the next pick is saved once the file can be written, and the warning goes', saved4.current.channelId === '910' && saved4.channelId === '910' && !(saved4.rpc && saved4.rpc.configWarning) && (await savedCurrent()).channelId === '910', JSON.stringify({ current: saved4.current, channelId: saved4.channelId, warn: saved4.rpc && saved4.rpc.configWarning }));
             t.close();
             // offline: a pick made while the bot is offline keeps the message that says why it is offline
             const off = await rig();
@@ -2662,6 +2667,248 @@ async function main() {
               md.gatewayFailNext = 0;
               check('GRN-52: Quit with a login retry armed exits promptly with code 0, and the login is not tried again', exited2 && t2.code === 0 && md.gatewayHits === h0, JSON.stringify({ exited2, code: t2.code }));
               t2.close();
+            }
+          } finally {
+            await md.close();
+          }
+        }
+        // ── 8e. files, tokens and settings (Sprint 14); the token canary is [7b] ──
+        // The real bridge on scratch config and token files: how a file is read (BOM, UTF-16, literal null, a copy kept of a bad one), how it is
+        // written (atomic, queued, a failed write reported), what a token file may be (re-read on Connect, never overwritten from memory, never
+        // blanked over the bus), and the rules for settings and favorites. Logins go to the mock Discord (never to the real one).
+        console.log('\n[8e] files, tokens, settings: BOM / UTF-16 / null / read-only config, atomic queued writes, token file rules, settings and favorite rules');
+        console.log('[7b] token canary: a random token in the token file appears in no frame, state, config or log');
+        {
+          const { GUILD, ME, VIEW, CONNECT, SPEAK, userOf, memberOf, vstate, chan } = DF;
+          const S1 = '123456789012345678', C1 = '223456789012345678';
+          const fav = (id, name, s, c) => ({ id, name, serverId: s, channelId: c });
+          const cfg1 = JSON.stringify({ favorites: [fav('f1', 'Main', S1, C1)], current: null, settings: { accent: 'magenta' } }, null, 2);
+          const STRICT = { GREENROOM_LOOSE_IDS: '0' };
+          const exists = (p) => existsSync(p);
+          const fileText = (t) => readFile(t.env.DISCORD_BRIDGE_CONFIG, 'utf8');
+          const tokText = (t) => readFile(t.env.DISCORD_BRIDGE_TOKENS, 'utf8');
+          const corrupt = async (t) => (await readdir(s12)).filter((n) => n.startsWith(basename(t.env.DISCORD_BRIDGE_CONFIG) + '.corrupt-'));
+          const warn = (p) => (p && p.rpc && p.rpc.configWarning) || '';
+          const err = (p) => (p && p.rpc && p.rpc.error) || '';
+          const waitAfter = async (t, mark, pred, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const hit = t.got.slice(mark).find(pred); if (hit) return hit; await nap(50); } return null; };
+
+          // ── reading (GRN-19, GRN-93) ──
+          const be = Buffer.from(cfg1, 'utf16le'); be.swap16();
+          for (const [what, buf] of [['a UTF-8 BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(cfg1, 'utf8')])], ['UTF-16 little-endian with a BOM (what PowerShell\'s > writes)', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(cfg1, 'utf16le')])], ['UTF-16 big-endian with a BOM', Buffer.concat([Buffer.from([0xfe, 0xff]), be])]]) {
+            const t = await rig({ cfgText: buf, env: STRICT });
+            check('GRN-19/93: a config saved with ' + what + ' loads (favorite and setting intact), is not replaced by the example and raises no warning', t.last.favorites.length === 1 && t.last.favorites[0].name === 'Main' && t.last.favorites[0].serverId === S1 && t.last.settings.accent === 'magenta' && !warn(t.last) && (await corrupt(t)).length === 0, JSON.stringify({ favs: t.last.favorites, warn: warn(t.last) }));
+            t.close();
+          }
+          for (const [what, text] of [['a literal null', 'null'], ['an array', '[]'], ['a number', '5'], ['an empty file', ''], ['half a file', '{ "favorites": [ ']]) {
+            const t = await rig({ cfgText: text });
+            await nap(300);
+            const kept = await corrupt(t);
+            check('GRN-93: a config that is ' + what + ' is not reseeded from the example: a copy is kept as .corrupt-<time>, the bridge runs on defaults and says so in rpc.configWarning (not rpc.error)', kept.length === 1 && t.last.favorites.length === 0 && /could not be used/i.test(warn(t.last)) && !/could not be used/i.test(err(t.last)) && (await fileText(t)) === text, JSON.stringify({ kept, favs: t.last.favorites.length, warn: warn(t.last) }));
+            t.close();
+          }
+          {
+            const t = await rig({ cfgDir: true }); // the config path is a folder: it can be neither read nor copied
+            await nap(300);
+            t.cmd('favorite-add', JSON.stringify({ name: 'x', serverId: S1, channelId: C1 }));
+            await nap(900);
+            check('GRN-19: a config that can be neither parsed nor copied aside is left alone for the whole session: nothing is written to it and rpc.configWarning says so', /nothing is saved this session/i.test(warn(t.last)) && (await stat(t.env.DISCORD_BRIDGE_CONFIG)).isDirectory() && t.last.favorites.some((f) => f.name === 'x'), JSON.stringify({ warn: warn(t.last) }));
+            t.close();
+          }
+          {
+            const t = await rig({ stale: true, cfgText: cfg1, env: STRICT });
+            check('GRN-19: temp files left beside the config and the token file by a crash are deleted at startup', !exists(t.env.DISCORD_BRIDGE_CONFIG + '.tmp') && !exists(t.env.DISCORD_BRIDGE_TOKENS + '.tmp'), '');
+            t.close();
+          }
+          {
+            const t = await rig(); // no config file at all: the only case that is seeded from the example
+            check('GRN-19/93: a MISSING config is seeded from the example (and written)', t.last.favorites.some((f) => f.id === 'example1') && exists(t.env.DISCORD_BRIDGE_CONFIG) && !/"height"/.test(await fileText(t)), JSON.stringify(t.last.favorites));
+            t.close();
+          }
+
+          // ── writing (GRN-19) ──
+          {
+            const t = await rig({ cfgText: JSON.stringify({ favorites: [], current: null, settings: {} }) });
+            for (let i = 0; i < 30; i++) t.cmd('favorite-add', JSON.stringify({ name: 'q' + i, serverId: S1, channelId: '3' + String(i).padStart(17, '0') }));
+            t.cmd('quit');
+            const gone = await t.exited(8000);
+            let parsed = null; try { parsed = JSON.parse(await fileText(t)); } catch { /* left null */ }
+            const left = (await readdir(s12)).filter((n) => n.startsWith(basename(t.env.DISCORD_BRIDGE_CONFIG) + '.tmp'));
+            check('GRN-19: 30 saves in a burst followed by Quit: the saves are queued, the exit waits for them, the file is whole JSON with all 30 favorites in order and no temp file is left', gone && !!parsed && parsed.favorites.length === 30 && parsed.favorites.every((f, i) => f.name === 'q' + i) && left.length === 0, JSON.stringify({ gone, n: parsed && parsed.favorites.length, left }));
+            t.close();
+          }
+          {
+            // GRN-68: a config that cannot be written: the change is used, the sticky warning says it is not kept, and the next write that works clears it
+            const t = await rig({ cfgText: cfg1, env: STRICT });
+            await rm(t.env.DISCORD_BRIDGE_CONFIG, { force: true });
+            await mkdir(t.env.DISCORD_BRIDGE_CONFIG);
+            t.cmd('favorite-add', JSON.stringify({ name: 'Second', serverId: S1, channelId: '323456789012345678' }));
+            t.cmd('set-current', JSON.stringify({ serverId: S1, channelId: C1 }));
+            const failed = await t.waitFor((p) => /could not save discord-voice-config\.json/i.test(warn(p)), 6000);
+            await nap(300);
+            check('GRN-68: when the config cannot be written the changes are used all the same (the favorite is listed, the channel is current) and the sticky rpc.configWarning says they are not kept after a restart', !!failed && t.last.favorites.some((f) => f.name === 'Second') && !!t.last.current && t.last.current.channelId === C1, JSON.stringify({ warn: warn(t.last), cur: t.last.current }));
+            await rm(t.env.DISCORD_BRIDGE_CONFIG, { recursive: true, force: true });
+            t.cmd('favorite-add', JSON.stringify({ name: 'Third', serverId: S1, channelId: '423456789012345678' }));
+            const healed = await t.waitFor((p) => p.favorites.some((f) => f.name === 'Third') && !warn(p), 6000);
+            const saved = JSON.parse(await fileText(t));
+            check('GRN-19/68: …and the next write that works saves everything and clears that warning', !!healed && saved.favorites.length === 3 && saved.current && saved.current.channelId === C1, JSON.stringify({ n: saved.favorites.length, cur: saved.current }));
+            t.close();
+          }
+
+          // ── settings and favorites (GRN-167, 196, 198, 43, 138, 232, 133) ──
+          {
+            const bad = '{ "favorites": [ { "id": "ok", "name": "Okay", "serverId": "' + S1 + '", "channelId": "' + C1 + '" }, '
+              + '{ "id": "bad", "name": "Bad", "serverId": "abc", "channelId": "' + C1 + '" }, '
+              + '{ "id": "short", "name": "Short", "serverId": "900", "channelId": "910" }, '
+              + '{ "id": "num", "name": "Num", "serverId": 123456789012345678, "channelId": 223456789012345679 }, '
+              + '{ "id": "ok", "name": "Twin", "serverId": "' + S1 + '", "channelId": "523456789012345678" } ], '
+              + '"current": null, "settings": { "avatarPx": "abc", "streamerPx": true, "accent": "red", "scanlines": "no", "streamerUserId": 110457699291906048, "height": 180, "junk": 1, "exitOnSbClose": "yes", "neonBlink": false } }';
+            const t = await rig({ cfgText: bad, env: STRICT });
+            const names = t.last.favorites.map((f) => f.name);
+            const ids = t.last.favorites.map((f) => f.id);
+            check('GRN-198: hand-edited favorites must have 17 to 20 digit server and channel ids as text: a bad or short id is skipped (and logged), a bare number keeps its exact digits, a repeated favorite id is made new', names.join(',') === 'Okay,Num,Twin' && t.last.favorites[1].serverId === '123456789012345678' && t.last.favorites[1].channelId === '223456789012345679' && new Set(ids).size === 3 && /"Bad" was skipped/.test(t.out) && /"Short" was skipped/.test(t.out), JSON.stringify({ names, ids }));
+            const s = t.last.settings;
+            check('GRN-167/196/43: settings of the wrong type load as defaults (avatarPx, streamerPx, accent, scanlines, exitOnSbClose), a bare-number streamerUserId keeps its exact digits, a valid false stays false, and unknown keys and the old height are dropped', s.avatarPx === 56 && s.streamerPx === 72 && s.accent === 'cyan' && s.scanlines === true && s.exitOnSbClose === false && s.neonBlink === false && s.streamerUserId === '110457699291906048' && !('height' in s) && !('junk' in s), JSON.stringify(s));
+            t.cmd('set-settings', JSON.stringify({ avatarPx: null, streamerPx: '', accent: 7, neonBlink: 0, scanlines: 'x', exitOnSbClose: 'true', junk: 5 }));
+            await nap(500);
+            const s2 = t.last.settings;
+            check('GRN-167: set-settings holds the same rules: null, an empty string, a number for an enum and a non-boolean change nothing, and exitOnSbClose only turns on for a real true', s2.avatarPx === 56 && s2.streamerPx === 72 && s2.accent === 'cyan' && s2.neonBlink === false && s2.scanlines === true && s2.exitOnSbClose === false && !('junk' in s2), JSON.stringify(s2));
+            t.cmd('set-settings', JSON.stringify({ avatarPx: 9999, streamerPx: 1, accent: 'neon-green', exitOnSbClose: true }));
+            await nap(500);
+            check('GRN-167: …and a number is clamped to its range, a good enum is taken, a real true is taken', t.last.settings.avatarPx === 128 && t.last.settings.streamerPx === 32 && t.last.settings.accent === 'neon-green' && t.last.settings.exitOnSbClose === true, JSON.stringify(t.last.settings));
+            t.close();
+          }
+          {
+            const t = await rig({ cfgText: JSON.stringify({ favorites: [], current: null, settings: {} }) });
+            const long = 'a'.repeat(79) + '😀' + 'tail';
+            t.cmd('favorite-add', JSON.stringify({ name: long, serverId: S1, channelId: C1 }));
+            t.cmd('favorite-add', JSON.stringify({ name: 'again', serverId: S1, channelId: C1 }));
+            await nap(700);
+            const f = t.last.favorites;
+            const name = f[0] && f[0].name;
+            const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+            check('GRN-232: a favorite name longer than 80 characters with an emoji across the cut is cut by code point (80 characters, the emoji whole), never leaving a lone surrogate', f.length === 1 && Array.from(name).length === 80 && name.endsWith('😀') && !lone.test(name), JSON.stringify({ n: f.length, len: name && Array.from(name).length }));
+            check('GRN-133: a repeated Save (the same server and channel) adds no duplicate and keeps the existing entry', f.length === 1 && f[0].name !== 'again', JSON.stringify(f.map((x) => x.name)));
+            const id = f[0].id;
+            t.cmd('favorite-update', JSON.stringify({ id, channelId: '' }));
+            await nap(500);
+            const refused = t.last;
+            t.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+            await nap(500);
+            const after = t.last.favorites[0];
+            check('GRN-138: a favorite-update that would leave it without a channel is refused (with a message), and the favorite is unchanged after the next save', /server ID and a channel ID/i.test(err(refused)) && after.channelId === C1 && after.serverId === S1 && after.name === name, JSON.stringify({ err: err(refused), after }));
+            t.cmd('favorite-update', JSON.stringify({ id, name: 'Renamed' }));
+            await nap(500);
+            check('GRN-138: …and a valid update still works', t.last.favorites[0].name === 'Renamed' && t.last.favorites[0].channelId === C1, JSON.stringify(t.last.favorites[0]));
+            t.close();
+          }
+
+          // ── tokens (GRN-77, 92, 18, 68) and the canary (GRN-179) ──
+          const miniGuild = () => ({
+            id: GUILD, name: 'Mock Guild', icon: null, owner_id: '2000', afk_timeout: 300, verification_level: 0, default_message_notifications: 0, explicit_content_filter: 0,
+            roles: [{ id: GUILD, name: '@everyone', permissions: String(VIEW | CONNECT | SPEAK), position: 0, color: 0, hoist: false, managed: false, mentionable: false }],
+            emojis: [], features: [], mfa_level: 0, system_channel_id: null, premium_tier: 0, premium_subscription_count: 0, preferred_locale: 'en-US', nsfw_level: 0,
+            large: false, unavailable: false, member_count: 2, joined_at: '2020-01-01T00:00:00.000000+00:00', threads: [], stage_instances: [], guild_scheduled_events: [], presences: [],
+            channels: [chan('910', 2, 'main', 0)], members: [memberOf(ME, 'mockbot', { bot: true }), memberOf('2001', 'Alice')], voice_states: [],
+          });
+          const md = await mockDiscord({ guild: miniGuild, users: {} });
+          const NO_WATCH = JSON.stringify({ notReadyMs: 0, stallWarnMs: 0, stallLostMs: 0, loginStartMs: 60000 });
+          const T1 = 'tokenone.AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBB', T2 = 'tokentwo.AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBB';
+          const apiEnv = { DISCORD_BRIDGE_API: md.api, GREENROOM_TIMING: NO_WATCH };
+          const authNow = () => md.authSeen[md.authSeen.length - 1];
+          try {
+            {
+              const t = await rig({ tokData: JSON.stringify({ botToken: T1, enabled: false, sbPassword: 'pw', extra: { a: 1 } }), env: apiEnv });
+              t.cmd('connect');
+              await t.waitFor((p) => p.connected === true, 8000);
+              const first = authNow();
+              const written = JSON.parse(await tokText(t));
+              check('GRN-77: Connect logs in with the token in the file; the token file is written back whole with only `enabled` changed (botToken, sbPassword and every other field kept)', first === 'Bot ' + T1 && written.botToken === T1 && written.enabled === true && written.sbPassword === 'pw' && written.extra && written.extra.a === 1, JSON.stringify({ first, written }));
+              await writeFile(t.env.DISCORD_BRIDGE_TOKENS, JSON.stringify({ botToken: T2, enabled: true }));
+              t.cmd('connect');
+              await until(() => authNow() === 'Bot ' + T2, 8000);
+              const w2 = JSON.parse(await tokText(t));
+              check('GRN-77: a token corrected in the file is adopted by the next Connect, and the file is not overwritten with the token held in memory', authNow() === 'Bot ' + T2 && w2.botToken === T2, JSON.stringify({ auth: authNow(), w2 }));
+              const mR = t.got.length;
+              t.cmd('reset-auth');
+              await waitAfter(t, mR, (p) => p.connected === false && p.rpc.enabled === false, 5000);
+              await nap(300);
+              const w3 = JSON.parse(await tokText(t));
+              check('GRN-18: reset-auth disables and stops the bot but does NOT blank the token file (a forged bus command cannot erase the token): botToken stays, enabled is false, hasToken stays true', w3.botToken === T2 && w3.enabled === false && t.last.rpc.hasToken === true && t.last.rpc.enabled === false, JSON.stringify({ w3, rpc: t.last.rpc }));
+              const mC = t.got.length;
+              t.cmd('connect');
+              const again = await waitAfter(t, mC, (p) => p.connected === true && p.rpc.enabled === true, 8000);
+              await nap(300);
+              check('GRN-18: …and Connect brings the bot back with the same token', !!again, '');
+              await rm(t.env.DISCORD_BRIDGE_TOKENS, { force: true });
+              const mD = t.got.length;
+              t.cmd('connect');
+              await waitAfter(t, mD, (p) => /no bot token/i.test(err(p)) && p.rpc.hasToken === false && p.connected === false, 6000);
+              await nap(300);
+              check('GRN-77: deleting the token file and pressing Connect forgets the token (no token, the bot stops) and does not write the file back', /no bot token/i.test(err(t.last)) && t.last.rpc.hasToken === false && t.last.connected === false && !exists(t.env.DISCORD_BRIDGE_TOKENS), JSON.stringify(t.last.rpc));
+              t.close();
+            }
+            {
+              const broken = '{ "botToken": "' + T1 + '", ';
+              const t = await rig({ tokData: broken, env: apiEnv });
+              const atStart = t.last;
+              t.cmd('connect');
+              await nap(700);
+              check('GRN-92: a token file that exists but is not valid JSON is reported as that (not as missing) at startup and on Connect, in fixed words, and the file is never replaced', /exists but is not valid JSON/.test(err(atStart)) && /exists but is not valid JSON/.test(err(t.last)) && (await tokText(t)) === broken && !err(t.last).includes('Unexpected'), JSON.stringify({ atStart: err(atStart), now: err(t.last) }));
+              t.close();
+            }
+            for (const [what, buf] of [['a UTF-8 BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify({ botToken: T1, enabled: false }))])], ['UTF-16 little-endian', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(JSON.stringify({ botToken: T1, enabled: false }), 'utf16le')])]]) {
+              const t = await rig({ tokData: buf, env: apiEnv });
+              check('GRN-92: a token file saved with ' + what + ' is read (hasToken true)', t.last.rpc.hasToken === true && !err(t.last), JSON.stringify(t.last.rpc));
+              t.close();
+            }
+            {
+              const t = await rig({ tokData: JSON.stringify({ botToken: '   ', enabled: true }), env: apiEnv });
+              t.cmd('connect');
+              await t.waitFor((p) => /no bot token/i.test(err(p)), 4000);
+              check('GRN-77: an empty token in the file is no token', t.last.rpc.hasToken === false && /no bot token/i.test(err(t.last)), JSON.stringify(t.last.rpc));
+              t.close();
+            }
+            {
+              // GRN-68: the token file cannot be written (read-only): the bot still logs in, and the sticky warning says so
+              const t = await rig({ tokData: JSON.stringify({ botToken: T1, enabled: false }), env: apiEnv });
+              await chmod(t.env.DISCORD_BRIDGE_TOKENS, 0o444);
+              try {
+                t.cmd('connect');
+                const up = await t.waitFor((p) => p.connected === true, 8000);
+                const w = await t.waitFor((p) => /could not save discord-tokens\.json/i.test(warn(p)), 6000);
+                check('GRN-68: when the token file cannot be written Connect still starts the bot, and rpc.configWarning says the change is not kept', !!up && !!w && (await tokText(t)).includes(T1), JSON.stringify({ up: !!up, warn: warn(t.last) }));
+              } finally { await chmod(t.env.DISCORD_BRIDGE_TOKENS, 0o666).catch(() => {}); }
+              t.close();
+            }
+            {
+              // [7b] the canary: a random token that is in the token file and nowhere else
+              const CANARY = 'canary' + Math.random().toString(36).slice(2, 12) + '.AAAAAAAAAAAAAAAAAAAAAAAA.CCCCCCCCCCCCCCCCCCCCCCCCCCC';
+              const t = await rig({ token: CANARY, cfgText: JSON.stringify({ favorites: [], current: null, settings: {} }) });
+              const first = t.last;
+              const probe = new WebSocket(t.sb.url);
+              await new Promise((res, rej) => { probe.on('open', res); probe.on('error', rej); });
+              t.cmd('set-settings', JSON.stringify({ accent: 'magenta' }));
+              t.cmd('favorite-add', JSON.stringify({ name: 'C', serverId: S1, channelId: C1 }));
+              await nap(400);
+              const fid = t.last.favorites[0] && t.last.favorites[0].id;
+              t.cmd('favorite-update', JSON.stringify({ id: fid, name: 'C2' }));
+              t.cmd('set-current', JSON.stringify({ serverId: S1, channelId: C1 }));
+              t.cmd('leave');
+              probe.send(JSON.stringify({ request: 'DoAction', id: 'sync', action: { name: 'VDO Sync' } })); // a replay of what Streamer.bot holds
+              await nap(400);
+              t.cmd('favorite-remove', JSON.stringify({ id: fid }));
+              t.cmd('reset-auth'); // (never `connect`: that would dial a login)
+              await nap(900);
+              const actions = await (await fetch(`${t.sb.base}/mock/actions`)).text();
+              const state = await (await fetch(`${t.sb.base}/mock/state`)).text();
+              try { probe.close(); } catch { /* gone */ }
+              const frames = t.frames.join('\n');
+              const cfgNow = await fileText(t);
+              const everyPayload = JSON.stringify(t.got);
+              check('[7b] GRN-179: the token loaded (rpc.hasToken true, no botToken key in rpc), and the canary is in no frame of the bus, no recorded action, no state, no payload, no log line and not in the config file', first.rpc.hasToken === true && !('botToken' in first.rpc) && !frames.includes(CANARY) && !actions.includes(CANARY) && !state.includes(CANARY) && !everyPayload.includes(CANARY) && !t.out.includes(CANARY) && !cfgNow.includes(CANARY), JSON.stringify({ hasToken: first.rpc.hasToken, frames: frames.includes(CANARY), actions: actions.includes(CANARY), state: state.includes(CANARY), out: t.out.includes(CANARY), cfg: cfgNow.includes(CANARY) }));
+              const tokNow = JSON.parse(await tokText(t));
+              check('[7b] GRN-18/179: …and after reset-auth the token file still holds the canary (reset-auth disables the bot, it does not erase the token)', tokNow.botToken === CANARY && tokNow.enabled === false, JSON.stringify({ enabled: tokNow.enabled, kept: tokNow.botToken === CANARY }));
+              t.close();
             }
           } finally {
             await md.close();

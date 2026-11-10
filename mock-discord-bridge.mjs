@@ -40,7 +40,6 @@ const DEFAULT_SETTINGS = {
   streamerUserId: STREAMER_ID,
   avatarPx: 56,
   streamerPx: 72,
-  height: 180,
   accent: 'cyan',
   scanlines: true,
   neonBlink: true,

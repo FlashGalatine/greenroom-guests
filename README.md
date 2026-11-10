@@ -200,8 +200,10 @@ remaining open item (multi-director safety) are in
 Localhost trust: SB's WS runs with authentication off, and the room password
 travels in the broadcast payload because view URLs need it. The Discord bot
 token never does — it lives only in the gitignored `sidecar/discord-tokens.json`,
-and no bus command can carry one (`verify` enforces that `control.html` doesn't
-even contain the string). Don't expose SB's servers beyond localhost.
+and no bus command can read, carry or erase one (`verify` enforces that `control.html`
+doesn't even contain the string, and that a token in the file appears in no frame,
+state, log or config). Bus commands can still stop and move the bot, so don't expose
+SB's servers beyond localhost. Deleting `discord-tokens.json` by hand forgets the token.
 
 With authentication off (the only mode Greenroom supports today), any page
 running in OBS, as a browser source or a dock, or in a browser on the same PC can

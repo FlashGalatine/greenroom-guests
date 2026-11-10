@@ -4,6 +4,9 @@ node_modules/
 # Secrets + per-install runtime state (seeded from discord-voice-config.example.json)
 sidecar/discord-tokens.json
 sidecar/discord-voice-config.json
+# temp files of an atomic write (the tokens one holds the token) and copies kept of a config that could not be read
+sidecar/*.tmp
+sidecar/*.corrupt-*
 
 # Config backups (backup.mjs) — contain the room password + resolved stream IDs
 backups/
