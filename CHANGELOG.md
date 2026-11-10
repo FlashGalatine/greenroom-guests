@@ -9,6 +9,26 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.87] — 2026-11-10
+
+The optional `Discord Bridge Start` action checks what it is about to launch and says what is wrong, finds Node even when it was installed after Streamer.bot started, and reports a bridge that exits at once. `Discord Voice Command` no longer lets a command forge a log line. Only the two actions, the documents and the tests changed: the bridge, the pages and the other actions are untouched, so the sidecar version stays where it was (1.0.84).
+
+### Fixed
+
+- **`Discord Bridge Start` no longer says "launched" when nothing started.** Before it launches anything it checks that `BUNDLE` is set (it now reads `C:\path\to\greenroom-guests\sidecar` until you edit it, instead of the author's own folder, and says "BUNDLE is still the placeholder"), that the folder exists, that `discord-bridge.mjs` is in it and that `node_modules` is in it; each failure logs its own specific message (edit `BUNDLE`; not the sidecar folder; run `npm install` in `sidecar/` or run `start-discord-bridge.bat` once) and the action returns false. After the launch it waits two seconds: a bridge that exits with code 0 is reported as already running (the single-instance guard found one of the same or a newer version), any other exit code is logged with its number and the hint to run `start-discord-bridge.bat`, and one that is still running after two seconds is "launched". A refusal that takes longer than that (the guard port held by another program or by an older bridge) is logged by the bridge in its own hidden window, so the "launched" line says to run `start-discord-bridge.bat` if no bridge appears.
+- **Node is found even if it was installed after Streamer.bot started.** The action starts `node` as Windows finds it (Streamer.bot's own PATH, so a Node you put first in PATH wins); only if that fails because `node.exe` is not found does it look in the Node.js registry key, in `Program Files\nodejs` and in the freshly read Machine and User PATH, and start the one it finds by its full path. "node was not found in Streamer.bot's PATH" now says to restart Streamer.bot or use the `.bat`, and a start that fails for another reason names the file it tried. nvm-windows, volta and fnm are not covered.
+- **A command can no longer forge a log line.** `Discord Voice Command` logs the command with control characters (line breaks, the C1 range, the Unicode line and paragraph separators and the bidi controls) as spaces and cut at 40 characters without splitting an emoji, and an error as its type and a capped message; the broadcast still carries the command whole.
+- The header comments are corrected: any Streamer.bot exit that does not close the bridge (a normal close too, not only a crash or a kill) leaves it running and holding the ports, and a "Run a Program" sub-action that sets environment variables or waits for the program to exit must not be used to start it. The compile error without `System.dll` is named as the editor shows it (`CS0234 'ComponentModel'` / `CS0246 'Process'`).
+
+### Added
+
+- Tests: `verify` section [6b] compiles both actions with the .NET Framework C# compiler (C# 5, with only the references Streamer.bot gives an action, against a stubbed Streamer.bot API) and runs them: the sanitised log line (line break, C1 and Unicode separators, an emoji at the cut), the unedited `BUNDLE`, a missing folder, `discord-bridge.mjs` and `node_modules`, a bridge that exits 0, exits 3, stays up and one that refuses after the two-second window, a `node.exe` placed first in PATH being the one that runs, and the node search with Node missing from `PATH` and missing everywhere; plus comment-stripped checks that `UseShellExecute` stays true. The compile-and-run checks are skipped on a machine without that compiler.
+
+### Changed
+
+- Documents: README (restart Streamer.bot after installing Node), `docs/STREAMERBOT-SETUP.md` (the `BUNDLE` placeholder, the pre-flight, the node search order and the two-second window in the Discord Bridge Start extras, the same advice in the sidecar section, and a troubleshooting entry that names each log line).
+
+**Deploy:** this is the second action re-paste round, and only for people who use the Discord bridge: **re-paste `Discord Bridge Start` and `Discord Voice Command` into Streamer.bot and compile both** (the References step is unchanged: add `System.dll`). If the placeholder shows in the log, set `BUNDLE` to your `…\greenroom-guests\sidecar` folder. Nothing else to copy; the bridge, the pages and the other actions are unchanged, and nothing needs a restart. Without the Discord bridge you can skip this release. **Not yet checked live** (they need Streamer.bot's own C# editor and a real launch): compiling both actions in Streamer.bot 1.0.7, and the launch with a wrong `BUNDLE` and with Node missing from `PATH` there. `verify` 537/537, `verify:render` 463/463.
 ## [1.0.84] — 2026-11-10
 
 Every Greenroom piece that talks to Streamer.bot can now authenticate to it, so Streamer.bot's WebSocket **Authentication plus Enforce** can be turned on, and the bridge checks who it is talking to. Authentication stays optional: with it off nothing changes. The sidecar version is now 1.0.84.
@@ -571,6 +591,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.87]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.84...v1.0.87
 [1.0.84]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.81...v1.0.84
 [1.0.81]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.78...v1.0.81
 [1.0.78]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.75...v1.0.78
