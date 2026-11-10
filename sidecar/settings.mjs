@@ -17,7 +17,8 @@ export const DEFAULT_SETTINGS = {
 export const ACCENTS = ['cyan', 'magenta', 'neon-green'];
 
 // An integer clamped to a range; null, '', a boolean or anything that is not a number gives the fallback (Number(null) and Number(true)
-// are 0 and 1, which would silently become a size).
+// are 0 and 1, which would silently become a size). The ranges used for avatarPx (24..128) and streamerPx (32..160) below are kept in
+// step with the control page's inputs and DVO_PX in control/control.html: change them in both places.
 export function clampInt(v, min, max, fallback) {
   // Only a number, or a string that is written as one (Number([]), Number(' ') and Number([100]) would be 0, 0 and 100).
   const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;

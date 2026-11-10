@@ -31,7 +31,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -175,7 +175,7 @@ async function main() {
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
     // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18; RENDER_ONLY=revision just R19.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness' && ONLY !== 'discordctl') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -844,14 +844,15 @@ async function main() {
     await pgY.goto(`${fresh.api.base}/control/control.html?sbport=${fresh.ws}`, { waitUntil: 'load' });
     await wait(pgY, () => document.getElementById('vdoRoom')?.value === 'seededroom', null, 8000);
     await fresh.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON' });
-    await wait(pgY, () => /payload rejected/.test(document.getElementById('sbStatus')?.textContent || ''), null, 4000);
+    // (an action error has its own line now, #actionError, and leaves the SB pill to the socket: GRN-107)
+    await wait(pgY, () => /payload rejected/.test(document.getElementById('actionErrorText')?.textContent || ''), null, 4000);
     check('R8c: an error that has nothing to do with dates (the new push check) is not blamed on a date-shaped entry',
-      await pgY.evaluate(() => { const t = document.getElementById('sbStatus')?.textContent || ''; return /payload rejected/.test(t) && !/date-like/.test(t); }),
-      await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      await pgY.evaluate(() => { const t = document.getElementById('actionErrorText')?.textContent || ''; return /payload rejected/.test(t) && !/date-like/.test(t); }),
+      await pgY.evaluate(() => document.getElementById('actionErrorText')?.textContent));
     await fresh.api.broadcast({ type: 'vdo:error', message: 'The added or subtracted value results in an un-representable DateTime.' });
-    const namedPill = await wait(pgY, (n) => (document.getElementById('sbStatus')?.textContent || '').includes(n), DATE_LABEL, 4000);
+    const namedPill = await wait(pgY, (n) => (document.getElementById('actionErrorText')?.textContent || '').includes(n), DATE_LABEL, 4000);
     check('R8c: Streamer.bot\'s own date failure (an old action paste) names the date-shaped directory entry', namedPill,
-      await pgY.evaluate(() => document.getElementById('sbStatus')?.textContent));
+      await pgY.evaluate(() => document.getElementById('actionErrorText')?.textContent));
     await pgY.close(); dateProd.close();
 
     // ── R9: Save/Import, Export and Import checks, unknown-field pass-through ──────────
@@ -1594,8 +1595,8 @@ async function main() {
           painted: await guest.evaluate(() => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111')),
           cachedLabel: state.vdo && state.vdo.slots && state.vdo.slots[0] && state.vdo.slots[0].label,
           pushes: pushes.length, late: pushes.length - early,
-          pill: await ctl.evaluate(() => document.getElementById('sbStatus')?.textContent || ''),
-          minStatus: await min.evaluate(() => document.getElementById('status')?.textContent || ''),
+          pill: await ctl.evaluate(() => (document.getElementById('sbStatus')?.textContent || '') + ' ' + (document.getElementById('actionErrorText')?.textContent || '')), // (the SB pill, and the line an action error now has)
+          minStatus:await min.evaluate(() => document.getElementById('status')?.textContent || ''),
           errors,
         };
         await guest.close(); await ctl.close(); await min.close(); x.prod.close(); x.proc.kill();
@@ -3425,6 +3426,383 @@ async function main() {
         check('R18n: at the cap ten new members evict the idle guests who left (Member 01..10) and not the one in slot 1 (Member 00); a guest who returns after being evicted is added again',
           n2.length === 50 && n2.includes('Member 00') && n2.includes('Member 59') && !n2.includes('Member 01') && !n2.includes('Member 10') && n2.includes('Member 11')
           && n3.length === 50 && n3.includes('Member 01') && n3.includes('Member 00'), JSON.stringify({ n2: n2.length, n3: n3.length, has01: n3.includes('Member 01') }));
+        await p.close();
+      }
+    }
+
+    // ── R21: the Discord panel of the control page (GRN-33, 112, 211, 175, 184, 133, 107, 172, 127) ──
+    if (!ONLY || ONLY === 'discordctl') {
+      console.log('\n[R21] control page, Discord panel: settings sent as changed keys only, hydration, status pills, favorites, error line, labels, source URLs');
+      const ctlUrl = (x, q) => `${x.api.base}/control/control.html?sbport=${x.ws}${q || ''}`;
+      const cmdsOf = async (x) => (await x.api.actions()).filter((a) => a.name === 'Discord Voice Command').map((a) => { let v = a.args && a.args.value; try { v = JSON.parse(v); } catch {} return { command: a.args && a.args.command, value: v }; });
+      const settingsCmds = async (x) => (await cmdsOf(x)).filter((c) => c.command === 'set-settings');
+      const S = (o) => Object.assign({ streamerUserId: STREAMER, avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true, exitOnSbClose: false }, o || {});
+      const push = (x, patch) => x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE(patch) });
+      const pillOf = (p) => p.evaluate(() => ({ text: document.getElementById('dvoStatus').textContent, cls: document.getElementById('dvoStatus').className, title: document.getElementById('dvoStatus').title }));
+      const waitPill = (p, re, ms) => wait(p, (src) => new RegExp(src).test(document.getElementById('dvoStatus').textContent), re.source, ms || 6000);
+      const edit = (p, id, v) => p.evaluate(([i, val]) => { const el = document.getElementById(i); el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, [id, v]);
+      const flip = async (p, id) => { await p.click('#' + id); await p.evaluate(() => document.activeElement && document.activeElement.blur()); };
+      const visible = (p, sel) => p.evaluate((s) => { const e = document.querySelector(s); return !!e && !e.hidden && getComputedStyle(e).display !== 'none'; }, sel);
+      const SKEW = '(() => { window.__skew = 0; const p = performance.now.bind(performance); performance.now = () => p() + window.__skew; })();';
+      const DVO_IDS = ['dvoAccent', 'dvoAvatarPx', 'dvoStreamerPx', 'dvoStreamerId', 'dvoHideWhenAbsent', 'dvoScanlines', 'dvoNeonBlink', 'dvoExitOnSbClose'];
+      const ID1 = '111111111111111111', CH1 = '222222222222222222', ID2 = '333333333333333333', CH2 = '444444444444444444';
+      const FAVS = [{ id: 'fav1', name: 'Main Hang', serverId: ID1, channelId: CH1 }, { id: 'fav2', name: 'Side Room', serverId: ID2, channelId: CH2 }];
+      const inVoice = (o) => Object.assign({ settings: S(), favorites: FAVS, current: { serverId: ID1, channelId: CH1 }, channelId: CH1 }, o || {});
+
+      // (a) GRN-211: the settings controls stay disabled, and send nothing, until a feed with a settings object arrives
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await sleep(900);
+        const dis0 = await p.evaluate((ids) => ids.map((i) => document.getElementById(i).disabled), DVO_IDS);
+        await p.evaluate(() => { const el = document.getElementById('dvoAvatarPx'); el.value = '90'; el.dispatchEvent(new Event('change', { bubbles: true })); });
+        await sleep(900);
+        const early = (await settingsCmds(x)).length;
+        push(x, { settings: undefined }); // a feed with no settings object does not hydrate the form
+        await sleep(800);
+        const dis1 = await p.evaluate((ids) => ids.map((i) => document.getElementById(i).disabled), DVO_IDS);
+        push(x, { settings: S() });
+        const enabled = await wait(p, (ids) => ids.every((i) => !document.getElementById(i).disabled), DVO_IDS, 5000);
+        check('R21a: the Discord settings controls are disabled before the first Discord update that carries settings (a change event before it sends nothing), and enabled by it', dis0.every(Boolean) && early === 0 && dis1.every(Boolean) && enabled, JSON.stringify({ dis0, early, dis1, enabled }));
+        await p.close();
+      }
+      // (b) GRN-33/112: only the keys the operator changed are sent, one partial set-settings per 400 ms window; hand-edited values survive
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, { settings: S({ accent: '10,20,30', avatarPx: 9999, exitOnSbClose: 1 }) }); // values the form cannot show
+        await wait(p, () => !document.getElementById('dvoNeonBlink').disabled, null, 6000);
+        const exitBox = await p.evaluate(() => document.getElementById('dvoExitOnSbClose').checked);
+        check('R21b: a hand-edited exitOnSbClose of 1 shows as ticked (!!value, not === true)', exitBox === true, String(exitBox));
+        await x.api.clear();
+        await flip(p, 'dvoNeonBlink');
+        await sleep(1200);
+        const one = await settingsCmds(x);
+        check('R21b2: one edit sends one set-settings with only that key (accent "10,20,30", avatarPx 9999 and exitOnSbClose 1 set by hand are not overwritten)', one.length === 1 && JSON.stringify(one[0].value) === '{"neonBlink":false}', JSON.stringify(one));
+        await x.api.clear();
+        await edit(p, 'dvoAvatarPx', '80');
+        await sleep(150);
+        await edit(p, 'dvoAccent', 'magenta');
+        await sleep(1200);
+        const two = await settingsCmds(x);
+        check('R21b3: two edits within a window go out as ONE partial set-settings holding both keys', two.length === 1 && two[0].value.avatarPx === 80 && two[0].value.accent === 'magenta' && Object.keys(two[0].value).length === 2, JSON.stringify(two));
+        await x.api.clear();
+        await edit(p, 'dvoAvatarPx', '5');
+        await sleep(1200);
+        const lo = await settingsCmds(x);
+        await edit(p, 'dvoStreamerPx', '9999');
+        await sleep(1200);
+        const hi = await settingsCmds(x);
+        check('R21b4: a pixel size is held to the input\'s range before it is sent (5 → 24, 9999 → 160)', lo.length === 1 && lo[0].value.avatarPx === 24 && hi.length === 2 && hi[1].value.streamerPx === 160, JSON.stringify({ lo, hi }));
+        await x.api.clear();
+        push(x, { settings: S({ avatarPx: 56 }) });
+        await sleep(500);
+        await edit(p, 'dvoAvatarPx', '');
+        await sleep(1200);
+        const blank = await settingsCmds(x);
+        const shown = await p.evaluate(() => document.getElementById('dvoAvatarPx').value);
+        check('R21b5: a blank pixel size sends nothing and the field goes back to the last value the bridge reported', blank.length === 0 && shown === '56', JSON.stringify({ blank, shown }));
+        await p.close();
+      }
+      // (c) GRN-33: an edit racing the voice feed (120 ms pushes with the old value) is not flipped back; it is after 3 s without an echo, and the echo ends the hold
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, { settings: S({ scanlines: true }) });
+        await wait(p, () => !document.getElementById('dvoScanlines').disabled, null, 6000);
+        await flip(p, 'dvoScanlines'); // now unticked
+        const seen = [];
+        for (let i = 0; i < 12; i++) { push(x, { settings: S({ scanlines: true }) }); await sleep(120); seen.push(await p.evaluate(() => document.getElementById('dvoScanlines').checked)); }
+        check('R21c: an edit made while the bridge keeps pushing the old settings (every 120 ms) is not flipped back by the feed', seen.every((v) => v === false), JSON.stringify(seen));
+        const sent = await settingsCmds(x);
+        check('R21c2: …and the change was sent once', sent.length === 1 && JSON.stringify(sent[0].value) === '{"scanlines":false}', JSON.stringify(sent));
+        await sleep(2400); // 3 s after the send, with no echo: the feed is followed again (the bridge did not take it)
+        push(x, { settings: S({ scanlines: true }) });
+        const back = await wait(p, () => document.getElementById('dvoScanlines').checked === true, null, 3000);
+        check('R21c3: with no echo, the form follows the bridge again 3 s after the send', back, '');
+        await flip(p, 'dvoNeonBlink');
+        await sleep(600);
+        push(x, { settings: S({ scanlines: true, neonBlink: false }) }); // the echo
+        await sleep(300);
+        push(x, { settings: S({ scanlines: true, neonBlink: true }) }); // someone else turns it back on
+        const follows = await wait(p, () => document.getElementById('dvoNeonBlink').checked === true, null, 3000);
+        check('R21c4: once the bridge echoes the value the hold ends, so a later change by someone else shows', follows, '');
+        await p.close();
+      }
+      // (d) GRN-175: stale heartbeat, stopped, no feed, reconnecting, moved, refused, error; the target in the pill
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.addInitScript(SKEW);
+        const errs = []; p.on('pageerror', (e) => errs.push(String(e && e.message)));
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await sleep(500);
+        const none = await pillOf(p);
+        check('R21d: with no feed the pill says "bridge: no feed — is the sidecar running, and pointed at this SB port?"', /no feed — is the sidecar running, and pointed at this SB port\?/.test(none.text), JSON.stringify(none));
+        push(x, inVoice({ hb: 400 }));
+        await waitPill(p, /in voice/);
+        const live = await pillOf(p);
+        check('R21d2: a live feed shows "in voice", the number present and the target\'s name', /in voice/.test(live.text) && /3 present/.test(live.text) && /Main Hang/.test(live.text) && /live/.test(live.cls), JSON.stringify(live));
+        const stale = await waitPill(p, /feed stale — is the sidecar running\?/, 8000);
+        const sp = await pillOf(p);
+        check('R21d3: three missed heartbeats (hb 400 is raised to the 1 s floor) turn the pill to "bridge: feed stale — is the sidecar running?" (error)', stale && /error/.test(sp.cls), JSON.stringify(sp));
+        push(x, inVoice({ hb: 400 }));
+        check('R21d4: …and a push brings it back', await waitPill(p, /in voice/), JSON.stringify(await pillOf(p)));
+        push(x, inVoice());
+        await waitPill(p, /in voice/);
+        await p.evaluate(() => { window.__skew += 60000; });
+        await sleep(1500);
+        check('R21d5: a payload with no hb is never stale, however long it has been', /in voice/.test((await pillOf(p)).text), JSON.stringify(await pillOf(p)));
+        push(x, inVoice({ stopped: true, hb: 0, users: {}, connected: false, hostInChannel: false }));
+        check('R21d6: the bridge\'s last push (stopped: true) reads "bridge stopped"', await waitPill(p, /bridge stopped/), JSON.stringify(await pillOf(p)));
+        push(x, inVoice({ rpc: { enabled: true, hasToken: true, error: null, reconnecting: true } }));
+        check('R21d7: rpc.reconnecting reads "reconnecting to Discord…"', await waitPill(p, /reconnecting to Discord…/), JSON.stringify(await pillOf(p)));
+        push(x, inVoice({ channelId: '999999999999999999' }));
+        const moved = await waitPill(p, /moved in Discord · 3 present — USE returns the bot/);
+        const mp = await pillOf(p);
+        check('R21d8: a bot dragged to another channel shows the amber "moved in Discord · N present — USE returns the bot" pill (class warn)', moved && /\bwarn\b/.test(mp.cls), JSON.stringify(mp));
+        push(x, inVoice({ channelId: '999999999999999999', current: null }));
+        await sleep(600);
+        const noCur = await pillOf(p);
+        push(x, inVoice({ channelId: '999999999999999999', hostInChannel: false }));
+        await sleep(600);
+        const outOfVoice = await pillOf(p);
+        check('R21d9: no moved pill without a current target, or with the bot out of voice, and no page error', !/moved/.test(noCur.text) && !/moved/.test(outOfVoice.text) && errs.length === 0, JSON.stringify({ noCur, outOfVoice, errs }));
+        push(x, inVoice({ connected: true, hostInChannel: false, currentRefused: true }));
+        const refused = await waitPill(p, /saved channel .*not joined/);
+        check('R21d10: currentRefused reads that the saved channel is not joined (error)', refused && /error/.test((await pillOf(p)).cls), JSON.stringify(await pillOf(p)));
+        push(x, inVoice({ rpc: { enabled: true, hasToken: true, error: 'That channel is a Stage: pick a regular voice channel' } }));
+        const er = await waitPill(p, /That channel is a Stage/);
+        const ep = await pillOf(p);
+        check('R21d11: a refused USE (rpc.error) shows its whole text on the pill and in its title', er && /error/.test(ep.cls) && /regular voice channel/.test(ep.title), JSON.stringify(ep));
+        await p.close();
+      }
+      // (e) GRN-175: speakingStale, configWarning and the version note are lines of their own; Stop bridge, Clear channel and Disable bot
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        let dlg = '';
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, inVoice({ rpc: { enabled: true, hasToken: true, error: null, speakingStale: true, configWarning: 'Could not save discord-voice-config.json (EPERM): the change is not kept after a restart' }, bridgeVersion: '1.0.10' }));
+        await wait(p, () => !document.getElementById('dvoSpeakWarn').hidden, null, 6000);
+        const lines = await p.evaluate(() => ({ speak: document.getElementById('dvoSpeakWarn').textContent, cfg: document.getElementById('dvoConfigWarn').hidden ? '' : document.getElementById('dvoConfigWarn').textContent, ver: document.getElementById('dvoVersionNote').hidden ? '' : document.getElementById('dvoVersionNote').textContent, pill: document.getElementById('dvoStatus').textContent }));
+        check('R21e: rpc.speakingStale shows "speaking detection may have stopped: run npm update in sidecar/" on a line of its own (the pill stays "in voice")', /speaking detection may have stopped: run npm update in sidecar\//.test(lines.speak) && /in voice/.test(lines.pill) && !/stopped/.test(lines.pill), JSON.stringify(lines));
+        check('R21e2: rpc.configWarning is a sticky line under the pill', /EPERM/.test(lines.cfg), JSON.stringify(lines));
+        check('R21e3: a bridge older than the sidecar shipped with the page gets a version note naming both', /1\.0\.10/.test(lines.ver) && /\d+\.\d+\.\d+/.test(lines.ver.replace('1.0.10', '')), JSON.stringify(lines));
+        push(x, inVoice({ rpc: { enabled: true, hasToken: true, error: null, speakingStale: false, configWarning: '' }, bridgeVersion: '1.0.10' }));
+        const cleared = await wait(p, () => document.getElementById('dvoSpeakWarn').hidden && document.getElementById('dvoConfigWarn').hidden, null, 6000);
+        check('R21e4: both lines go when the bridge clears them', cleared, '');
+        const want = JSON.parse(readFileSync(resolve(__dirname, 'sidecar', 'package.json'), 'utf8')).version;
+        const ctlSrc = readFileSync(resolve(__dirname, 'control', 'control.html'), 'utf8');
+        const notes = {};
+        for (const [label, ver] of [['equal', want], ['newer', '9.9.9'], ['mock', 'mock'], ['older', '1.0.10'], ['none', undefined]]) {
+          push(x, inVoice({ bridgeVersion: ver }));
+          await sleep(700);
+          notes[label] = await p.evaluate(() => (document.getElementById('dvoVersionNote').hidden ? '' : document.getElementById('dvoVersionNote').textContent));
+        }
+        check('R21e5: the version note shows for an older bridge and for one that reports no version, not for the same, a newer one or the mock', !notes.equal && !notes.newer && !notes.mock && /1\.0\.10/.test(notes.older) && /no version/.test(notes.none), JSON.stringify(notes));
+        check('R21e6: the page\'s expected bridge version is the sidecar/package.json version shipped with it (' + want + ')', new RegExp('EXPECTED_BRIDGE_VERSION\\s*=\\s*\'' + want.replace(/\./g, '\\.') + '\'').test(ctlSrc), want);
+        // Stop bridge, Clear channel, Disable bot
+        p.on('dialog', (d) => { dlg = d.message(); d.accept(); });
+        await x.api.clear();
+        await p.click('#dvoStop');
+        await sleep(700);
+        const stop = (await cmdsOf(x)).filter((c) => c.command === 'quit');
+        await x.api.clear();
+        await p.click('#dvoClear');
+        await sleep(700);
+        const clear = (await cmdsOf(x)).filter((c) => c.command === 'set-current');
+        await x.api.clear();
+        const label = await p.evaluate(() => document.getElementById('discordResetAuth').textContent);
+        await p.click('#discordResetAuth');
+        await sleep(700);
+        const reset = (await cmdsOf(x)).filter((c) => c.command === 'reset-auth');
+        check('R21f: Stop bridge sends quit, Clear channel sends set-current with empty ids, and Reset auth is now "Disable bot" whose confirm says it keeps the token file', stop.length === 1 && clear.length === 1 && clear[0].value.serverId === '' && clear[0].value.channelId === '' && label === 'Disable bot' && reset.length === 1 && /without deleting the token/.test(dlg), JSON.stringify({ stop, clear, label, reset, dlg }));
+        p.removeAllListeners('dialog');
+        p.on('dialog', (d) => d.dismiss());
+        await x.api.clear();
+        await p.click('#dvoStop');
+        await sleep(600);
+        check('R21f2: declining the Stop bridge confirm sends nothing', (await cmdsOf(x)).length === 0, '');
+        await p.close();
+      }
+      // (f) GRN-184: the favorites list repaints after a click, and ACTIVE follows the live state
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        const labels = () => p.evaluate(() => [...document.querySelectorAll('#dvoFavorites .dvo-fav-item')].map((r) => r.querySelector('button[data-action="use"]').textContent));
+        push(x, inVoice());
+        await wait(p, () => document.querySelectorAll('#dvoFavorites .dvo-fav-item').length === 2, null, 6000);
+        const inV = await labels();
+        push(x, inVoice({ hostInChannel: false }));
+        await sleep(700);
+        const outV = await labels();
+        check('R21g: the ACTIVE label follows the live state: ACTIVE while the bot is in the current channel, USE after Leave voice', inV.join() === 'ACTIVE,USE' && outV.join() === 'USE,USE', JSON.stringify({ inV, outV }));
+        push(x, inVoice());
+        await sleep(500);
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav2"] button[data-action="use"]'); // the button keeps the focus
+        push(x, inVoice({ current: { serverId: ID2, channelId: CH2 }, channelId: CH2 }));
+        const repainted = await wait(p, () => document.querySelector('#dvoFavorites .dvo-fav-item[data-id="fav2"] button[data-action="use"]')?.textContent === 'ACTIVE', null, 4000);
+        check('R21g2: after USE the list repaints from the next feed even though the button was clicked (fav2 reads ACTIVE)', repainted, JSON.stringify(await labels()));
+        await p.close();
+      }
+      // (g) GRN-133: Save favorite: links, 17 to 20 digits, update for a loaded favorite, cleared only when the list shows it, a hint when it does not
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.addInitScript('window.__DVO_SAVE_MS = 700;');
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        push(x, inVoice());
+        await wait(p, () => document.querySelectorAll('#dvoFavorites .dvo-fav-item').length === 2, null, 6000);
+        const links = {};
+        for (const [k, host] of [['discord', 'discord.com'], ['ptb', 'ptb.discord.com'], ['canary', 'canary.discord.com'], ['app', 'discordapp.com']]) {
+          await edit(p, 'dvoServerId', `https://${host}/channels/123456789012345678/234567890123456789`);
+          await sleep(100);
+          links[k] = await p.evaluate(() => [document.getElementById('dvoServerId').value, document.getElementById('dvoChannelId').value].join('/'));
+        }
+        check('R21h: a discord.com/channels/<guild>/<channel> link (also ptb, canary, discordapp.com) pasted into the server field fills both fields', Object.values(links).every((v) => v === '123456789012345678/234567890123456789'), JSON.stringify(links));
+        await x.api.clear();
+        await edit(p, 'dvoServerId', '12'); await edit(p, 'dvoChannelId', '34');
+        await p.fill('#dvoName', 'Bad ids');
+        await p.click('#dvoSaveFav');
+        await sleep(500);
+        const msg = await p.evaluate(() => ({ shown: !document.getElementById('dvoFavMsg').hidden, text: document.getElementById('dvoFavMsg').textContent }));
+        check('R21h2: IDs that are not 17 to 20 digits are not sent, and an inline message says so', (await cmdsOf(x)).length === 0 && msg.shown && /17 to 20 digits/.test(msg.text), JSON.stringify(msg));
+        await edit(p, 'dvoServerId', '555555555555555555'); await edit(p, 'dvoChannelId', '666666666666666666');
+        await p.fill('#dvoName', 'Fresh');
+        await p.click('#dvoSaveFav');
+        await sleep(300);
+        const add = (await cmdsOf(x)).filter((c) => c.command === 'favorite-add');
+        const nameKept = await p.evaluate(() => document.getElementById('dvoName').value);
+        check('R21h3: a valid pair is sent as favorite-add, and the name field is NOT cleared before the list shows the favorite', add.length === 1 && add[0].value.name === 'Fresh' && add[0].value.serverId === '555555555555555555' && nameKept === 'Fresh', JSON.stringify({ add, nameKept }));
+        const hint = await wait(p, () => /not saved, is the bridge running\?/.test(document.getElementById('dvoFavMsg').textContent), null, 3000);
+        check('R21h4: if the list never shows it, a "not saved, is the bridge running?" hint appears after the timeout (the name is still there)', hint && (await p.evaluate(() => document.getElementById('dvoName').value)) === 'Fresh', '');
+        push(x, inVoice({ favorites: FAVS.concat([{ id: 'fav3', name: 'Fresh', serverId: '555555555555555555', channelId: '666666666666666666' }]) }));
+        const cleared = await wait(p, () => document.getElementById('dvoName').value === '' && document.getElementById('dvoFavMsg').hidden, null, 4000);
+        check('R21h5: once a feed shows the favorite the name field is cleared and the message goes', cleared, '');
+        await x.api.clear();
+        await p.click('#dvoFavorites .dvo-fav-item[data-id="fav1"] button[data-action="load"]');
+        await p.fill('#dvoName', 'Renamed Hang');
+        await p.click('#dvoSaveFav');
+        await sleep(400);
+        const upd = (await cmdsOf(x)).filter((c) => c.command === 'favorite-update' || c.command === 'favorite-add');
+        check('R21h6: LOAD then Save sends favorite-update for the loaded id (not a second favorite-add)', upd.length === 1 && upd[0].command === 'favorite-update' && upd[0].value.id === 'fav1' && upd[0].value.name === 'Renamed Hang', JSON.stringify(upd));
+        await p.close();
+      }
+      // (h) GRN-107: an action error is a dismissible line of its own; the SB pill keeps saying connected
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.addInitScript('window.__ACTION_ERR_MS = 1500;');
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await wait(p, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 8000);
+        await x.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON' });
+        await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
+        const st = await p.evaluate(() => ({ pill: document.getElementById('sbStatus').textContent, cls: document.getElementById('sbStatus').className, line: document.getElementById('actionErrorText').textContent, title: document.getElementById('actionError').title }));
+        check('R21i: an action error appears on its own line (full message in its title) and the SB pill stays "SB: connected"', /SB: connected/.test(st.pill) && /live/.test(st.cls) && /payload rejected/.test(st.line) && /payload rejected/.test(st.title), JSON.stringify(st));
+        await p.click('#actionErrorClose');
+        check('R21i2: the line can be dismissed', await visible(p, '#actionError') === false, '');
+        await x.api.broadcast({ type: 'vdo:error', message: 'again' });
+        await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
+        const timed = await wait(p, () => document.getElementById('actionError').hidden, null, 4000);
+        check('R21i3: …and it goes by itself after a while', timed, '');
+        await x.api.broadcast({ type: 'discord:voice:error', message: 'third' });
+        await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
+        push(x, inVoice());
+        const gone = await wait(p, () => document.getElementById('actionError').hidden, null, 4000);
+        check('R21i4: …or when the next Discord update arrives', gone, '');
+        await p.close();
+      }
+      // (i) GRN-172: names for assistive technology
+      {
+        const x = await startExtra({});
+        const seed = { enabled: true, room: 'testroom', password: 'pw1', viewFlags: VIEWFLAGS, slots: [slot(1, { label: 'ALPHA' }), slot(2, { mode: 'discord', discordUserId: STREAMER }), slot(3), slot(4)], invite: { passwordMode: 'hash' }, directory: DIRECTORY };
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(seed) });
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        await wait(p, () => document.getElementById('vdoRoom').value === 'testroom' && document.querySelectorAll('.vdo-dir-row').length >= 1, null, 8000);
+        const a = await p.evaluate(() => {
+          const lab = (s) => !!document.querySelector(s);
+          return {
+            status: ['sbStatus', 'vdoStatus', 'dvoStatus'].map((i) => document.getElementById(i).getAttribute('role')),
+            dirCountRole: document.getElementById('dirCount').getAttribute('role'),
+            mode: lab('[aria-label="Guest 1 mode"]'), label: lab('[aria-label="Guest 1 VDO label"]'), mirror: lab('[aria-label="Mirror Guest 1"]'), did: lab('[aria-label="Guest 2 Discord user ID"]'),
+            dot: [...document.querySelectorAll('.dir-dot')].every((d) => d.getAttribute('role') === 'img' && d.getAttribute('aria-label')),
+            toggle: [...document.querySelectorAll('.dir-toggle')].every((t) => /^(Edit|Hide) .+ details$/.test(t.getAttribute('aria-label') || '')),
+            remove: [...document.querySelectorAll('.vdo-dir-remove')].every((t) => /^Remove .+/.test(t.getAttribute('aria-label') || '')),
+          };
+        });
+        check('R21j: the status pills have role=status (the directory count does not), the slot controls and the directory row buttons have names, the live dots are images with labels', a.status.every((r) => r === 'status') && !a.dirCountRole && a.mode && a.label && a.mirror && a.did && a.dot && a.toggle && a.remove, JSON.stringify(a));
+        await p.click('.vdo-dir-row .dir-toggle');
+        const b = await p.evaluate(() => {
+          const row = document.querySelector('.vdo-dir-row.open');
+          const fields = row ? [...row.querySelectorAll('.dir-field')] : [];
+          return { open: !!row, wrapped: fields.length > 0 && fields.every((f) => f.tagName === 'LABEL' || !!f.querySelector('label') && !!f.querySelector('label input, label select, label textarea')), hide: row && /^Hide .+ details$/.test(row.querySelector('.dir-toggle').getAttribute('aria-label') || '') };
+        });
+        check('R21j2: an open directory row\'s field captions are labels wrapping their inputs, and the toggle then reads "Hide … details"', b.open && b.wrapped && b.hide, JSON.stringify(b));
+        await p.focus('.vdo-dir-row .dir-toggle');
+        await p.keyboard.press('Enter');
+        await sleep(400);
+        const f = await p.evaluate(() => ({ tag: document.activeElement && document.activeElement.tagName, cls: document.activeElement && document.activeElement.className }));
+        check('R21j3: pressing Enter on a row\'s toggle (which rebuilds the row) leaves the focus on a toggle, not on the page body', f.tag === 'BUTTON' && /dir-toggle/.test(f.cls), JSON.stringify(f));
+        const ph = await p.evaluate(() => { const i = document.getElementById('vdoRoom'); return getComputedStyle(i, '::placeholder').color; });
+        check('R21j4: placeholders use the dim colour (contrast 5:1 on the panel)', ph === 'rgb(139, 152, 165)', ph);
+        await p.close();
+      }
+      // (j) GRN-127: the overlay address the Copy buttons build (a pure function of the location, exposed for tests)
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(`${x.api.base}/greenroom-control/control.html?sbport=${x.ws}`, { waitUntil: 'load' });
+        await wait(p, () => typeof window.__overlayBaseInfo === 'function', null, 6000);
+        const L = (o) => Object.assign({ protocol: 'http:', hostname: '127.0.0.1', port: '7474', origin: 'http://127.0.0.1:7474', pathname: '/greenroom-control/control.html', search: '' }, o);
+        const r = await p.evaluate((cases) => cases.map((c) => window.__overlayBaseInfo(c)), [
+          L({}), L({ pathname: '/Greenroom-Control/control.html' }), L({ pathname: '/GREENROOM-CONTROL/control.html' }), L({ pathname: '/Control/control.html' }),
+          L({ pathname: '/weird/control.html' }), L({ pathname: '/weird/control.html', search: '?overlay=my-overlay' }), L({ search: '?overlay=a/b' }), L({ search: '?overlay=..' }),
+          L({ hostname: '192.168.1.5', origin: 'http://192.168.1.5:7474' }), L({ hostname: 'localhost', origin: 'http://localhost:7474' }), L({ hostname: '[::1]', origin: 'http://[::1]:7474' }),
+        ]);
+        const base = (i) => r[i].base;
+        check('R21k: the overlay base follows the control prefix, case-insensitively (…-control → …-overlay, control → overlay), and ?overlay=<prefix> overrides it when it is one path segment',
+          base(0) === 'http://127.0.0.1:7474/greenroom-overlay/' && base(1) === 'http://127.0.0.1:7474/Greenroom-Overlay/' && base(2) === 'http://127.0.0.1:7474/GREENROOM-OVERLAY/' && base(3) === 'http://127.0.0.1:7474/Overlay/'
+          && base(5) === 'http://127.0.0.1:7474/my-overlay/' && base(6) === 'http://127.0.0.1:7474/greenroom-overlay/' && base(7) === 'http://127.0.0.1:7474/greenroom-overlay/', JSON.stringify(r));
+        check('R21k2: the fallback prefix is flagged (so the page can say so), and a control page opened on another host name builds 127.0.0.1 addresses and says so', r[4].fallback === true && r[0].fallback === false && r[8].base === 'http://127.0.0.1:7474/greenroom-overlay/' && r[8].remapped === true && !r[9].remapped && !r[10].remapped && r[0].remapped === false, JSON.stringify(r));
+        await p.evaluate(() => history.replaceState(null, '', '/weird/control.html' + location.search));
+        await x.api.broadcast({ type: 'vdo:sync:empty' });
+        const noteShown = await wait(p, () => { const n = document.getElementById('srcNote'); return !!n && !n.hidden && /greenroom-overlay/.test(n.textContent); }, null, 4000);
+        await p.evaluate(() => history.replaceState(null, '', '/greenroom-control/control.html' + location.search));
+        await x.api.broadcast({ type: 'vdo:sync:empty' });
+        const noteGone = await wait(p, () => document.getElementById('srcNote').hidden, null, 4000);
+        check('R21k3: a control page under an unrecognised prefix shows a visible note that the "greenroom-overlay" address was assumed; under the usual one the note is hidden', noteShown && noteGone, JSON.stringify({ noteShown, noteGone }));
+        await p.close();
+      }
+      // (k) GRN-175: at a 460 px dock width nothing runs off the side, with every pill and line showing
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 460, height: 1600 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        const longErr = 'That channel is not a regular voice channel: pick a regular voice channel the bot can join (View Channel and Connect), or the bot stays where it is';
+        const states = [
+          ['error + lines', inVoice({ rpc: { enabled: true, hasToken: true, error: longErr, speakingStale: true, configWarning: 'The saved config could not be used (it is not valid JSON): a copy was kept as discord-voice-config.json.corrupt-1234 and the bridge runs on its defaults' }, bridgeVersion: '1.0.10' })],
+          ['moved', inVoice({ channelId: '999999999999999999' })],
+          ['live', inVoice()],
+        ];
+        const results = [];
+        await x.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON, and a long tail to make the line wrap on a narrow dock' });
+        for (const [name, st] of states) {
+          push(x, st);
+          await sleep(900);
+          results.push(Object.assign({ name }, await p.evaluate(() => {
+            const w = document.documentElement.clientWidth;
+            const pills = [...document.querySelectorAll('.pill')].filter((e) => e.offsetParent !== null).map((e) => Math.round(e.getBoundingClientRect().right));
+            return { scrollW: document.documentElement.scrollWidth, w, maxRight: Math.max(...pills), headerBottom: Math.round(document.querySelector('header').getBoundingClientRect().bottom) };
+          })));
+        }
+        const okAll = results.every((r) => r.scrollW <= r.w && r.maxRight <= r.w);
+        check('R21l: at a 460 px dock width the header and Discord pills wrap and no pill, warning or note runs off the side (error with three lines, moved, live)', okAll, JSON.stringify(results));
         await p.close();
       }
     }

@@ -475,8 +475,10 @@ blocking queue themselves (setup section 2). `verify` 105/105, `verify:render`
 - **Per-slot Copy / Open buttons** for each guest's OBS Browser Source URL, so
   the operator never hand-types `vdoninja-guest.html?slot=N`. The URL is derived
   from where the control page is served (same origin, sibling overlay map,
-  carrying `?sbport` in dev) rather than hardcoded, so it tracks whatever HTTP
-  prefix was mapped. (`38dadf4`, 2026-07-10)
+  carrying `?sbport` in dev) rather than hardcoded. It follows the
+  `<name>-control` → `<name>-overlay` pairing of the two mappings (or
+  `control` → `overlay`), not any prefix; see docs/STREAMERBOT-SETUP.md for the
+  rule and the `?overlay=` override. (`38dadf4`, 2026-07-10)
 
 ### Changed
 

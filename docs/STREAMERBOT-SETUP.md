@@ -23,6 +23,15 @@ bot token file.
   `themes`). Any prefix works — the pages load all their assets relatively —
   just keep your OBS URLs consistent with whatever you map.
 
+  The control page's **Copy** and **Open** buttons build the overlay addresses
+  from where the control page itself was opened: `<name>-control` becomes
+  `<name>-overlay`, and `control` becomes `overlay` (case does not matter, and
+  the case you used is kept). If your two prefixes do not pair up like that,
+  the buttons assume `greenroom-overlay` and the page says so under the guest
+  slots; open the control page with `?overlay=<your overlay prefix>` (one name,
+  no slashes) to tell it. A control page opened under a LAN name builds
+  `127.0.0.1` addresses, because the OBS that uses them runs on this PC.
+
   **Keep both servers on `127.0.0.1`.** While `greenroom-control` and
   `greenroom-overlay` are mapped, Streamer.bot's HTTP server and its WebSocket
   server (authentication off) must stay bound to loopback. On a network address
@@ -271,6 +280,24 @@ Webcam-only users skip this whole section — nothing else depends on it.
    out until you press **USE** or **Connect**. A login that fails because Discord or
    your network is down is retried (5 s, doubling to 5 minutes); a rejected token is
    not.
+
+   What the Discord panel shows and does (control page): the pill names the channel
+   the bot watches and says `moved in Discord` (amber) when it was dragged elsewhere,
+   `reconnecting to Discord…`, `the saved channel is not joined` (a saved channel
+   that fails its check), `bridge: feed stale` when three heartbeats pass with no
+   message (the sidecar is not running, or points at another Streamer.bot port) and
+   `bridge stopped` after a clean stop. Lines under it show the sticky file warning
+   (a config that could not be used or saved), `speaking detection may have
+   stopped` (run `npm update` in `sidecar/`), and a note when the bridge is older
+   than the page. **Clear channel** makes the bot leave and watch nothing; **Stop
+   bridge** makes the sidecar leave the call and exit (start it again with the
+   `.bat`); **Disable bot** stops the bot without deleting the token file.
+   The size, colour and tick-box settings stay greyed out until the bridge has
+   reported its settings, and only the setting you changed is sent. **Save
+   favorite** takes a `discord.com/channels/<server>/<channel>` link pasted into
+   the Server ID box, or two ids of 17 to 20 digits; **LOAD** then **Save** edits
+   that favorite; the name is cleared once the list shows the favorite, and a hint
+   says so if it never does.
 
 `sidecar/discord-voice-config.json` (favorites/current/settings) is seeded from
 the tracked example on first run and owned by the sidecar thereafter.

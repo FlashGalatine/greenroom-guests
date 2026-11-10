@@ -353,8 +353,13 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   push already was, held between 0 and three periods). Known limit: VDO Sync
   replays the cached last push as a plain update, which a page cannot tell from
   a live one, so a dead bridge's last state reappears for up to 15 s whenever a
-  page connects, until a producer stamps `age` on the replay. The control pill
-  uses them in Sprint 16.
+  page connects, until a producer stamps `age` on the replay. The control
+  page's Discord pill follows the same rules: "bridge: feed stale" after three
+  missed periods, "bridge stopped" on a `stopped` frame, and a note when
+  `bridgeVersion` is older than the sidecar shipped with the page or absent.
+  It also shows `rpc.reconnecting`, a bot moved to another channel (`channelId`
+  differs from `current.channelId`), `currentRefused`, `rpc.speakingStale` and
+  `rpc.configWarning`, and sends only the settings keys the operator changed.
 - Pushed leading-edge with a 100 ms trailing coalesce: worst case ~10
   DoActions/s in a rowdy channel.
 
