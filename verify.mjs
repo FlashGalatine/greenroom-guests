@@ -1037,12 +1037,12 @@ async function main() {
       const ev5 = D.autoPopulate({ directory: idEntries, ignored: [], labels: ['NEW'], users: {}, boundUsers: ['<@' + idEntries[0].discordUserId + '>'] });
       check('GRN-35: an auto entry for a Discord user who sits in a slot (boundUsers, ids with or without <@>) is not evicted; the next idle one is',
         ev5.evicted.join() === '1' && ev5.directory[0].displayName === 'U0', JSON.stringify(ev5.evicted));
-      // C75: 1.0.13 cleared `auto` only on a rename, so a placeholder whose socials the operator filled in kept the flag, and nothing migrates
+      // C75: releases before 1.0.49 cleared `auto` only on a rename, so a placeholder whose socials the operator filled in kept the flag, and nothing migrates
       // it. Auto-add never writes socials: an auto entry that holds some is the operator's, so it is never evicted and does not count toward the cap.
       const c75Bob = () => ({ vdoLabel: '', discordUserId: '300000000000000075', displayName: 'Bob', socials: [{ platform: 'twitch', handle: 'bobtv' }], auto: true });
       const c75Idle = (n) => Array.from({ length: n }, (_, i) => ({ vdoLabel: 'IDLE' + String(i).padStart(2, '0'), discordUserId: '', displayName: 'IDLE' + i, socials: [], auto: true }));
       const c75a = D.autoPopulate({ directory: [c75Bob()].concat(c75Idle(50)), ignored: [], labels: ['NEW'], users: {} });
-      check('C75: at the cap an idle auto entry that holds socials (a 1.0.13 edit kept its flag) is not evicted; the next idle placeholder is',
+      check('C75: at the cap an idle auto entry that holds socials (an edit before 1.0.49 kept its flag) is not evicted; the next idle placeholder is',
         c75a.evicted.join() === '1' && c75a.directory[0].displayName === 'Bob' && c75a.directory[0].socials.length === 1 && c75a.directory.length === 51
         && c75a.directory[50].vdoLabel === 'NEW' && !c75a.directory.some((e) => e.vdoLabel === 'IDLE00'), JSON.stringify({ ev: c75a.evicted, first: c75a.directory[0].displayName, n: c75a.directory.length }));
       const c75b = D.autoPopulate({ directory: [c75Bob()].concat(c75Idle(49)), ignored: [], labels: ['NEW'], users: {} });
@@ -1055,6 +1055,20 @@ async function main() {
         JSON.stringify({ ev: c75c.evicted, s: c75c.skipped, n: c75c.directory.length }));
       check('C75: GRDir.isPlaceholder (the one rule the dock\'s badge, count and "Clear auto-added" use): an auto entry without socials is one; with socials, or curated, it is not',
         typeof D.isPlaceholder === 'function' && D.isPlaceholder(c75Idle(1)[0]) && !D.isPlaceholder(c75Bob()) && !D.isPlaceholder(Object.assign(c75Idle(1)[0], { auto: false })) && !D.isPlaceholder(null));
+      // C5: Streamer.bot stores a live label's lone surrogates as U+FFFD, and the dock's x records the ignore key of the stored form. The
+      // live label (with the lone surrogate) must count as ignored by that key, or director-min adds the guest back on its next poll.
+      // Narrow: canon/fold keep the lone surrogate (the keys differ), a paired surrogate is not mapped, and other labels are unaffected.
+      const lone = 'S\uD800M', stored = 'S\uFFFDM', loneLow = 'T\uDC00N';
+      const c5a = D.autoPopulate({ directory: [], ignored: [D.labelKey(stored), D.labelKey('T\uFFFDN')], labels: [lone, loneLow, 'OTHER'], users: {} });
+      const c5b = D.autoPopulate({ directory: [], ignored: [D.labelKey('A\uFFFD'), D.labelKey('A\uFFFD\uFFFD')], labels: ['A\uD83D\uDE00'], users: {} });
+      const c5long = 'a'.repeat(399) + '\uD83D\uDE00b', c5cutKey = D.labelKey(c5long);
+      const c5c = D.autoPopulate({ directory: [], ignored: [c5cutKey.replace(/\p{Cs}/gu, '\uFFFD')], labels: [c5long, 'OTHER'], users: {} });
+      check('C5: …and a label whose key ends in half a pair (the 400-unit cut falls inside an emoji) is ignored by the key as Streamer.bot stores it',
+        /\p{Cs}/u.test(c5cutKey) && c5c.directory.map((e) => e.vdoLabel).join() === 'OTHER', JSON.stringify({ cut: /\p{Cs}/u.test(c5cutKey), n: c5c.directory.length }));
+      check('C5: a live label with a lone surrogate (high or low) is ignored when directoryIgnored holds the key of its U+FFFD form (an x on the row Streamer.bot rewrote sticks); other labels are still added',
+        c5a.directory.map((e) => e.vdoLabel).join() === 'OTHER' && c5a.appended.length === 1, JSON.stringify(c5a.directory.map((e) => e.vdoLabel)));
+      check('C5: …the mapping is that narrow: canon/fold keep a lone surrogate (its labelKey differs from the stored form\'s), and a paired surrogate (an emoji) is not mapped to U+FFFD',
+        D.labelKey(lone) !== D.labelKey(stored) && D.fold(lone) === 's\uD800m' && c5b.directory.length === 1 && c5b.directory[0].vdoLabel === 'A\uD83D\uDE00', JSON.stringify({ k: D.labelKey(lone) !== D.labelKey(stored), n: c5b.directory.length }));
       const emptyName = D.autoPopulate({ directory: [], ignored: [], labels: [], users: { '300000000000000003': { username: '' }, '300000000000000004': { username: '  ' }, '300000000000000005': { } } });
       const named = D.autoPopulate({ directory: emptyName.directory, ignored: [], labels: [], users: { '300000000000000003': { username: 'Zed' } } });
       check('GRN-35: a Discord user with no name yet is not added (not stored under the snowflake); the entry is added once the name arrives',

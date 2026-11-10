@@ -2828,7 +2828,7 @@ async function main() {
         {
           const x = await startExtra({ SB_REWRITE: 'fffd' });
           x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_M) });
-          await sleep(300);
+          await untilM(async () => !!(await x.api.state()).vdo, 8000);
           await x.api.clear();
           const m = await openMinM(x);
           await wait(m, () => /guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
@@ -2847,6 +2847,34 @@ async function main() {
           const afterClear = (await sEntries()).length;
           check('R15m4: a live label that Streamer.bot rewrites on the way back (a lone surrogate becomes U+FFFD) is still added only once: after an unrelated dock edit, and after Clear auto-added and another edit, the saved book holds exactly one entry for that guest',
             added && stored && afterEdit === 1 && afterClear === 1, JSON.stringify({ added, stored, afterEdit, afterClear }));
+          await p.close(); await m.close();
+        }
+        // An x on the row Streamer.bot rewrote sticks (C5). The dock records the ignore key of the stored label (U+FFFD), never the live
+        // one (a lone surrogate); the x lowers the auto count, so director-min forgets the key it auto-added. Only the shared core's match of
+        // the live label with its lone surrogates mapped to U+FFFD keeps director-min from adding the guest back on its next poll.
+        {
+          const x = await startExtra({ SB_REWRITE: 'fffd' });
+          x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_M) });
+          await untilM(async () => !!(await x.api.state()).vdo, 8000);
+          await x.api.clear();
+          const m = await openMinM(x);
+          await wait(m, () => /guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+          await frameOf(m).evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'sss333', label: 'S\uD800M' } }));
+          const sEntries = async () => (await dirOf(x)).filter((e) => /^S.M$/.test(e.vdoLabel));
+          const added = await untilM(async () => (await sEntries()).length === 1, 12000);
+          const p = await openDockM(x, QUIET_D); // the dock's own director never sees the guest: whatever adds them back is director-min
+          const clicked = await p.evaluate(() => {
+            const r = [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].find((q) => /^S.M$/.test(q.querySelector('input.vdo-dir-display')?.value || ''));
+            if (!r) return false;
+            r.querySelector('.vdo-dir-remove').click();
+            return true;
+          });
+          const removed = await untilM(async () => { const st = await x.api.state(); return !!st.vdo && !st.vdo.directory.some((e) => /^S.M$/.test(e.vdoLabel)) && st.vdo.directoryIgnored.includes('vdo:s\uFFFDm'); }, 6000);
+          await sleep(7500); // three more director-min polls
+          const left = (await sEntries()).length;
+          const ign = ((await x.api.state()).vdo || {}).directoryIgnored || [];
+          check('R15m5: with director-min designated and running, an x in the dock on the row whose label Streamer.bot rewrote (a lone surrogate stored as U+FFFD) sticks: after three more director-min polls the saved book holds no entry for that guest',
+            added && clicked && removed && left === 0 && ign.includes('vdo:s\uFFFDm'), JSON.stringify({ added, clicked, removed, left, ign: ign.map((k) => k.replace(/[^\x20-\x7e]/g, (c) => '<U+' + c.charCodeAt(0).toString(16).toUpperCase() + '>')) }));
           await p.close(); await m.close();
         }
       }
@@ -3614,7 +3642,7 @@ async function main() {
           /Auto-add limit \(50\): removed Member (0[1-9]|10)\b/.test(dropNote) && !/Member 00/.test(dropNote), JSON.stringify(dropNote));
         await p.close();
       }
-      // (o) C75: 1.0.13 kept `auto: true` on a placeholder whose socials the operator filled in. Auto-add never writes socials, so such an entry
+      // (o) C75: releases before 1.0.49 kept `auto: true` on a placeholder whose socials the operator filled in. Auto-add never writes socials, so such an entry
       // is the operator's: no "auto" badge, not counted or removed by "Clear auto-added", and never the one dropped at the cap.
       if (want('o')) {
         const id = (i) => '4000000000000' + String(20000 + i);
@@ -3645,10 +3673,27 @@ async function main() {
           JSON.stringify({ n: dir && dir.length, first: dir && dir[0] && dir[0].displayName, idle00: !!dir && dir.some((e) => e.displayName === 'Idle 00'), note }));
         await x.api.clear();
         await p.click('#btnDirClearAuto');
-        let after = null; // the push the button made (the first one after it: a later voice update may add the newcomer back)
+        // the push the button made (the first one after it). Newcomer is still in the voice channel, so the button's own pass adds them back
+        // in that same push (C56): the push is the socials entry plus the live guest, and none of the idle placeholders.
+        let after = null;
         for (let t = 0; t < 6000; t += 250) { const ps = await pushPayloads(x); if (ps.length) { after = ps[0].directory; break; } await sleep(250); }
-        check('R18o3: "Clear auto-added" removes the placeholders and keeps the entry that holds socials',
-          !!after && after.length === 1 && after[0].displayName === 'Bob' && after[0].socials.length === 1, JSON.stringify(after && after.map((e) => e.displayName)));
+        check('R18o3: "Clear auto-added" removes the placeholders, keeps the entry that holds socials, and adds the live guest back in its own push (exactly Bob, then Newcomer as a new auto entry)',
+          !!after && after.map((e) => e.displayName).join(',') === 'Bob,Newcomer' && after[0].socials.length === 1 && after[0].socials[0].handle === 'bobtv'
+          && after[1].auto === true && (after[1].socials || []).length === 0 && !after.some((e) => /^Idle \d\d$/.test(e.displayName)),
+          JSON.stringify(after && after.map((e) => ({ n: e.displayName, auto: e.auto, socials: (e.socials || []).length }))));
+        // An Import that makes room at the cap: the dock's own pass names whom it removed, and the "Sent" line written after the push must
+        // not replace that note (C2/C7: reportPush overwrote it in the same task, so the operator never saw it).
+        await x.api.clear();
+        await p.setInputFiles('#cfgImportFile', { name: 'idle50.json', mimeType: 'application/json',
+          buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, seed, { directory: idle }) })) }); // 50 idle placeholders; the live Newcomer is not in the file
+        let imp = null;
+        for (let t = 0; t < 6000; t += 250) { const ps = await pushPayloads(x); if (ps.length) { imp = ps[0].directory; break; } await sleep(250); }
+        await sleep(300);
+        const impNote = await p.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+        check('R18o4: an Import of a book of 50 idle placeholders while a guest the file lacks is live: the guest goes out with the import, the first idle placeholder (Idle 00) made way, and the status line says both that it was sent and whom it removed',
+          !!imp && imp.length === 50 && imp.some((e) => e.displayName === 'Newcomer') && !imp.some((e) => e.displayName === 'Idle 00') && imp.some((e) => e.displayName === 'Idle 01')
+          && /Sent to Streamer\.bot at \d\d:\d\d:\d\d\./.test(impNote) && /Auto-add limit \(50\): removed Idle 00 to make room/.test(impNote),
+          JSON.stringify({ n: imp && imp.length, newcomer: !!imp && imp.some((e) => e.displayName === 'Newcomer'), idle00: !!imp && imp.some((e) => e.displayName === 'Idle 00'), note: impNote }));
         await p.close();
       }
     }
@@ -3746,9 +3791,13 @@ async function main() {
           await p.goto(`${BASE}${rel}?${/guest|nameplate/.test(rel) ? 'slot=1&' : ''}sbport=${closed}&sbpass=${enc}`, { waitUntil: 'load' });
           pages.push(p);
         }
-        await sleep(2500);
         const failed = (rel) => seen.filter((s) => s.rel === rel && /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/' failed/.test(s.text));
-        const dialled = ['/control/control.html', '/control/director-min.html', '/overlay/discord-roster.html', '/overlay/vdoninja-guest.html', '/overlay/nameplate.html'].every((rel) => failed(rel).length > 0);
+        const allDialled = () => ['/control/control.html', '/control/director-min.html', '/overlay/discord-roster.html', '/overlay/vdoninja-guest.html', '/overlay/nameplate.html'].every((rel) => failed(rel).length > 0);
+        // Wait until every page has logged a failed connect, up to 10 s (Chromium may take about 2 s to report a refused loopback connect,
+        // and the last page opened has the least time): the check is about where the message comes from, not how fast. At least the 2.5 s
+        // the check always watched for, so a page that logs something else later is still seen.
+        for (let t = 0; t < 10000 && (t < 2500 || !allDialled()); t += 250) await sleep(250);
+        const dialled = allDialled();
         const leaked = seen.filter((s) => s.at.includes(PW) || s.at.includes(enc) || s.at.includes('sbpass'));
         const ctlAt = [...failed('/control/control.html'), ...failed('/control/director-min.html')].map((s) => s.at);
         check('R22l: with nothing listening on ?sbport, every page that carries ?sbpass logs its failed connects (Chromium\'s own error) with a script file as the source, never the page address: no error-level message or uncaught error names ?sbpass, and the control pages\' failures name control/sb-socket.js',
@@ -5160,9 +5209,16 @@ async function main() {
         await x.api.clear();
         await sleep(4000);
         const early = await payloads(x);
-        await until(async () => (await payloads(x)).length >= 1, 14000);
+        // The correction does go out once the gap (9 s here) has passed: about 9-12 s after the first one. A dock that never sends it must
+        // fail, so the wait's result, the push itself and an upper bound on the time are all checked (C3).
+        const corrected = await until(async () => (await payloads(x)).length >= 1, 14000);
         const elapsed = Date.now() - t1;
-        check('R19s: a write by another page that puts other (non-empty) stream IDs in the slots, within the gap, is corrected only once the gap since the last correction has passed (two directors that disagree cannot flip the slots every few seconds)', early.length === 0 && elapsed >= 8000, JSON.stringify({ early: early.length, elapsed }));
+        await sleep(1500); // nothing more follows it
+        const got = await payloads(x);
+        const gotIds = got.map((q) => q.slots.slice(0, 2).map((s) => s.streamID));
+        check('R19s: a write by another page that puts other (non-empty) stream IDs in the slots, within the gap, is corrected only once the gap since the last correction has passed (two directors that disagree cannot flip the slots every few seconds): nothing early, then ONE push that puts the settled IDs back',
+          corrected && early.length === 0 && elapsed >= 8000 && elapsed < 16000 && got.length === 1 && got[0].slots[0].streamID === 'aaa111' && got[0].slots[1].streamID === 'bbb222',
+          JSON.stringify({ corrected, early: early.length, elapsed, pushes: gotIds }));
         await p.close();
         // a second restore right after a correction: every ID blank again, filled in within about two polls, not after the gap
         const y = await seededMock(seed);
@@ -5171,9 +5227,10 @@ async function main() {
         const restore = restoreLike({ rev: Date.now() + 500 });
         const t2 = Date.now();
         y.prod.doAction('VDO Push', { payload: JSON.stringify(restore) }); // what backup.mjs restore pushes
-        const refilled = await until(async () => { const st = await y.api.state(); return !!st.vdo && st.vdo.rev > restore.rev && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222'; }, 14000);
+        // (the fill needs two polls, about 2.5-5.3 s; the bound only has to tell that apart from the 60 s gap, with room for a loaded machine)
+        const refilled = await until(async () => { const st = await y.api.state(); return !!st.vdo && st.vdo.rev > restore.rev && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222'; }, 25000);
         const took = Date.now() - t2;
-        check('R19s2: a restore right after a correction (every stream ID blanked) is filled in by the designated director within about two polls, not only after the gap (filling in blank IDs is no flip)', refilled && took < 9000, JSON.stringify({ refilled, took }));
+        check('R19s2: a restore right after a correction (every stream ID blanked) is filled in by the designated director within about two polls, not only after the gap (filling in blank IDs is no flip)', refilled && took < 20000, JSON.stringify({ refilled, took }));
         await q.close();
       }
       // (t) A push that may be lost is sent again only when the replay does not show a newer write.

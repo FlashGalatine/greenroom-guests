@@ -195,7 +195,10 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   in stream IDs that were blank waits the two polls but not the 30 s: a guest just
   bound to a slot in the dock (which sends that slot with no stream ID beside a
   designated director-min) and the IDs a restore blanked. Going back and forth
-  between two views always replaces or blanks an ID, so this is no flip. A page
+  between two views always replaces or blanks an ID, so this is no flip. A
+  correction that fills one slot while it also replaces or blanks another slot's
+  stream ID still waits for the gap, so a bind made just as another guest drops
+  or rejoins can take up to 30 s. A page
   that is not designated takes its own re-assembly as the baseline, so adopting alone never
   makes it push; the exceptions are a write by `backup.mjs restore` (writer
   `"backup"`: every director that follows the guests puts the live IDs back) and a `director-min` that
@@ -268,10 +271,10 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   name is a placeholder"; the control page badges those rows and clears the flag
   the moment the operator edits any field of the entry. An `auto` entry that holds
   socials is not a placeholder (`GRDir.isPlaceholder`): auto-add never writes
-  socials, so the operator put them there (1.0.13 kept the flag through a socials
-  edit). Such an entry has no badge, is kept by **Clear auto-added**, and is never
-  dropped at the cap or counted toward it; the linking below still reads its
-  `auto` flag. A Discord user whose username equals an
+  socials, so the operator put them there (releases before 1.0.49 kept the flag
+  through a socials edit). Such an entry has no badge, is kept by
+  **Clear auto-added**, and is never dropped at the cap or counted toward it; the
+  linking below still reads its `auto` flag. A Discord user whose username equals an
   existing **auto** entry's `displayName` or `vdoLabel` fills that entry's empty
   `discordUserId` instead of creating a twin, and a guest who joined the voice
   channel first takes the label of their auto entry when they join the VDO room
@@ -285,9 +288,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   Discord name and a discord-mode slot bound to them shows no plate.
   Placeholders are capped at 50: at the cap the first placeholder that is not in
   the room (by label, Discord ID or Discord name) and not in a slot is dropped to
-  make room, and the dock names who it removed on its status line. Curated
-  entries never are, the dropped guest is added again if they come back, and the
-  dock says "auto-add limit reached" when someone could not be added. A Discord user with no name
+  make room. Curated entries never are, and the dropped guest is added again if
+  they come back. The dock names on its status line the guests its own pass
+  removes (an Import's pass included); a removal made by `director-min.html` is
+  not reported, and beside a designated director-min its poll often sees a new
+  guest before the dock does. The dock says "auto-add limit reached" when
+  someone could not be added. A Discord user with no name
   yet is added when the name arrives (never stored under the snowflake), and a
   label that draws nothing (zero-width characters, U+2800) is not added. A page appends a given label or voice
   user at most once per page session (so a label that Streamer.bot rewrites on the

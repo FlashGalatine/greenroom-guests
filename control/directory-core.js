@@ -164,6 +164,11 @@
   // The per-session "already auto-added" key keeps case: labels that differ only in case are separate guests, and adding one must not skip the other.
   const labelExactKey = (label) => 'vdo:' + canon(label);
   const userKey = (id) => 'discord:' + String(id ?? '').replace(/\D/g, '');
+  // Streamer.bot stores each lone surrogate in a label (half of a pair: only a crafted client sends one) as U+FFFD. The row the dock
+  // shows, and so the ignore key its x records, hold that stored form, while the live label keeps the lone surrogate. autoPopulate
+  // also tests the ignore list with the live label mapped this way, or an x on such a guest would never stick (C5). Used for that test
+  // only: canon, fold, the session skip keys and nameplate matching keep the lone surrogate.
+  const wellFormed = (s) => String(s ?? '').replace(/\p{Cs}/gu, '\uFFFD');
 
   // Textarea grammar — one social per line: "platform handle", split on the FIRST
   // whitespace (a space, tab or NBSP; the handle may itself contain spaces). Control-page only; the wire
@@ -218,10 +223,10 @@
   // appended.
   const AUTO_MAX = 50;
   // A placeholder is an auto entry that still holds only what auto-add put there. Auto-add never writes socials, so an auto entry with
-  // socials is the operator's: 1.0.13 cleared the flag only on a rename and kept it through a socials edit, and nothing migrates it. Such
-  // an entry is treated as curated wherever the dock and the cap ask "is this a placeholder?": it is never evicted, does not count toward
-  // AUTO_MAX, has no "auto" badge and is kept by "Clear auto-added". (A 1.0.13 edit of only the label or the Discord ID cannot be told
-  // apart from what auto-add itself fills in, so such a row stays a placeholder.)
+  // socials is the operator's: releases before 1.0.49 cleared the flag only on a rename and kept it through a socials edit, and nothing
+  // migrates it. Such an entry is treated as curated wherever the dock and the cap ask "is this a placeholder?": it is never evicted, does not
+  // count toward AUTO_MAX, has no "auto" badge and is kept by "Clear auto-added". (An edit made before 1.0.49 of only the label or the
+  // Discord ID cannot be told apart from what auto-add itself fills in, so such a row stays a placeholder.)
   function isPlaceholder(e) { return !!(e && e.auto && !(Array.isArray(e.socials) && e.socials.length)); }
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   function autoPopulate(opts) {
@@ -283,7 +288,7 @@
     for (const label of labels) {
       const key = labelKey(label);
       const c = canon(label);
-      if (!hasGlyph(label) || isDateShaped(label) || ignored.has(key) || skip.has(labelExactKey(label))) continue;
+      if (!hasGlyph(label) || isDateShaped(label) || ignored.has(key) || ignored.has(wellFormed(labelKey(wellFormed(label)))) || skip.has(labelExactKey(label))) continue;
       if (dir.some((e) => e && e.vdoLabel && canon(e.vdoLabel) === c)) continue; // an entry already has exactly this label
       // matched ignoring case, and no other live label collides with it by case: the same guest
       if (foldCount.get(fold(label)) === 1 && dir.some((e) => e && e.vdoLabel && fold(e.vdoLabel) === fold(label))) continue;

@@ -328,11 +328,13 @@ plate; the lists spell such characters out as `<U+200B>` and mark two live
 labels that are the same once case, spacing and hidden characters are ignored,
 including the label pick of a guest slot. At most 50 auto-added placeholders (rows
 with the `auto` badge) are kept. At the limit the ones for guests no longer in the
-room, and not in a slot, make way, and the dock names who it removed; when none
-can, it says the limit is reached. Entries you named or edited never make way, and
-neither does a row that holds socials. A row from 1.0.13 or earlier where you set
-only the label or the Discord ID still shows the badge and can make way: rename it
-to keep it.
+room, and not in a slot, make way. The dock names the guests its own pass
+removes, an Import's included; a removal made by director-min is not reported
+anywhere, and with director-min designated it often sees a new guest first. When
+none can make way, the dock says the limit is reached. Entries you named or edited
+never make way, and neither does a row that holds socials. A row from before
+1.0.49 where you set only the label or the Discord ID still shows the badge and
+can make way: rename it to keep it.
 
 ## 5. The Discord bridge sidecar (optional)
 

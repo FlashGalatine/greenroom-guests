@@ -2001,7 +2001,9 @@
   // cfg.directory changed (the caller pushes). It works on cfg.directory plus the keys each row on screen is showing right now
   // (so a label typed into a draft, or cleared mid-edit, is respected), but only autoPopulate's own changes are applied: the view is
   // never assigned back, so a half-edited row never reaches cfg or a push (GRN-72, GRN-63).
-  function runAutoAdd() {
+  // With noteOut (an object) the pass's note (whom it removed at the limit, a Discord link it made) is put in noteOut.note for the caller
+  // to show after its own status text, instead of on the status line now (an Import reports its push after this pass: C2).
+  function runAutoAdd(noteOut) {
     if (!synced || cfg.directoryAutoAdd === false) {
       // Nothing is added in this state, so nothing is offered and there is no limit to report.
       if (dirSuggest.size || autoLimitHit) { dirSuggest.clear(); autoLimitHit = false; dirSig = ''; }
@@ -2073,7 +2075,7 @@
       const who = dropped.length > 3 ? dropped.slice(0, 3).join(', ') + ' and ' + (dropped.length - 3) + ' more' : dropped.join(', ');
       notes.push(`Auto-add limit (${GRDir.AUTO_MAX}): removed ${who} to make room (auto-added, not in the room or a slot)`);
     }
-    if (notes.length) setCfgStatus(notes.join(' · '));
+    if (notes.length) { if (noteOut) noteOut.note = notes.join(' · '); else setCfgStatus(notes.join(' · ')); }
     if (changed) dirSig = '';
     return changed;
   }
@@ -2177,7 +2179,7 @@
   });
 
   els.dirClearAuto.addEventListener('click', () => {
-    // Placeholders only: an auto entry that holds socials (1.0.13 kept the flag through a socials edit) is the operator's and stays.
+    // Placeholders only: an auto entry that holds socials (releases before 1.0.49 kept the flag through a socials edit) is the operator's and stays.
     const autos = cfg.directory.filter((e) => GRDir.isPlaceholder(e));
     if (!autos.length) return;
     if (!confirm(`Remove ${autos.length} auto-added guest${autos.length === 1 ? '' : 's'} (the ones still showing an "auto" badge)?\n\nAnyone still live is re-added with a placeholder name on the next poll — untick "auto-add guests" first to keep them out.`)) return;
@@ -3029,10 +3031,13 @@
       // Live guests the file lacks are added now, from the rows just drawn, and go out with the import: beside a designated director-min
       // this page sends no auto-add push of its own (C56). Not when the import switched a running director off: that push was the
       // import's, and the roster went with the director.
-      if (pushSeq === sentBefore && runAutoAdd()) renderDirectory(true);
+      const autoNote = {}; // the pass's note comes back here: reportPush below rewrites the status line
+      if (pushSeq === sentBefore && runAutoAdd(autoNote)) renderDirectory(true);
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
       // is identical to what it last pushed, and must still reach a wiped vdo.state.
       reportPush(pushSeq !== sentBefore || assembleAndPush(false, true));
+      // The pass's note (whom it removed at the limit) goes after the sent or not-sent text, or the operator never sees it (C2).
+      if (autoNote.note) setCfgStatus(els.cfgStatus.textContent ? els.cfgStatus.textContent + ' · ' + autoNote.note : autoNote.note);
     }, `Import this config and push it to Streamer.bot?
 
 This REPLACES the current room, slots, and guest directory (${dirKept} guest entr${dirKept === 1 ? 'y' : 'ies'} in the file${dirDropped > 0 ? `; ${dirDropped} dropped: no name, or no label and no Discord ID` : ''}).`);
