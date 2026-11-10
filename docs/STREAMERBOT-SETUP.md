@@ -233,7 +233,7 @@ Webcam-only users skip this whole section — nothing else depends on it.
    The token is file-only by design — the control page has no token field, and
    no bus command carries one. **Press Connect after editing the file**: Connect
    re-reads it every time (a corrected token is adopted, an empty one or a deleted
-   file forgets the token). A file that exists but is not valid JSON is reported as
+   file forgets the token). The launcher `start-discord-bridge.bat` installs what is missing or stale itself, but never under a bridge that is already running (close that one first). A file that exists but is not valid JSON is reported as
    that ("re-save it as UTF-8 (no BOM)"), never as missing, and is never overwritten.
 4. Start the bridge: double-click `start-discord-bridge.bat` (visible log), or
    `npm run bridge` from the repo root, or the `Discord Bridge Start` action

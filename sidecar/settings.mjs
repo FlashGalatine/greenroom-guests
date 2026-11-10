@@ -19,10 +19,10 @@ export const ACCENTS = ['cyan', 'magenta', 'neon-green'];
 // An integer clamped to a range; null, '', a boolean or anything that is not a number gives the fallback (Number(null) and Number(true)
 // are 0 and 1, which would silently become a size).
 export function clampInt(v, min, max, fallback) {
-  if (v === null || v === undefined || v === '' || typeof v === 'boolean') return fallback;
-  const n = Math.round(Number(v));
+  // Only a number, or a string that is written as one (Number([]), Number(' ') and Number([100]) would be 0, 0 and 100).
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;
   if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
+  return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 // Only the digits of an id (a pasted "<#123>" or a space gets cleaned); a number is read as the text it was written as.
@@ -39,6 +39,20 @@ export const cutName = (s, n) => Array.from(String(s ?? '')).slice(0, n).join(''
 const ID_KEYS = new Set(['serverId', 'channelId', 'streamerUserId']);
 export function parseJson(text) {
   return JSON.parse(text, (key, value, ctx) => (typeof value === 'number' && ID_KEYS.has(key) && ctx && typeof ctx.source === 'string' ? ctx.source : value));
+}
+
+// Like parseJson, for a file that is written back (the token file): ANY integer that is not a safe integer keeps the digits it was written with
+// (JSON.rawJSON), so rewriting the file does not change them.
+export function parseJsonLossless(text) {
+  return JSON.parse(text, (key, value, ctx) => (typeof value === 'number' && !Number.isSafeInteger(value) && ctx && typeof ctx.source === 'string' && /^-?\d+$/.test(ctx.source) ? JSON.rawJSON(ctx.source) : value));
+}
+
+// A favorite as it is saved: ids as digits that must look like a Discord id (`idRe`), the name cut by code point and given a fallback; null
+// when it cannot be one. The one rule for favorite-add, favorite-update and (with the same id test) the saved config.
+export function normalizeFavorite({ name, serverId, channelId }, idRe = SNOWFLAKE_RE) {
+  const sId = digitsOnly(serverId), cId = digitsOnly(channelId);
+  if (!idRe.test(sId) || !idRe.test(cId)) return null;
+  return { name: cutName(name ?? '', 80) || `${sId.slice(-4)}/${cId.slice(-4)}`, serverId: sId, channelId: cId };
 }
 
 // Merge `updates` into `base`: only the known keys are copied, each by its own rule, and anything of the wrong type is ignored (the value in

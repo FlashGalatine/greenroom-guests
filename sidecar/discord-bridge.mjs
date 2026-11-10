@@ -45,14 +45,14 @@
 // An unhandled rejection is logged and the bridge goes on;
 // an uncaught exception shuts down with code 1 and the error in rpc.error.
 
-import { readFile, open, rename, rm, copyFile } from 'node:fs/promises';
+import { readFile, open, rename, rm, copyFile, realpath, stat } from 'node:fs/promises';
 import { readFileSync, writeSync } from 'node:fs';
 import { createServer, connect as netConnect } from 'node:net';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import WebSocket from 'ws';
-import { DEFAULT_SETTINGS, sanitizeSettings, digitsOnly, cutName, parseJson, SNOWFLAKE_RE } from './settings.mjs';
+import { DEFAULT_SETTINGS, sanitizeSettings, digitsOnly, cutName, parseJson, parseJsonLossless, normalizeFavorite, SNOWFLAKE_RE } from './settings.mjs';
 
 // Node first, then the heavy imports: an old Node says so instead of failing inside discord.js (GRN-22).
 {
@@ -103,6 +103,7 @@ const TIMING = (() => {
     loginStartMs: 5000, loginCapMs: 300000, // the login retry: 5 s, doubling, up to 5 minutes
     speakingStaleMs: 300000, // no speaking start for this long with someone unmuted in the call: rpc.speakingStale
     stuckGlowMs: 180000,     // a glow that has been on this long with no end: rpc.speakingStale
+    writeDelayMs: 0,         // (test hook) a slow disk: every atomic write waits this long before its rename
   };
   if (TEST_HOOKS && process.env.GREENROOM_TIMING) {
     try { const o = JSON.parse(process.env.GREENROOM_TIMING); for (const k of Object.keys(t)) if (o[k] !== undefined) t[k] = o[k]; } catch { /* keep the defaults */ }
@@ -206,10 +207,11 @@ const TRANSIENT_FS = new Set(['EBUSY', 'EPERM', 'EACCES']); // a lock that usual
 const ID_RE = TEST_HOOKS && process.env.GREENROOM_LOOSE_IDS === '1' ? /^\d{1,20}$/ : SNOWFLAKE_RE;
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
-// One reader for every JSON file: a Buffer, decoded as UTF-16 (a BOM FF FE or FE FF: what PowerShell's `>` writes) or UTF-8 (a BOM is
-// stripped), parsed with ids kept as text. It says WHY it failed: missing (ENOENT: the only case that is seeded from the example), unreadable
-// (locked or refused for about 2 s: EBUSY, EPERM, EACCES) or invalid (not JSON, or not a file that can be read).
-async function loadJson(path) {
+// One reader for every JSON file: a Buffer, decoded as UTF-16 (a BOM FF FE or FE FF: what PowerShell's `>` writes; UTF-16 without a BOM is not
+// recognised) or UTF-8 (a BOM is stripped), parsed by `parse` (ids kept as text by default). It says WHY it failed: missing (ENOENT: the only
+// case that is seeded from the example), unreadable (locked or refused for about 2 s: EBUSY, EPERM, EACCES) or invalid (not JSON, or not a
+// file that can be read). On success the raw bytes come back too (so a writer can tell whether the file changed under it).
+async function loadJson(path, parse = parseJson) {
   let buf = null, lastErr = null;
   for (let i = 0; i < 11 && !buf; i++) {
     try { buf = await readFile(path); }
@@ -217,7 +219,7 @@ async function loadJson(path) {
       if (e && e.code === 'ENOENT') return { status: 'missing' };
       lastErr = e;
       if (!(e && TRANSIENT_FS.has(e.code))) return { status: 'invalid', error: e };
-      await sleep(200);
+      if (i < 10) await sleep(200);
     }
   }
   if (!buf) return { status: 'unreadable', error: lastErr };
@@ -227,23 +229,38 @@ async function loadJson(path) {
     else if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) { const sw = Buffer.from(buf.subarray(2)); sw.swap16(); text = sw.toString('utf16le'); }
     else text = buf.toString('utf8');
     if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    return { status: 'ok', value: parseJson(text) };
+    return { status: 'ok', value: parse(text), raw: buf };
   } catch (e) { return { status: 'invalid', error: e }; }
 }
 
-// Write a file so that a crash or a lock never leaves half of it: a temp file written and flushed, renamed over the target (a few retries
-// while the target is locked), and if the rename keeps failing a flushed in-place write. The temp file is always removed.
-async function atomicWrite(path, text) {
-  const tmp = path + '.tmp';
-  const flushTo = async (p) => { const fh = await open(p, 'w'); try { await fh.writeFile(text, 'utf8'); await fh.sync(); } finally { await fh.close(); } };
+// Write a file so that a crash or a lock never leaves half of it: a temp file written and flushed (beside the real file when the path is a
+// symlink), renamed over the target (a few retries while the target is locked), and if the rename keeps failing a flushed in-place write
+// (`inPlace`), with the original bytes put back if that fails too. A temp file that could not be written (a full disk) leaves the target
+// untouched. `precheck` runs before each rename and may refuse ('ECHANGED': the file is no longer what the caller read). The temp file is always
+// removed. A rename gives the file the permissions of the folder (on Windows its inherited ACL): the mode is kept where the system has modes.
+async function atomicWrite(path, text, { inPlace = true, precheck = null } = {}) {
+  let real = path; try { real = await realpath(path); } catch { /* not there yet */ }
+  const tmp = real + '.tmp';
+  let mode; try { mode = (await stat(real)).mode & 0o777; } catch { /* a new file */ }
+  const flushTo = async (p, data, m) => {
+    const fh = await open(p, 'w');
+    try { await fh.writeFile(data); if (m !== undefined) { try { await fh.chmod(m); } catch { /* no modes here */ } } await fh.sync(); } finally { await fh.close(); }
+  };
+  let written = false;
   try {
-    await flushTo(tmp);
+    await flushTo(tmp, text, mode);
+    written = true;
+    if (TIMING.writeDelayMs) await sleep(TIMING.writeDelayMs); // (test hook: a slow disk)
     for (let i = 0; ; i++) {
-      try { await rename(tmp, path); return; }
+      if (precheck && !(await precheck())) { const e = new Error('the file changed'); e.code = 'ECHANGED'; throw e; }
+      try { await rename(tmp, real); return; }
       catch (e) { if (!(e && TRANSIENT_FS.has(e.code)) || i >= 4) throw e; await sleep(50 * (i + 1)); }
     }
-  } catch {
-    await flushTo(path); // (throws when this fails too: that error is the one reported)
+  } catch (first) {
+    if (!written || !inPlace || (first && first.code === 'ECHANGED')) throw first;
+    let original = null; try { original = await readFile(real); } catch { /* a new file */ }
+    try { await flushTo(real, text); }
+    catch (second) { if (original) { try { await flushTo(real, original); } catch { /* best effort */ } } throw second; }
   } finally {
     try { await rm(tmp, { force: true }); } catch { /* gone */ }
   }
@@ -264,25 +281,44 @@ const configWarnings = new Map();
 function setWarning(key, text) { if (configWarnings.get(key) !== text) { configWarnings.set(key, text); log(`config warning: ${text}`); } schedulePush(); }
 function clearWarning(key) { if (configWarnings.delete(key)) schedulePush(); }
 let configReadOnly = false; // the config could be neither read nor copied aside: it is left alone for the whole session
+let configSnapshot = null;  // {size, mtimeMs} of a bad config at startup: a later change to it is somebody fixing it, not to be overwritten
+let skippedFavorites = [];  // the favorites adoptConfig refused
 
 const TOKENS_BAD = 'discord-tokens.json exists but is not valid JSON: re-save it as UTF-8 (no BOM) with { "botToken": "…", "enabled": true }.';
+const TOKENS_LOCKED = 'discord-tokens.json could not be read (it is locked or access is denied): close whatever has it open, then press Connect.';
 const NO_TOKEN = 'No bot token — create sidecar/discord-tokens.json (docs/STREAMERBOT-SETUP.md), then press Connect again.';
 
-// discord-tokens.json as a whole object (S17 reads the SB password from it too), or why not.
+// discord-tokens.json as a whole object (S17 reads the SB password from it too), or why not. A bare integer written in any field keeps its
+// exact digits when the object is written back (JSON.rawJSON). A problem with the file is also a sticky warning, gone when it reads again.
+const parseTokens = (text) => parseJsonLossless(text);
 async function loadTokens() {
-  const r = await loadJson(TOKENS_PATH);
-  if (r.status === 'ok') return isObject(r.value) ? { status: 'ok', tokens: r.value } : { status: 'invalid' };
-  return { status: r.status }; // 'missing' | 'unreadable' | 'invalid'
+  const r = await loadJson(TOKENS_PATH, parseTokens);
+  if (r.status === 'ok' && isObject(r.value)) { clearWarning('tokens-load'); return { status: 'ok', tokens: r.value, raw: r.raw }; }
+  if (r.status === 'missing') { clearWarning('tokens-load'); return { status: 'missing' }; }
+  const status = r.status === 'unreadable' ? 'unreadable' : 'invalid';
+  setWarning('tokens-load', status === 'unreadable' ? TOKENS_LOCKED : TOKENS_BAD);
+  return { status };
 }
 
 async function init() {
   // A temp file left by a crash in the middle of a write.
   for (const p of [CONFIG_PATH, TOKENS_PATH]) { try { await rm(p + '.tmp', { force: true }); } catch { /* fine */ } }
 
-  const res = await loadJson(CONFIG_PATH);
+  let res = await loadJson(CONFIG_PATH);
+  const keepCopy = async () => {
+    const kept = `${CONFIG_PATH}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    if (TEST_HOOKS && process.env.GREENROOM_FAIL_COPY === '1') throw new Error('copy refused (test hook)');
+    await copyFile(CONFIG_PATH, kept);
+    return kept;
+  };
   if (res.status === 'ok' && isObject(res.value)) {
     adoptConfig(res.value);
     log(`Loaded ${state.favorites.length} favorite(s)`);
+    if (skippedFavorites.length) { // the file would lose them at the next save: keep a copy and say so
+      const names = skippedFavorites.slice(0, 3).map((n) => `"${clean(n, 30)}"`).join(', ');
+      try { const kept = await keepCopy(); setWarning('config-favorites', `${skippedFavorites.length} favorite(s) in the saved config were skipped (${names}${skippedFavorites.length > 3 ? ', …' : ''}): a server or channel id that is not 17 to 20 digits. The file is kept as ${basename(kept)}.`); }
+      catch { setWarning('config-favorites', `${skippedFavorites.length} favorite(s) in the saved config were skipped (${names}): a server or channel id that is not 17 to 20 digits. They will be lost at the next save.`); }
+    }
   } else if (res.status === 'missing') {
     // First run: seed the gitignored config from the tracked example. Only a MISSING file is seeded: a bad one is kept.
     const ex = await loadJson(EXAMPLE_PATH);
@@ -295,10 +331,15 @@ async function init() {
     // this session if even the copy fails.
     const why = res.status === 'ok' ? 'it is not a JSON object' : res.status === 'unreadable' ? 'it could not be read' : 'it is not valid JSON';
     log(`Could not load config: ${why}`);
-    const kept = `${CONFIG_PATH}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     try {
-      await copyFile(CONFIG_PATH, kept);
-      setWarning('config-load', `The saved config could not be used (${why}): a copy was kept as ${basename(kept)} and the bridge runs on its defaults. Fix the file, or delete it to start fresh.`);
+      const kept = await keepCopy();
+      // A copy that worked means the file can be read now: a lock that lifted a moment too late is not a bad file.
+      const again = res.status === 'unreadable' ? await loadJson(CONFIG_PATH) : null;
+      if (again && again.status === 'ok' && isObject(again.value)) { adoptConfig(again.value); log(`Loaded ${state.favorites.length} favorite(s) (the file became readable)`); try { await rm(kept, { force: true }); } catch { /* fine */ } }
+      else {
+        try { const st = await stat(CONFIG_PATH); configSnapshot = { size: st.size, mtimeMs: st.mtimeMs }; } catch { /* gone */ }
+        setWarning('config-load', `The saved config could not be used (${why}): a copy was kept as ${basename(kept)} and the bridge runs on its defaults. To use the file again: stop the bridge, fix discord-voice-config.json (or rename the copy back) and start the bridge again.`);
+      }
     } catch {
       configReadOnly = true;
       setWarning('config-load', `The saved config could not be used (${why}) and a copy could not be made, so it is left as it is and nothing is saved this session.`);
@@ -308,21 +349,23 @@ async function init() {
   // Load the gitignored bot token and, if enabled, start the bot at startup.
   const t = await loadTokens();
   if (t.status === 'ok') {
-    creds = { botToken: String(t.tokens.botToken ?? '').trim(), enabled: !!t.tokens.enabled };
+    creds = { botToken: String(t.tokens.botToken ?? '').trim(), enabled: t.tokens.enabled === true };
     if (creds.enabled && creds.botToken) startBot();
   } else if (t.status === 'missing') log('No discord-tokens.json yet — create it to enable the bot (docs/STREAMERBOT-SETUP.md)');
-  else { rpc.error = TOKENS_BAD; log('discord-tokens.json exists but could not be read as JSON'); }
+  else { rpc.error = t.status === 'unreadable' ? TOKENS_LOCKED : TOKENS_BAD; log('discord-tokens.json could not be read'); }
 }
 
 // What a saved config is held to: its favorites need a 17 to 20 digit server id and channel id (as text; a bare number keeps its digits
-// through parseJson), repeated ids are made new, names are cut by code point, settings go through sanitizeSettings.
+// through parseJson), repeated ids are made new, names are cut by code point, settings go through sanitizeSettings. The favorites that are
+// refused are listed in skippedFavorites (init says so and keeps a copy).
 function adoptConfig(parsed) {
   const favorites = [];
   const ids = new Set();
+  skippedFavorites = [];
   for (const f of Array.isArray(parsed.favorites) ? parsed.favorites : []) {
     if (!isObject(f)) continue;
     const serverId = typeof f.serverId === 'string' ? f.serverId : '', channelId = typeof f.channelId === 'string' ? f.channelId : '';
-    if (!ID_RE.test(serverId) || !ID_RE.test(channelId)) { log(`config: the favorite "${clean(f.name ?? '?', 40)}" was skipped: its server id and channel id must be 17 to 20 digits, as text`); continue; }
+    if (!ID_RE.test(serverId) || !ID_RE.test(channelId)) { skippedFavorites.push(String(f.name ?? '?')); log(`config: the favorite "${clean(f.name ?? '?', 40)}" was skipped: its server id and channel id must be 17 to 20 digits, as text`); continue; }
     let id = String(f.id ?? '');
     if (!id || ids.has(id)) { if (id) log(`config: the favorite id "${clean(id, 40)}" repeats: a new id was made`); do { id = makeId(); } while (ids.has(id)); }
     ids.add(id);
@@ -332,9 +375,11 @@ function adoptConfig(parsed) {
   state = { favorites, current: cur && cur.serverId && cur.channelId ? cur : null, settings: sanitizeSettings(DEFAULT_SETTINGS, parsed.settings) };
 }
 
+const BAD_FAVORITE_IDS = 'That favorite needs a server ID and a channel ID (17 to 20 digits each): the change was not kept.';
+
 async function addFavorite(name, serverId, channelId) {
-  const fav = sanitizeFavorite({ name, serverId, channelId });
-  if (!fav) return null;
+  const fav = normalizeFavorite({ name, serverId, channelId }, ID_RE);
+  if (!fav) { refuse(BAD_FAVORITE_IDS, 'favorite add'); return null; }
   // A repeated Save adds nothing: the favorite that names the same server and channel stays (GRN-133).
   const same = state.favorites.find((f) => f.serverId === fav.serverId && f.channelId === fav.channelId);
   if (same) return same;
@@ -344,17 +389,17 @@ async function addFavorite(name, serverId, channelId) {
   return fav;
 }
 
-// A change is built as a candidate and checked before it touches the favorite: a change that would leave it without a server or a channel
-// is refused (and says so) and the favorite stays as it was (GRN-138).
+// A change is built as a candidate and checked before it touches the favorite: a change that would leave it without a valid server or channel
+// (the same rule the saved config is held to) is refused (and says so) and the favorite stays as it was (GRN-138).
 async function updateFavorite(id, updates) {
   const f = state.favorites.find((x) => x.id === String(id));
   if (!f || !isObject(updates)) return false;
-  const cand = {
-    name: updates.name !== undefined ? cutName(updates.name, 80) : f.name,
-    serverId: updates.serverId !== undefined ? digitsOnly(updates.serverId) : f.serverId,
-    channelId: updates.channelId !== undefined ? digitsOnly(updates.channelId) : f.channelId,
-  };
-  if (!cand.serverId || !cand.channelId) { refuse('That favorite needs a server ID and a channel ID: the change was not kept.', 'favorite update'); return false; }
+  const cand = normalizeFavorite({
+    name: updates.name !== undefined ? updates.name : f.name,
+    serverId: updates.serverId !== undefined ? updates.serverId : f.serverId,
+    channelId: updates.channelId !== undefined ? updates.channelId : f.channelId,
+  }, ID_RE);
+  if (!cand) { refuse(BAD_FAVORITE_IDS, 'favorite update'); return false; }
   Object.assign(f, cand);
   await persist();
   return true;
@@ -452,7 +497,8 @@ function refuse(text, what = 'USE') {
 // USE: while the bot is online the target is checked FIRST. A target that fails keeps the previous current channel, the voice connection
 // and the roster, and says why in rpc.error; it is saved and joined only after it passes (GRN-204). Offline, the pick is saved as before
 // (and the reason the bot is offline stays on the status line) and the same check runs when the bot logs in (joinCurrentChannel). The
-// newest USE decides: a check that finishes after a newer USE began is dropped. A pick that cannot be saved is not applied.
+// newest USE decides: a check that finishes after a newer USE began is dropped. A pick that cannot be saved is used all the same, with a
+// sticky warning (GRN-68).
 async function setCurrent(serverId, channelId) {
   const sId = String(serverId ?? '').replace(/\D/g, '');
   const cId = String(channelId ?? '').replace(/\D/g, '');
@@ -488,39 +534,51 @@ async function setSettings(updates) {
   return true;
 }
 
-function sanitizeFavorite({ name, serverId, channelId }) {
-  const sId = digitsOnly(serverId);
-  const cId = digitsOnly(channelId);
-  if (!sId || !cId) return null;
-  return {
-    name: cutName(name ?? '', 80) || `${sId.slice(-4)}/${cId.slice(-4)}`,
-    serverId: sId,
-    channelId: cId,
-  };
-}
-
 function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 // The config goes through the queue and the atomic write above. A failure rejects (the caller decides what to do) after it has put the fixed
-// message in rpc.configWarning; when the config is read-only for the session the write is skipped, with a warning.
+// message in rpc.configWarning; when the config is read-only for the session the write is skipped, with a warning. A config that could not
+// be used at startup (a copy was made and the bridge runs on its defaults) is not overwritten if somebody has edited it since: that is the
+// operator fixing it, and the fix is loaded at the next start.
 function persist() {
   return enqueueWrite(CONFIG_PATH, async () => {
-    if (configReadOnly) { setWarning('config-write', 'The saved config is left as it is this session (it could not be read or copied aside): the change is not kept after a restart.'); return; }
+    if (!configReadOnly && configSnapshot) {
+      try {
+        const st = await stat(CONFIG_PATH);
+        if (st.size !== configSnapshot.size || st.mtimeMs !== configSnapshot.mtimeMs) { configReadOnly = true; setWarning('config-load', 'The saved config was edited while the bridge runs on its defaults: restart the bridge to load it. Nothing is saved until then.'); }
+      } catch { /* gone: nothing to protect */ }
+    }
+    if (configReadOnly) { setWarning('config-write', 'The saved config is left as it is this session: the change is not kept after a restart.'); return; }
     try { await atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2)); clearWarning('config-write'); }
     catch (e) { setWarning('config-write', `Could not save discord-voice-config.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`); throw e; }
   });
 }
 
 // The token file is never written from memory: the file as it is now is read, only `enabled` is set, and the whole object is written back (so
-// botToken and every other field survive). A file that cannot be parsed is not replaced.
+// botToken and every other field survive, bare big integers included). A file that cannot be parsed is not replaced, a file that the operator
+// saved between the read and the write is read again and merged on top of (never overwritten with the older copy), and there is no in-place
+// fallback: a failed write only means `enabled` is not kept, which is harmless, while a truncated token file is not.
 function persistTokens() {
   return enqueueWrite(TOKENS_PATH, async () => {
-    const t = await loadTokens();
-    if (t.status !== 'ok') { log('discord-tokens.json was not updated: it is missing or not valid JSON'); return; }
-    try { await atomicWrite(TOKENS_PATH, JSON.stringify({ ...t.tokens, enabled: creds.enabled }, null, 2)); clearWarning('tokens-write'); }
-    catch (e) { setWarning('tokens-write', `Could not save discord-tokens.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`); throw e; }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const t = await loadTokens(); // (a file that is missing or cannot be read has put its warning up)
+      if (t.status !== 'ok') { log('discord-tokens.json was not updated: it is missing or cannot be read'); return; }
+      try {
+        await atomicWrite(TOKENS_PATH, JSON.stringify({ ...t.tokens, enabled: creds.enabled }, null, 2), {
+          inPlace: false,
+          precheck: async () => { try { return Buffer.compare(await readFile(TOKENS_PATH), t.raw) === 0; } catch { return false; } },
+        });
+        clearWarning('tokens-write');
+        return;
+      } catch (e) {
+        if (e && e.code === 'ECHANGED') continue; // saved by the operator meanwhile: merge again on top of their version
+        setWarning('tokens-write', `Could not save discord-tokens.json (${(e && e.code) || 'error'}): the change is not kept after a restart.`);
+        throw e;
+      }
+    }
+    setWarning('tokens-write', 'discord-tokens.json kept changing while it was being updated: the change is not kept after a restart.');
   });
 }
 
@@ -528,13 +586,17 @@ function persistTokens() {
 
 // Operator clicked "Connect" — (re)start the bot with the FILE token. There is no token-over-the-bus path by design. The file is read again
 // every time: a corrected token is adopted, an empty one or a deleted file forgets the token (a bot that is running with it is stopped), and
-// a file that exists but cannot be parsed is reported, the token held in memory (if any) serving for this Connect (GRN-77, GRN-92).
+// a file that exists but cannot be parsed is reported, the token held in memory (if any) serving for this Connect (GRN-77, GRN-92). A Connect
+// or Reset auth that comes while the file is being read wins over the one before it (tokenSeq).
+let tokenSeq = 0;
 async function connectRpc() {
+  const my = ++tokenSeq;
   const t = await loadTokens();
+  if (my !== tokenSeq) return;
   let note = '';
   if (t.status === 'ok') creds.botToken = String(t.tokens.botToken ?? '').trim();
   else if (t.status === 'missing') creds.botToken = '';
-  else note = TOKENS_BAD;
+  else note = t.status === 'unreadable' ? TOKENS_LOCKED : TOKENS_BAD;
   if (!creds.botToken) {
     stopBot();
     rpc.error = note || NO_TOKEN;
@@ -585,6 +647,7 @@ function leaveGateway(guildId) {
 // Reset auth: disable the bot and stop it. The token file is NOT blanked (a forged bus command must not be able to erase the token; deleting
 // the file by hand forgets it): only `enabled` goes to false (GRN-18). The bot is stopped before the file is written, and whatever the write result (GRN-68).
 async function resetAuth() {
+  tokenSeq++; // a Connect that is still reading the token file gives way to this
   creds.enabled = false;
   stopBot();
   schedulePush();
