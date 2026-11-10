@@ -1037,6 +1037,24 @@ async function main() {
       const ev5 = D.autoPopulate({ directory: idEntries, ignored: [], labels: ['NEW'], users: {}, boundUsers: ['<@' + idEntries[0].discordUserId + '>'] });
       check('GRN-35: an auto entry for a Discord user who sits in a slot (boundUsers, ids with or without <@>) is not evicted; the next idle one is',
         ev5.evicted.join() === '1' && ev5.directory[0].displayName === 'U0', JSON.stringify(ev5.evicted));
+      // C75: 1.0.13 cleared `auto` only on a rename, so a placeholder whose socials the operator filled in kept the flag, and nothing migrates
+      // it. Auto-add never writes socials: an auto entry that holds some is the operator's, so it is never evicted and does not count toward the cap.
+      const c75Bob = () => ({ vdoLabel: '', discordUserId: '300000000000000075', displayName: 'Bob', socials: [{ platform: 'twitch', handle: 'bobtv' }], auto: true });
+      const c75Idle = (n) => Array.from({ length: n }, (_, i) => ({ vdoLabel: 'IDLE' + String(i).padStart(2, '0'), discordUserId: '', displayName: 'IDLE' + i, socials: [], auto: true }));
+      const c75a = D.autoPopulate({ directory: [c75Bob()].concat(c75Idle(50)), ignored: [], labels: ['NEW'], users: {} });
+      check('C75: at the cap an idle auto entry that holds socials (a 1.0.13 edit kept its flag) is not evicted; the next idle placeholder is',
+        c75a.evicted.join() === '1' && c75a.directory[0].displayName === 'Bob' && c75a.directory[0].socials.length === 1 && c75a.directory.length === 51
+        && c75a.directory[50].vdoLabel === 'NEW' && !c75a.directory.some((e) => e.vdoLabel === 'IDLE00'), JSON.stringify({ ev: c75a.evicted, first: c75a.directory[0].displayName, n: c75a.directory.length }));
+      const c75b = D.autoPopulate({ directory: [c75Bob()].concat(c75Idle(49)), ignored: [], labels: ['NEW'], users: {} });
+      check('C75: …such an entry does not count toward the cap (with 49 placeholders beside it the new guest is added and nothing is evicted)',
+        c75b.evicted.length === 0 && c75b.skipped === 0 && c75b.directory.length === 51 && c75b.directory[0].displayName === 'Bob', JSON.stringify({ ev: c75b.evicted, s: c75b.skipped, n: c75b.directory.length }));
+      const c75Live = c75Idle(50);
+      const c75c = D.autoPopulate({ directory: [c75Bob()].concat(c75Live), ignored: [], labels: c75Live.map((e) => e.vdoLabel).concat(['NEW']), users: {} });
+      check('C75: …and when no placeholder can make way (all 50 are in the room) the new guest is skipped and counted; the socials entry is not dropped instead',
+        c75c.skipped === 1 && c75c.evicted.length === 0 && c75c.directory.length === 51 && c75c.directory[0].displayName === 'Bob' && !c75c.directory.some((e) => e.vdoLabel === 'NEW'),
+        JSON.stringify({ ev: c75c.evicted, s: c75c.skipped, n: c75c.directory.length }));
+      check('C75: GRDir.isPlaceholder (the one rule the dock\'s badge, count and "Clear auto-added" use): an auto entry without socials is one; with socials, or curated, it is not',
+        typeof D.isPlaceholder === 'function' && D.isPlaceholder(c75Idle(1)[0]) && !D.isPlaceholder(c75Bob()) && !D.isPlaceholder(Object.assign(c75Idle(1)[0], { auto: false })) && !D.isPlaceholder(null));
       const emptyName = D.autoPopulate({ directory: [], ignored: [], labels: [], users: { '300000000000000003': { username: '' }, '300000000000000004': { username: '  ' }, '300000000000000005': { } } });
       const named = D.autoPopulate({ directory: emptyName.directory, ignored: [], labels: [], users: { '300000000000000003': { username: 'Zed' } } });
       check('GRN-35: a Discord user with no name yet is not added (not stored under the snowflake); the entry is added once the name arrives',

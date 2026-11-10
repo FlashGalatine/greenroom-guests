@@ -326,9 +326,13 @@ label (a zero-width space, say) are ignored when labels are compared, so a
 guest who adds one to the name of a guest you have named gets that guest's
 plate; the lists spell such characters out as `<U+200B>` and mark two live
 labels that are the same once case, spacing and hidden characters are ignored,
-including the label pick of a guest slot. At most 50 auto-added entries are kept; at
-the limit the dock says so (the ones for guests no longer in the room, and not
-in a slot, make way first; entries you named never do).
+including the label pick of a guest slot. At most 50 auto-added placeholders (rows
+with the `auto` badge) are kept. At the limit the ones for guests no longer in the
+room, and not in a slot, make way, and the dock names who it removed; when none
+can, it says the limit is reached. Entries you named or edited never make way, and
+neither does a row that holds socials. A row from 1.0.13 or earlier where you set
+only the label or the Discord ID still shows the badge and can make way: rename it
+to keep it.
 
 ## 5. The Discord bridge sidecar (optional)
 

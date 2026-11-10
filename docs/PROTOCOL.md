@@ -257,7 +257,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   (the label / the Discord username) and flagged `auto: true` — so a guest who
   joins mid-stream has a nameplate without an operator present. `auto` means "this
   name is a placeholder"; the control page badges those rows and clears the flag
-  the moment the operator edits any field of the entry. A Discord user whose username equals an
+  the moment the operator edits any field of the entry. An `auto` entry that holds
+  socials is not a placeholder (`GRDir.isPlaceholder`): auto-add never writes
+  socials, so the operator put them there (1.0.13 kept the flag through a socials
+  edit). Such an entry has no badge, is kept by **Clear auto-added**, and is never
+  dropped at the cap or counted toward it; the linking below still reads its
+  `auto` flag. A Discord user whose username equals an
   existing **auto** entry's `displayName` or `vdoLabel` fills that entry's empty
   `discordUserId` instead of creating a twin, and a guest who joined the voice
   channel first takes the label of their auto entry when they join the VDO room
@@ -268,12 +273,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   button acts only on the Discord user it was drawn for, and when two or more
   Discord users have the name the row offers nothing and says so (set the ID by
   hand). Until the operator accepts, the guest's roster chip shows the raw
-  Discord name and a discord-mode slot bound to them shows no plate. Auto
-  entries are capped at 50: at the cap the first auto entry that is not in the
-  room (by label, Discord ID or Discord name) and not in a slot is dropped to
-  make room, curated entries never are, the dropped guest is added again if they
-  come back, and the dock says "auto-add limit reached" when someone could not
-  be added. A Discord user with no name
+  Discord name and a discord-mode slot bound to them shows no plate.
+  Placeholders are capped at 50: at the cap the first placeholder that is not in
+  the room (by label, Discord ID or Discord name) and not in a slot is dropped to
+  make room, and the dock names who it removed on its status line. Curated
+  entries never are, the dropped guest is added again if they come back, and the
+  dock says "auto-add limit reached" when someone could not be added. A Discord user with no name
   yet is added when the name arrives (never stored under the snowflake), and a
   label that draws nothing (zero-width characters, U+2800) is not added. A page appends a given label or voice
   user at most once per page session (so a label that Streamer.bot rewrites on the

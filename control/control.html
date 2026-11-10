@@ -1645,7 +1645,7 @@
       const st = entryLive(entry, liveSet, users);
       if (isDraft(entry)) unsaved++;
       if (st.any) liveCount++;
-      if (entry.auto) autoCount++;
+      if (GRDir.isPlaceholder(entry)) autoCount++; // (an auto entry that holds socials is the operator's: not counted, not cleared)
       if (liveOnly && !st.any && !dirSuggest.has(entry[LID])) return; // a row with a link offer is waiting for an answer: it stays
       if (!dirMatches(entry, terms, users)) return;
       visible.push({ entry, st });
@@ -1762,7 +1762,7 @@
       meta.title = meta.textContent + ' — click to edit';
       head.append(toggle, dot, dispIn, meta);
 
-      if (entry.auto) {
+      if (GRDir.isPlaceholder(entry)) {
         const badge = document.createElement('span');
         badge.className = 'dir-badge';
         badge.textContent = 'auto';
@@ -2045,9 +2045,11 @@
       const en = base[lb.index];
       if (en && en.auto && !en.vdoLabel) { en.vdoLabel = lb.label; autoAdded.add(GRDir.labelExactKey(lb.label)); changed = true; }
     }
+    const dropped = []; // names of the placeholders removed to make room, oldest first: the operator is told (C75: it was silent)
     for (const idx of res.evicted.slice().sort((a, b) => b - a)) { // auto entries that left the room made way for new ones
       if (idx < base.length) {
         const gone = base[idx];
+        dropped.unshift(gone.displayName || gone.vdoLabel || gone.discordUserId);
         addedKeys(gone).forEach((k) => autoAdded.delete(k)); // a guest who comes back is added again
         dirOpen.delete(gone[LID]); dirSuggest.delete(gone[LID]); dirNotes.delete(gone[LID]);
         base.splice(idx, 1);
@@ -2060,7 +2062,13 @@
       addedKeys(added).forEach((k) => autoAdded.add(k));
       changed = true;
     }
-    if (linkedNames.length) setCfgStatus('Linked Discord: ' + linkedNames.join(', '));
+    const notes = [];
+    if (linkedNames.length) notes.push('Linked Discord: ' + linkedNames.join(', '));
+    if (dropped.length) {
+      const who = dropped.length > 3 ? dropped.slice(0, 3).join(', ') + ' and ' + (dropped.length - 3) + ' more' : dropped.join(', ');
+      notes.push(`Auto-add limit (${GRDir.AUTO_MAX}): removed ${who} to make room (auto-added, not in the room or a slot)`);
+    }
+    if (notes.length) setCfgStatus(notes.join(' · '));
     if (changed) dirSig = '';
     return changed;
   }
@@ -2164,10 +2172,11 @@
   });
 
   els.dirClearAuto.addEventListener('click', () => {
-    const autos = cfg.directory.filter((e) => e.auto);
+    // Placeholders only: an auto entry that holds socials (1.0.13 kept the flag through a socials edit) is the operator's and stays.
+    const autos = cfg.directory.filter((e) => GRDir.isPlaceholder(e));
     if (!autos.length) return;
     if (!confirm(`Remove ${autos.length} auto-added guest${autos.length === 1 ? '' : 's'} (the ones still showing an "auto" badge)?\n\nAnyone still live is re-added with a placeholder name on the next poll — untick "auto-add guests" first to keep them out.`)) return;
-    cfg.directory = cfg.directory.filter((e) => !e.auto);
+    cfg.directory = cfg.directory.filter((e) => !GRDir.isPlaceholder(e));
     autoAdded.clear(); // "re-added on the next poll" must stay true
     dirOpen.clear();
     dirSig = '';

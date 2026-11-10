@@ -3236,7 +3236,7 @@ async function main() {
     // ── R18: one guest identity rule (GRN-62, 13, 114, 147, 205, 206, 148, 173, 35, 113, 157) ──
     if (!ONLY || ONLY === 'identity') {
       console.log('\n[R18] identity: a stranger is never bound to a curated entry; underscores, escapes and case; the auto cap; the roster order');
-      const R18_SECTIONS = 'abcdefghijklmn'.split('');
+      const R18_SECTIONS = 'abcdefghijklmno'.split('');
       for (const k of (process.env.R18_ONLY || '').split(',').filter(Boolean)) if (!R18_SECTIONS.includes(k)) throw new Error('R18_ONLY=' + k + ': the sections are ' + R18_SECTIONS.join(', '));
       const want = (k) => !process.env.R18_ONLY || process.env.R18_ONLY.split(',').includes(k);
       const mkSeed = (extra) => Object.assign({ enabled: true, room: 'idroom', password: 'pw1', viewFlags: VIEWFLAGS, directoryAutoAdd: true,
@@ -3497,12 +3497,52 @@ async function main() {
         voice(x, wave2);
         await until(async () => (await dirNames()).includes('Member 59'), 9000);
         const n2 = await dirNames();
+        const dropNote = await p.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
         voice(x, Object.assign({}, wave2, { [id(1)]: mem(1) })); // Member 01 was evicted: back in the channel, they are added again
         await until(async () => (await dirNames()).includes('Member 01'), 9000);
         const n3 = await dirNames();
         check('R18n: at the cap ten new members evict the idle guests who left (Member 01..10) and not the one in slot 1 (Member 00); a guest who returns after being evicted is added again',
           n2.length === 50 && n2.includes('Member 00') && n2.includes('Member 59') && !n2.includes('Member 01') && !n2.includes('Member 10') && n2.includes('Member 11')
           && n3.length === 50 && n3.includes('Member 01') && n3.includes('Member 00'), JSON.stringify({ n2: n2.length, n3: n3.length, has01: n3.includes('Member 01') }));
+        check('R18n2: the dock says it made room, naming who it removed (C75: the drop was silent)',
+          /Auto-add limit \(50\): removed Member (0[1-9]|10)\b/.test(dropNote) && !/Member 00/.test(dropNote), JSON.stringify(dropNote));
+        await p.close();
+      }
+      // (o) C75: 1.0.13 kept `auto: true` on a placeholder whose socials the operator filled in. Auto-add never writes socials, so such an entry
+      // is the operator's: no "auto" badge, not counted or removed by "Clear auto-added", and never the one dropped at the cap.
+      if (want('o')) {
+        const id = (i) => '4000000000000' + String(20000 + i);
+        const nm = (i) => 'Idle ' + String(i).padStart(2, '0');
+        const bob = { vdoLabel: '', discordUserId: '300000000000000075', displayName: 'Bob', socials: [{ platform: 'twitch', handle: 'bobtv' }], auto: true };
+        const idle = Array.from({ length: 50 }, (_, i) => ({ vdoLabel: '', discordUserId: id(i), displayName: nm(i), socials: [], auto: true }));
+        const seed = mkSeed({ directory: [bob].concat(idle) });
+        const x = await seededMock(seed);
+        const p = await openControl(x, QUIET, seed);
+        p.on('dialog', (d) => d.accept()); // the "Clear auto-added" confirm
+        await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length === 51, null, 8000);
+        const view = await p.evaluate(() => {
+          const rows = [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')];
+          const row = rows.find((r) => r.querySelector('input.vdo-dir-display')?.value === 'Bob');
+          const b = document.getElementById('btnDirClearAuto');
+          return { rows: rows.length, bobBadge: !row || !!row.querySelector('.dir-badge'), badges: document.querySelectorAll('#vdoDirectory .dir-badge').length, clear: b && !b.hidden ? b.textContent : '' };
+        });
+        check('R18o: an auto entry that holds socials shows no "auto" badge and is not in the "Clear auto-added" count (the 50 placeholders are)',
+          view.rows === 51 && !view.bobBadge && view.badges === 50 && view.clear === 'Clear auto-added (50)', JSON.stringify(view));
+        const latest = async () => { const ps = await pushPayloads(x); return ps.length ? ps[ps.length - 1].directory : null; };
+        voice(x, { [id(50)]: U('Newcomer', 2) });
+        let dir = null;
+        for (let t = 0; t < 9000; t += 250) { dir = await latest(); if (dir && dir.some((e) => e.displayName === 'Newcomer')) break; await sleep(250); }
+        const note = await p.evaluate(() => document.getElementById('cfgStatus')?.textContent || '');
+        check('R18o2: at the cap a new guest makes the first idle PLACEHOLDER (Idle 00) make way, not the socials entry, and the dock names it',
+          !!dir && dir.length === 51 && dir[0].displayName === 'Bob' && dir[0].socials.length === 1 && !dir.some((e) => e.displayName === 'Idle 00') && dir.some((e) => e.displayName === 'Idle 01')
+          && dir.some((e) => e.displayName === 'Newcomer') && /Auto-add limit \(50\): removed Idle 00 to make room/.test(note),
+          JSON.stringify({ n: dir && dir.length, first: dir && dir[0] && dir[0].displayName, idle00: !!dir && dir.some((e) => e.displayName === 'Idle 00'), note }));
+        await x.api.clear();
+        await p.click('#btnDirClearAuto');
+        let after = null; // the push the button made (the first one after it: a later voice update may add the newcomer back)
+        for (let t = 0; t < 6000; t += 250) { const ps = await pushPayloads(x); if (ps.length) { after = ps[0].directory; break; } await sleep(250); }
+        check('R18o3: "Clear auto-added" removes the placeholders and keeps the entry that holds socials',
+          !!after && after.length === 1 && after[0].displayName === 'Bob' && after[0].socials.length === 1, JSON.stringify(after && after.map((e) => e.displayName)));
         await p.close();
       }
     }

@@ -11,7 +11,8 @@
 //
 // `auto` marks a placeholder name the page invented from a live guest (the VDO
 // label or the Discord username); any edit the operator makes to the entry clears
-// the flag. `directoryIgnored` is the anti-resurrection list: removing an entry
+// the flag (an auto entry that holds socials is the operator's all the same: see
+// isPlaceholder). `directoryIgnored` is the anti-resurrection list: removing an entry
 // (or clearing one of its match keys) records the key so the next poll doesn't
 // re-add the guest a second later.
 //
@@ -208,14 +209,20 @@
   //   labeled    [{ index, label }] a VDO label filled into an AUTO entry that the guest's Discord name had created first
   //   suggested  [{ index, id, username }] a CURATED entry whose name matches a Discord user: never linked silently (anyone can pick
   //              a Discord name), only offered to the operator; it changes nothing, so the pass stays a fixpoint
-  //   skipped    how many new entries were not added because AUTO_MAX auto entries exist and none could be evicted
-  //   evicted    input indices of the auto entries dropped to make room (only entries absent from the room and bound to no slot)
+  //   skipped    how many new entries were not added because AUTO_MAX placeholders exist and none could be evicted
+  //   evicted    input indices of the placeholders dropped to make room (only entries absent from the room and bound to no slot)
   //   appended   the new entry objects
   //
   // Both control pages run this on the same inputs, so the result must not depend on iteration order: labels are sorted (by key, then
   // exact case, then raw text; of several raw texts with one canon the smallest is used) and user ids as strings before anything is
   // appended.
   const AUTO_MAX = 50;
+  // A placeholder is an auto entry that still holds only what auto-add put there. Auto-add never writes socials, so an auto entry with
+  // socials is the operator's: 1.0.13 cleared the flag only on a rename and kept it through a socials edit, and nothing migrates it. Such
+  // an entry is treated as curated wherever the dock and the cap ask "is this a placeholder?": it is never evicted, does not count toward
+  // AUTO_MAX, has no "auto" badge and is kept by "Clear auto-added". (A 1.0.13 edit of only the label or the Discord ID cannot be told
+  // apart from what auto-add itself fills in, so such a row stays a placeholder.)
+  function isPlaceholder(e) { return !!(e && e.auto && !(Array.isArray(e.socials) && e.socials.length)); }
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   function autoPopulate(opts) {
     const o = opts || {};
@@ -260,10 +267,11 @@
     const isLive = (e) => (e.vdoLabel && foldCount.has(fold(e.vdoLabel))) || (e.discordUserId && liveUsers.has(digits(e.discordUserId)))
       || (!e.discordUserId && (liveNames.has(fold(e.displayName)) || (e.vdoLabel && liveNames.has(fold(e.vdoLabel)))));
     const isBound = (e) => (e.vdoLabel && boundLabels.has(fold(e.vdoLabel))) || (e.discordUserId && boundUsers.has(digits(e.discordUserId)));
-    // Room for one more auto entry? At AUTO_MAX, drop the first auto entry that is not in the room and not in a slot; else skip.
+    // Room for one more auto entry? At AUTO_MAX placeholders, drop the first placeholder that is not in the room and not in a slot; else
+    // skip. An auto entry that holds socials is not a placeholder (see isPlaceholder): it neither counts nor makes way.
     const room = () => {
-      if (dir.reduce((n, e) => n + (e && e.auto ? 1 : 0), 0) < AUTO_MAX) return true;
-      const i = dir.findIndex((e, k) => e && e.auto && orig[k] >= 0 && !isLive(e) && !isBound(e));
+      if (dir.reduce((n, e) => n + (isPlaceholder(e) ? 1 : 0), 0) < AUTO_MAX) return true;
+      const i = dir.findIndex((e, k) => isPlaceholder(e) && orig[k] >= 0 && !isLive(e) && !isBound(e));
       if (i < 0) { skipped++; return false; }
       evicted.push(orig[i]);
       dir.splice(i, 1);
@@ -335,7 +343,7 @@
 
   globalThis.GRDir = {
     sanitizeSocials, sanitizeDirectory, sanitizeIgnored,
-    labelKey, labelExactKey, userKey, findByLabel, findByUserId, canon, fold, hasGlyph, decodeHtml, AUTO_MAX,
+    labelKey, labelExactKey, userKey, findByLabel, findByUserId, canon, fold, hasGlyph, decodeHtml, AUTO_MAX, isPlaceholder,
     parseSocialsText, socialsToText, autoPopulate, isDateShaped,
     extraFields, carrySocialExtras, DIR_KEYS, SOCIAL_KEYS,
   };
