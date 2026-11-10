@@ -28,11 +28,14 @@
 // the real sidecar first and use it only on a Streamer.bot you are free to disturb.
 
 import { WebSocket } from 'ws';
+import { createHash } from 'node:crypto';
 
 const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8084}/`; // the mock's WebSocket port
 const ALLOW_REAL_SB = process.argv.includes('--allow-real-sb');
 const HELLO_WAIT_MS = 3000; // a mock greets at once; a server that stays silent this long is not one
 const RECONNECT_MS = 3000;
+const SB_PASSWORD = process.env.GREENROOM_SB_PASSWORD || ''; // for a mock Streamer.bot started with SB_PASSWORD (never printed)
+const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
 
 const STREAMER_ID = '110457699291906048';
 
@@ -214,6 +217,7 @@ function refuse(why) {
 function connect() {
   ws = new WebSocket(WS_URL);
   let engaged = false;
+  let authId = null;
   let helloTimer = null;
   // Subscribe and push only once, and only after the guard is satisfied.
   const engage = () => {
@@ -236,8 +240,20 @@ function connect() {
     try { m = JSON.parse(raw.toString()); } catch { return; }
     if (!m || typeof m !== 'object') return;
     if (m.request === 'Hello') {
-      if (m.info && m.info.source === 'mock') engage();
+      if (m.info && m.info.source === 'mock') {
+        const a = m.authentication;
+        if (a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' && SB_PASSWORD) {
+          authId = String(++msgId);
+          ws.send(JSON.stringify({ request: 'Authenticate', id: authId, authentication: b64sha256(b64sha256(SB_PASSWORD + a.salt) + a.challenge) }));
+        } else engage();
+      }
       else if (!ALLOW_REAL_SB) refuse(`its Hello says it is ${JSON.stringify(m.info && m.info.name || 'something')}, not the mock`);
+      return;
+    }
+    if (authId && m.id === authId && !m.event) {
+      authId = null;
+      if (m.status && m.status !== 'ok') refuse('the mock Streamer.bot refused the password (GREENROOM_SB_PASSWORD)');
+      else engage();
       return;
     }
     if (!engaged) return; // before the guard is satisfied nothing is acted on

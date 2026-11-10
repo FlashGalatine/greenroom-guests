@@ -23,6 +23,7 @@
 // It does NOT render pixels; verify-render.mjs does that in a real browser.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer, connect as netConnect } from 'node:net';
 import { createServer as createHttp } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -66,7 +67,9 @@ const ENV_KEEP = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir
 function cleanEnv(extra = {}) {
   const env = {};
   for (const k of ENV_KEEP) if (process.env[k] !== undefined) env[k] = process.env[k];
-  return { ...env, ...extra };
+  // The tests run the real bridge against the MOCK Streamer.bot, which the bridge refuses unless told (GRN-195: it acts only after a
+  // genuine Hello); the cases that test that refusal pass GREENROOM_ALLOW_MOCK: '0'.
+  return { GREENROOM_ALLOW_MOCK: '1', ...env, ...extra };
 }
 
 function startChild(script, readyText, extraEnv = {}) {
@@ -1540,7 +1543,19 @@ async function main() {
             if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') got.push(JSON.parse(d.discordVoiceJson)); }
           } catch { /* not a payload */ }
         });
-        watcher.send(JSON.stringify({ request: 'Subscribe', id: 's', events: { general: ['Custom'] } }));
+        const subscribeWatcher = () => watcher.send(JSON.stringify({ request: 'Subscribe', id: 's', events: { general: ['Custom'] } }));
+        if (opts.sbPassword === undefined) subscribeWatcher();
+        else {
+          // a Streamer.bot with a password: answer its challenge first (the same handshake as the clients')
+          const b64 = (t) => createHash('sha256').update(t).digest('base64');
+          watcher.on('message', (raw) => {
+            try {
+              const m = JSON.parse(raw.toString());
+              if (m.request === 'Hello') { if (m.authentication) watcher.send(JSON.stringify({ request: 'Authenticate', id: 'wa', authentication: b64(b64(opts.sbPassword + m.authentication.salt) + m.authentication.challenge) })); else subscribeWatcher(); }
+              else if (m.id === 'wa' && m.status === 'ok') subscribeWatcher();
+            } catch { /* not for us */ }
+          });
+        }
         const child = spawn(process.execPath, ['sidecar/discord-bridge.mjs', ...(opts.args || [])], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv(env) });
         let out = ''; let code = null;
         child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => { out += d; });
@@ -3030,6 +3045,94 @@ async function main() {
             }
           } finally {
             await md.close();
+          }
+        }
+        // ── 8f. Streamer.bot's Hello and its password (Sprint 17: GRN-06, GRN-195, GRN-125's bridge half) ──
+        {
+          console.log('\n[8f] Streamer.bot Hello and password: the bridge serves a genuine Hello only, authenticates when asked, repeats it on reconnect, and the password stays out of every frame and log');
+          const PW = 'sbpw-' + Date.now().toString(36) + '-canary-Zq7';
+          const T = JSON.stringify({ sbHelloMs: 700 }); // (a shorter wait for a Hello that does not come)
+          const noMock = { GREENROOM_ALLOW_MOCK: '0', GREENROOM_TIMING: T };
+          const mockOutOf = (sb) => { const o = { text: '' }; sb.child.stdout.setEncoding('utf8'); sb.child.stdout.on('data', (d) => { o.text += d; }); return o; };
+          // (A) the peer says it is the mock: not served, unless GREENROOM_ALLOW_MOCK=1
+          {
+            const a = await rig({ env: noMock, noWait: true });
+            await nap(2000);
+            check('[8f] GRN-195: a peer that says it is the Greenroom mock is not served (GREENROOM_ALLOW_MOCK unset): the bridge says so, subscribes to nothing and pushes nothing, and stays up', /says it is the Greenroom mock/.test(a.out) && a.got.length === 0 && a.code === null, JSON.stringify({ out: a.out.slice(-300), got: a.got.length, code: a.code }));
+          }
+          // (B) a genuine-looking Hello (no info.source): served
+          {
+            const b = await rig({ sb: await startMockWith({ SB_HELLO: 'real' }), env: noMock });
+            const first = await b.waitFor(() => true, 6000);
+            check('[8f] GRN-195: a Hello that is not the mock\'s is served: the bridge subscribes and pushes its state', !!first && /Connected to Streamer\.bot/.test(b.out), b.out.slice(-200));
+          }
+          // (C) no Hello at all: no subscribe, unless GREENROOM_ALLOW_MOCK=1 (then as before)
+          {
+            const c = await rig({ sb: await startMockWith({ SB_HELLO: 'none' }), env: noMock, noWait: true });
+            await nap(2200);
+            const c2 = await rig({ sb: await startMockWith({ SB_HELLO: 'none' }), env: { GREENROOM_TIMING: T } }); // (the tests' default: GREENROOM_ALLOW_MOCK=1)
+            const carried = await c2.waitFor(() => true, 6000);
+            check('[8f] GRN-06/195: a server that sends no Hello is not subscribed to ("no Streamer.bot Hello"), unless GREENROOM_ALLOW_MOCK=1, when the bridge carries on as before', /no Streamer\.bot Hello within/.test(c.out) && c.got.length === 0 && !!carried, JSON.stringify({ out: c.out.slice(-200), got: c.got.length, carried: !!carried }));
+          }
+          // (D) a password: the handshake, the canary, reconnect
+          {
+            const sb = await startMockWith({ SB_PASSWORD: PW, SB_HELLO: 'real' });
+            const mout = mockOutOf(sb);
+            const tokData = JSON.stringify({ botToken: '', enabled: false, sbPassword: PW, note: 'kept' });
+            const d = await rig({ sb, sbPassword: PW, tokData, env: noMock });
+            const first = await d.waitFor(() => true, 8000);
+            check('[8f] GRN-06: with Authentication on (a password) and sbPassword in discord-tokens.json the bridge authenticates and then subscribes: its state reaches a subscribed client', !!first && /accepted the password/.test(d.out) && /Connected to Streamer\.bot/.test(d.out), d.out.slice(-300));
+            d.cmd('connect'); await nap(500); d.cmd('reset-auth'); await nap(800);
+            const tokNow = JSON.parse(await readFile(d.env.DISCORD_BRIDGE_TOKENS, 'utf8'));
+            const stateNow = JSON.stringify(await (await fetch(sb.base + '/mock/state')).json());
+            const actionsNow = JSON.stringify(await (await fetch(sb.base + '/mock/actions')).json());
+            check('[8f] GRN-67/179: the password is in no frame of the bus, no recorded action, no state, no payload and no log line of the bridge; and the token file still holds it (and its other fields) after Connect and reset-auth',
+              !d.frames.join('').includes(PW) && !actionsNow.includes(PW) && !stateNow.includes(PW) && !JSON.stringify(d.got).includes(PW) && !d.out.includes(PW) && tokNow.sbPassword === PW && tokNow.note === 'kept' && tokNow.enabled === false,
+              JSON.stringify({ frames: d.frames.join('').includes(PW), actions: actionsNow.includes(PW), state: stateNow.includes(PW), out: d.out.includes(PW), tok: tokNow.sbPassword === PW }));
+            const before = (mout.text.match(/Authenticate OK/g) || []).length;
+            await fetch(sb.base + '/mock/dropall').then((r) => r.arrayBuffer());
+            const again = await until(() => (mout.text.match(/Authenticate OK/g) || []).length > before, 10000);
+            check('[8f] GRN-06: the handshake is repeated on every reconnect (the connection dropped: the bridge authenticated again)', again, `${before} → ${(mout.text.match(/Authenticate OK/g) || []).length}`);
+            // backup.mjs: the same password from GREENROOM_SB_PASSWORD, or from the token file; the peer is named
+            const bkDir = await mkdtemp(resolve(tmpdir(), 'greenroom-bk17-'));
+            scratchDirs.push(bkDir);
+            const bkBase = { SB_WS_URL: sb.url, GREENROOM_BACKUP_DIR: bkDir, DISCORD_BRIDGE_TOKENS: resolve(bkDir, 'none.json') };
+            const withEnv = await runNode(['backup.mjs', 'save', resolve(bkDir, 'a.json')], { ...bkBase, GREENROOM_SB_PASSWORD: PW });
+            const withFile = await runNode(['backup.mjs', 'save', resolve(bkDir, 'b.json')], { ...bkBase, DISCORD_BRIDGE_TOKENS: d.env.DISCORD_BRIDGE_TOKENS });
+            const without = await runNode(['backup.mjs', 'save', resolve(bkDir, 'c.json')], bkBase);
+            const wrong = await runNode(['backup.mjs', 'save', resolve(bkDir, 'd.json')], { ...bkBase, GREENROOM_SB_PASSWORD: 'not-the-password' });
+            check('[8f] GRN-06/195: backup.mjs authenticates with GREENROOM_SB_PASSWORD or the sbPassword field and names the peer; without a password or with a wrong one it says so and does nothing; the password is never printed',
+              /peer:   Streamer\.bot 0\.2\.5/.test(withEnv.out) && /peer:   Streamer\.bot 0\.2\.5/.test(withFile.out) && !/refused the (password|Subscribe)/.test(withEnv.out + withFile.out)
+              && without.code !== 0 && /GREENROOM_SB_PASSWORD/.test(without.out) && wrong.code !== 0 && /refused the password/.test(wrong.out)
+              && ![withEnv, withFile, without, wrong].some((x) => x.out.includes(PW) || x.out.includes('not-the-password')),
+              JSON.stringify({ withEnv: withEnv.out.slice(-160), withFile: withFile.out.slice(-160), without: without.out.slice(-200), wrong: wrong.out.slice(-160) }));
+          }
+          // (E) a wrong password, no password, Enforce off
+          {
+            const sbE = await startMockWith({ SB_PASSWORD: PW, SB_HELLO: 'real' });
+            const wrong = await rig({ sb: sbE, sbPassword: PW, tokData: JSON.stringify({ botToken: '', enabled: false, sbPassword: 'wrong-pw-1' }), env: noMock, noWait: true });
+            await nap(2000);
+            check('[8f] GRN-06/125: a wrong sbPassword is a visible failure ("refused the password") and no Subscribe: nothing is pushed', /refused the password/.test(wrong.out) && wrong.got.length === 0 && !wrong.out.includes('wrong-pw-1'), wrong.out.slice(-250));
+            const none = await rig({ sb: sbE, sbPassword: PW, env: noMock, noWait: true });
+            await nap(2000);
+            check('[8f] GRN-06/125: Authentication on and no sbPassword: the bridge says so, carries on, and the refused Subscribe is logged (a non-ok ack is no longer silent); nothing is pushed', /no sbPassword/.test(none.out) && /refused a request/.test(none.out) && none.got.length === 0, none.out.slice(-300));
+            const off = await rig({ sb: await startMockWith({ SB_PASSWORD: PW, SB_HELLO: 'real', SB_AUTH: 'serve' }), env: noMock });
+            const served = await off.waitFor(() => true, 6000);
+            check('[8f] GRN-06: Authentication on with Enforce off and no sbPassword: served as before', !!served, off.out.slice(-200));
+          }
+          // (F) the helpers all three pages share
+          {
+            const vm = await import('node:vm');
+            const src = (await readFile(resolve(__dirname, 'overlay', 'panel-client-sb.js'), 'utf8')).replace(/\r\n/g, '\n');
+            const block = /\/\/ <sb-conn>[\s\S]*?\/\/ <\/sb-conn>/.exec(src);
+            const ctx = vm.createContext({ URLSearchParams, URL, TextEncoder, crypto: globalThis.crypto, btoa });
+            const api = vm.runInContext(`(() => {\n${block[0]}\nreturn { sbAuthValue, sbPassParam, sbHelloAuth };\n})()`, ctx);
+            const ref = (pw, salt, ch) => { const h = (t) => createHash('sha256').update(t).digest('base64'); return h(h(pw + salt) + ch); };
+            const v1 = await api.sbAuthValue('hunter2', 'NaCl+/=', 'chal+lenge/');
+            const v2 = await api.sbAuthValue('pässwörd ✓', 'salt', 'challenge');
+            check('[8f] GRN-06: the page helpers compute b64(sha256(b64(sha256(password + salt)) + challenge)) (UTF-8 for a non-ASCII password), read ?sbpass exactly, and take a Hello authentication block only with a salt and a challenge',
+              v1 === ref('hunter2', 'NaCl+/=', 'chal+lenge/') && v2 === ref('pässwörd ✓', 'salt', 'challenge') && api.sbPassParam('?a=1&sbpass=p%26w+x') === 'p&w x' && api.sbPassParam('?a=1') === ''
+              && !!api.sbHelloAuth({ authentication: { salt: 's', challenge: 'c' } }) && api.sbHelloAuth({ authentication: {} }) === null && api.sbHelloAuth({}) === null, JSON.stringify({ v1, v2 }));
           }
         }
       } finally {

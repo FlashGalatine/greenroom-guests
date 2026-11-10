@@ -8,8 +8,10 @@ bot token file.
 ## 1. Streamer.bot servers
 
 - **WebSocket Server** (Settings → WebSocket Server): enable on
-  `127.0.0.1:8080`, **authentication OFF**. Everything in this repo assumes that
-  (docs/PROTOCOL.md → Security posture).
+  `127.0.0.1:8080`. **Authentication OFF** is the default and what the steps below
+  assume; once every Greenroom piece is updated you can turn Authentication plus
+  Enforce on ("Optional: Streamer.bot Authentication" below; docs/PROTOCOL.md →
+  Security posture).
 - **HTTP Server** (Settings → HTTP Server): enable on `127.0.0.1:7474` and add
   two Path → Folder mappings:
 
@@ -36,7 +38,7 @@ bot token file.
 
   **Keep both servers on `127.0.0.1`.** While `greenroom-control` and
   `greenroom-overlay` are mapped, Streamer.bot's HTTP server and its WebSocket
-  server (authentication off) must stay bound to loopback. On a network address
+  server must stay bound to loopback (with Authentication on too). On a network address
   they are reachable from every device that can see the PC, and a
   network-reachable Streamer.bot exposes more than Greenroom's pages. Moving
   `sidecar/discord-tokens.json` somewhere else does not change that, so don't
@@ -377,10 +379,37 @@ exercised on a live rig. Outcomes, faithfully:
       dock. Confirm the standalone 1×1 source with the dock closed if you adopt
       that deployment.
 
+## Optional: Streamer.bot Authentication
+
+Do this only after **every** piece is updated (the overlay folder, the control folder,
+`sidecar/`, `backup.mjs`): a piece that is not updated cannot answer the password, and
+**Enforce** (not Authentication alone) is what refuses it.
+
+1. In Streamer.bot (Settings → WebSocket Server) set a password.
+2. Add `&sbpass=<password>` by hand to the dock URL (the control page), the
+   director-min source and the roster source, and re-copy the guest-slot and
+   nameplate addresses from the control page: its Copy and Open buttons carry
+   `?sbpass` once the control page itself was opened with it. OBS keeps these
+   addresses in the scene collection, so the password is in it; that is the accepted
+   cost (and the reason the password is never on the bus or in a log).
+3. Put `"sbPassword": "<password>"` into `sidecar/discord-tokens.json` (next to
+   `botToken`; it is the only place the bridge reads it from, since `Discord Bridge Start`
+   cannot pass an environment variable to node) and restart the bridge.
+4. For `backup.mjs`, set `GREENROOM_SB_PASSWORD` (or rely on the same field).
+5. Turn on Authentication, then Enforce. Check that the control page's SB pill says
+   connected, the roster shows, and the bridge's console says "Streamer.bot accepted
+   the password". The bridge acts only after a genuine Streamer.bot Hello; a peer that
+   says it is the Greenroom mock is refused ("GREENROOM_ALLOW_MOCK=1" is for the
+   tests), and so is silence.
+
+If a page says "SB password refused", the `?sbpass` is wrong; if it says "SB auth
+enforced", it has none.
+
 ## Troubleshooting
 
 - **Overlay stays blank** → 90% one of: action name typo (must match exactly),
-  C# not compiled (open the action, Compile), SB WS auth accidentally ON, or a
+  C# not compiled (open the action, Compile), SB WS Authentication with Enforce ON and
+  no `?sbpass=` on the source (the console says "SB auth enforced"), or a
   consumer subscribing with capitalized `General` (use the shipped shim).
 - **Guest slot black but the URL looks right** → the page was loaded as a
   `file://` Local-file source; use the `http://127.0.0.1:7474/...` URL field.

@@ -199,7 +199,7 @@ remaining open item (multi-director safety) are in
 
 ## Security posture
 
-Localhost trust: SB's WS runs with authentication off, and the room password
+Localhost trust: SB's WS can run with authentication off (the default) or on (see below), and the room password
 travels in the broadcast payload because view URLs need it. The Discord bot
 token never does — it lives only in the gitignored `sidecar/discord-tokens.json`,
 and no bus command can read, carry or erase one (`verify` enforces that `control.html`
@@ -207,10 +207,20 @@ doesn't even contain the string, and that a token in the file appears in no fram
 state, log or config). Bus commands can still stop and move the bot, so don't expose
 SB's servers beyond localhost. Deleting `discord-tokens.json` by hand forgets the token at the next Connect (or restart).
 
-With authentication off (the only mode Greenroom supports today), any page
-running in OBS, as a browser source or a dock, or in a browser on the same PC can
-read the room password and drive Greenroom through the WebSocket. Only add
-sources and docks you trust.
+With authentication off, any page running in OBS, as a browser source or a dock,
+or in a browser on the same PC can read the room password and drive Greenroom
+through the WebSocket. Only add sources and docks you trust.
+
+**Authentication plus Enforce** (recommended once every Greenroom piece is updated)
+keeps out anything that is not given the Streamer.bot WebSocket password: a page
+in an ordinary browser on the PC, another program, a stray tab. It does not keep
+out your own OBS sources and docks, which are the unprompted route in: they carry the
+password in their address (`?sbpass=<password>`), and OBS stores that address in the
+scene collection, so treat the scene collection like the password. Enforce is what
+breaks a Greenroom piece that has not been updated; Authentication alone does not.
+The bridge keeps its copy in `sidecar/discord-tokens.json` (`"sbPassword"`, the only
+place it keeps one) and `backup.mjs` uses `GREENROOM_SB_PASSWORD` or the same field.
+Setup: docs/STREAMERBOT-SETUP.md, "Optional: Streamer.bot Authentication".
 
 ## Origins
 

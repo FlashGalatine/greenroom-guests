@@ -69,6 +69,29 @@
       reset() { delay = BASE_MS; },
     };
   }
+  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps it in the scene
+  // collection) and nowhere else: it is never logged, sent on the bus, or copied into any address except an OBS source or dock URL.
+  function sbPassParam(search) {
+    const raw = new URLSearchParams(search).get('sbpass');
+    return raw === null ? '' : raw;
+  }
+  // base64(sha256(text)) with subtle crypto (a page served from 127.0.0.1 is a secure context). Rejects where subtle crypto is missing.
+  async function sbB64Sha256(text) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    let bin = '';
+    for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+  // The value of an Authenticate request: b64(sha256(b64(sha256(password + salt)) + challenge)).
+  async function sbAuthValue(password, salt, challenge) {
+    return sbB64Sha256((await sbB64Sha256(password + salt)) + challenge);
+  }
+  // The authentication block of a Hello (salt and challenge), or null when there is none.
+  function sbHelloAuth(m) {
+    const a = m && m.authentication;
+    return a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' ? a : null;
+  }
+  const SB_HELLO_WAIT_MS = 1000; // how long a page waits for Streamer.bot's Hello before it carries on as it always has
   // </sb-conn>
   const WS_URL = window.__SB_WS_URL || sbWsUrl(location.search);
   const SYNC_ACTION = (typeof window.__SB_SYNC_ACTION === 'string')
@@ -77,7 +100,10 @@
   const DEBUG = /[?&]sbdebug=1/.test(location.search) || !!window.__SB_DEBUG;
   const SYNC_FALLBACK_MS = 400; // sync anyway if the Subscribe is never answered
   const RESYNC_MS = 2500;       // one repeat if no vdoninja state has arrived by then
-  const MSG_AUTH = 'SB auth enforced — turn Enforce off';
+  const SB_PASS = sbPassParam(location.search);
+  const MSG_AUTH = "SB auth enforced — turn Enforce off, or add ?sbpass=<password> to this source's address";
+  const MSG_BADPASS = "SB password refused — check ?sbpass in this source's address";
+  const MSG_NOCRYPTO = 'SB password cannot be used here: open the page via http://127.0.0.1 (subtle crypto is unavailable)';
 
   let ws = null;
   let msgId = 0;
@@ -143,6 +169,10 @@
     let healthy = false;
     let subRefused = false;    // this socket's Subscribe was refused: nothing more is asked of it
     let authHello = false;     // this socket's Hello carried an authentication block
+    let helloTimer = null;     // waiting for Streamer.bot's Hello
+    let started = false;       // the session began: the Subscribe has gone out (or is not going to)
+    let authId = null;         // the id of this socket's Authenticate request
+    let authRefused = false;   // the Authenticate was refused: nothing more is asked of this socket
     let syncRefusedGrey = false; // greyed because the sync request was refused, until live frames arrive
     let syncRefused = false;     // the sync request was refused: asking again would only be refused again
     const syncIds = new Set();
@@ -174,9 +204,13 @@
       }, RESYNC_MS);
     }
 
-    sock.onopen = () => {
-      setOffline(false);
-
+    // The session proper: the Subscribe, then (once it is acknowledged) the sync. It starts when Streamer.bot's Hello says nothing about a
+    // password, when this page has no password to give, when Hello does not come within a second (as before), or after an Authenticate was
+    // acknowledged ok.
+    function startSession() {
+      if (started || sock.readyState !== WebSocket.OPEN) return;
+      started = true;
+      if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
       // The event-SOURCE key is LOWERCASE ('general') in the Subscribe request,
       // even though delivered events carry a capitalized source ('General'). Per
       // https://docs.streamer.bot/api/websocket/requests
@@ -184,6 +218,28 @@
       send({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } });
       log('sent Subscribe (id', subId + '); waiting for ack before sync');
       syncTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
+    }
+
+    // Streamer.bot's Authentication is on and this page has a password: answer the challenge (the password itself never leaves the page).
+    function authenticate(block) {
+      authId = String(++msgId);
+      const id = authId;
+      sbAuthValue(SB_PASS, block.salt, block.challenge).then((value) => {
+        if (ws !== sock || started || authRefused) return;
+        send({ request: 'Authenticate', id, authentication: value });
+        log('sent Authenticate (id', id + ')');
+      }, () => {
+        if (ws !== sock) return;
+        authRefused = true;
+        warn(MSG_NOCRYPTO);
+        setOffline(true);
+      });
+    }
+
+    sock.onopen = () => {
+      setOffline(false);
+      // Streamer.bot greets every connection with a Hello; wait a second for it, then carry on as always (a server that says nothing).
+      helloTimer = setTimeout(() => { helloTimer = null; startSession(); }, SB_HELLO_WAIT_MS);
     };
 
     sock.onmessage = (evt) => {
@@ -197,10 +253,21 @@
       if (m.request === 'Hello') {
         authHello = !!(m.authentication && typeof m.authentication === 'object');
         if (authHello) log('Hello carries an authentication block');
+        if (started || authId) return;
+        if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+        const block = sbHelloAuth(m);
+        if (block && SB_PASS) authenticate(block); // the session starts when the Authenticate is acknowledged
+        else startSession(); // no password to give, or none asked for: as before (a refused Subscribe names authentication)
         return;
       }
 
       if (m.id && !m.event) {
+        if (m.id === authId) {
+          authId = null;
+          if (isRefusal(m)) { authRefused = true; warn(MSG_BADPASS); setOffline(true); }
+          else { log('Authenticate acknowledged'); startSession(); }
+          return;
+        }
         if (m.id === subId) {
           if (isRefusal(m)) {
             warn(authHello ? MSG_AUTH : 'Subscribe refused: ' + refusal(m));
@@ -257,6 +324,7 @@
 
     sock.onclose = () => {
       // A close before the fallback timer must not leave a sync behind to fire later.
+      if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
       if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
       if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
       syncFired = true;

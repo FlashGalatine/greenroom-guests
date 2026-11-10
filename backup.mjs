@@ -20,6 +20,8 @@
 //   node backup.mjs --help           this text
 //   --url ws://host:port/            override the SB WebSocket (else SB_WS_URL /
 //                                    SB_WS_PORT, default ws://127.0.0.1:8080/)
+// If the WebSocket Server has Authentication on, the password is read from GREENROOM_SB_PASSWORD, else from the sbPassword field of
+// sidecar/discord-tokens.json (the file the bridge reads); it is never printed. The tool names the peer it reached (Streamer.bot, or the mock).
 //   --yes                            restore: really replace the saved config
 //   --force                          save: overwrite an existing file; restore: accept a raw payload that is not
 //                                    a backup envelope, and restore even when the current config cannot be read
@@ -38,12 +40,14 @@ import WebSocket from 'ws';
 import { readFile, mkdir, readdir, stat, rename, rm, open } from 'node:fs/promises';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname, isAbsolute, basename } from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BACKUP_DIR = process.env.GREENROOM_BACKUP_DIR ? resolve(process.env.GREENROOM_BACKUP_DIR) : resolve(__dirname, 'backups');
 const CONNECT_MS = 6000; // give up if SB isn't listening
 const REPLY_MS = 5000;   // wait for a sync replay / push rebroadcast
+const HELLO_MS = 1500;   // wait this long for Streamer.bot's Hello before carrying on without it
 const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish'; // the control page's default view flags
 const SUPPORTED_SCHEMA = 2; // the newest vdo.state schemaVersion this tool knows (the control page's SCHEMA_VERSION)
 
@@ -123,6 +127,25 @@ function loadDirectoryCore() {
   return GRDir;
 }
 
+// The Streamer.bot password, if one is configured: GREENROOM_SB_PASSWORD, else sbPassword in the bridge's token file (DISCORD_BRIDGE_TOKENS
+// moves that file, as it does for the bridge). Never printed.
+function sbPassword() {
+  const env = process.env.GREENROOM_SB_PASSWORD;
+  if (env) return env;
+  try {
+    const p = process.env.DISCORD_BRIDGE_TOKENS || resolve(__dirname, 'sidecar', 'discord-tokens.json');
+    const t = JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
+    return t && typeof t.sbPassword === 'string' ? t.sbPassword : '';
+  } catch { return ''; }
+}
+const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
+// What the Hello said about its sender, in one line.
+function describePeer(peer) {
+  if (!peer) return 'nothing answered with a Hello (assuming Streamer.bot)';
+  if (peer.source === 'mock') return 'the Greenroom mock Streamer.bot (not the real one)';
+  return `${String(peer.name || 'Streamer.bot').slice(0, 40)}${peer.version ? ' ' + String(peer.version).slice(0, 20) : ''}`;
+}
+
 // A minimal subscribed SB client: resolves once Subscribe is acked OK. `waitCustom`
 // resolves with the first General.Custom `data` matching pred (or rejects on
 // timeout); `doAction` fires and returns its request id; `waitAck` waits for that id's reply.
@@ -132,7 +155,12 @@ function connect(url) {
     let idN = 0;
     const customWaiters = [];
     const ackWaiters = [];
-    const timer = setTimeout(() => { try { ws.terminate(); } catch {} rejectConn(new Error(`could not reach Streamer.bot at ${url} — is its WebSocket Server on (auth off)?`)); }, CONNECT_MS);
+    const timer = setTimeout(() => { try { ws.terminate(); } catch {} rejectConn(new Error(`could not reach Streamer.bot at ${url} — is its WebSocket Server on?`)); }, CONNECT_MS);
+    let peer = null;        // what the Hello said about its sender
+    let started = false;    // the Subscribe has gone out
+    let helloTimer = null;  // waiting for the Hello
+    let authId = null;      // the id of the Authenticate request
+    let startSession = () => {};
 
     function pump(waiters, item) {
       const i = waiters.findIndex((w) => w.pred(item));
@@ -142,6 +170,24 @@ function connect(url) {
     ws.on('error', (e) => { clearTimeout(timer); rejectConn(e); });
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+      if (m && m.request === 'Hello') {
+        if (started || authId) return;
+        clearTimeout(helloTimer);
+        peer = m.info && typeof m.info === 'object' ? { name: m.info.name, source: m.info.source, version: m.info.version } : { name: '' };
+        const a = m.authentication;
+        const pw = a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' ? sbPassword() : '';
+        if (pw) {
+          authId = 'auth' + (++idN);
+          ws.send(JSON.stringify({ request: 'Authenticate', id: authId, authentication: b64sha256(b64sha256(pw + a.salt) + a.challenge) }));
+        } else startSession();
+        return;
+      }
+      if (m && m.id && !m.event && authId && m.id === authId) {
+        authId = null;
+        if (m.status && m.status !== 'ok') { clearTimeout(timer); rejectConn(new Error('Streamer.bot refused the password (GREENROOM_SB_PASSWORD, or sbPassword in sidecar/discord-tokens.json). Nothing was read or changed.')); return; }
+        startSession();
+        return;
+      }
       if (m && m.id && !m.event) { pump(ackWaiters, m); return; }
       if (m && m.event && m.event.source === 'General' && m.event.type === 'Custom') {
         let d = m.data;
@@ -149,29 +195,37 @@ function connect(url) {
         if (d && typeof d === 'object') pump(customWaiters, d);
       }
     });
+    const wait = (waiters, ms, pred, what) => new Promise((res, rej) => {
+      const w = { pred, resolve: res, timer: null };
+      w.timer = setTimeout(() => { const i = waiters.indexOf(w); if (i !== -1) waiters.splice(i, 1); rej(new Error('timeout waiting for ' + what)); }, ms);
+      waiters.push(w);
+    });
     ws.on('open', () => {
+      // Streamer.bot greets a connection with a Hello: wait for it (then authenticate if it asks and a password is configured), or carry on without.
+      helloTimer = setTimeout(() => startSession(), HELLO_MS);
+    });
+    startSession = () => {
+      if (started) return;
+      started = true;
+      clearTimeout(helloTimer);
       const subId = 'sub' + (++idN);
       ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
       // Lowercase `general` — the SB Subscribe case gotcha (a capitalized key acks but receives nothing).
-      const wait = (waiters, ms, pred, what) => new Promise((res, rej) => {
-        const w = { pred, resolve: res, timer: null };
-        w.timer = setTimeout(() => { const i = waiters.indexOf(w); if (i !== -1) waiters.splice(i, 1); rej(new Error('timeout waiting for ' + what)); }, ms);
-        waiters.push(w);
-      });
       wait(ackWaiters, CONNECT_MS, (m) => m.id === subId, 'Subscribe ack').then((ack) => {
         clearTimeout(timer);
         if (ack.status && ack.status !== 'ok') {
-          rejectConn(new Error(`Streamer.bot refused the Subscribe (${ack.error || ack.status}). If its WebSocket Server has Authentication on and enforced, turn Enforce off: this tool does not authenticate.`));
+          rejectConn(new Error(`Streamer.bot refused the Subscribe (${ack.error || ack.status}). If its WebSocket Server has Authentication on and enforced, set GREENROOM_SB_PASSWORD (or sbPassword in sidecar/discord-tokens.json), or turn Enforce off.`));
           return;
         }
         resolveConn({
+          peer,
           waitCustom: (pred, ms, what) => wait(customWaiters, ms, pred, what),
           doAction(name, args) { const id = 'req' + (++idN); ws.send(JSON.stringify({ request: 'DoAction', id, action: { name }, args })); return id; },
           waitAck: (id, ms, what) => wait(ackWaiters, ms, (m) => m.id === id, what),
           close() { try { ws.close(); } catch {} },
         });
       }).catch(rejectConn);
-    });
+    };
   });
 }
 
@@ -208,6 +262,7 @@ async function save(file) {
   if (file && existsSync(out) && !FORCE) die(`${out} already exists; pass --force to overwrite it (through npm: npm run backup -- ${file} --force).${process.env.npm_config_force === 'true' ? ' npm took a --force for itself: flags go after the --.' : ''}`);
   console.log(`target: ${URL_ARG}`);
   const sb = await connect(URL_ARG);
+  console.log(`peer:   ${describePeer(sb.peer)}`);
   try {
     const cur = await readCurrent(sb);
     if (cur.kind === 'empty') die('Streamer.bot has no vdo.state saved yet — nothing to back up. Open the control page and set a room or add a guest first (it pushes on the first edit).');
@@ -300,6 +355,7 @@ async function restore(file) {
   if (checked.problem) return die(`${path}: ${checked.problem} Nothing was changed.`);
   console.log(`target: ${URL_ARG}`);
   const sb = await connect(URL_ARG);
+  console.log(`peer:   ${describePeer(sb.peer)}`);
   try {
     const cur = await readCurrent(sb);
     // The file is pushed as a NEW write (control/vdo-rev.js): stamped as this tool's (writer "backup", which every director reads as a

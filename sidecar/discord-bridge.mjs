@@ -48,6 +48,7 @@
 import { readFile, open, rename, rm, copyFile, realpath, stat } from 'node:fs/promises';
 import { readFileSync, writeSync } from 'node:fs';
 import { createServer, connect as netConnect } from 'node:net';
+import { createHash } from 'node:crypto';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -104,6 +105,7 @@ const TIMING = (() => {
     speakingStaleMs: 300000, // no speaking start for this long with someone unmuted in the call: rpc.speakingStale
     stuckGlowMs: 180000,     // a glow that has been on this long with no end: rpc.speakingStale
     writeDelayMs: 0,         // (test hook) a slow disk: every atomic write waits this long before its rename
+    sbHelloMs: 2000,         // Streamer.bot greets a connection with a Hello; the bridge waits this long for it before it says there was none
   };
   if (TEST_HOOKS && process.env.GREENROOM_TIMING) {
     try { const o = JSON.parse(process.env.GREENROOM_TIMING); for (const k of Object.keys(t)) if (o[k] !== undefined) t[k] = o[k]; } catch { /* keep the defaults */ }
@@ -184,6 +186,10 @@ let sbWs = null;
 let sbReconnectTimer = null;
 let sbMsgId = 0;
 let sbEverConnected = false;  // gate exit-on-close on having actually reached SB
+let sbSessionOn = false;      // this socket's session began: Hello was genuine (and the password, if one was needed, accepted) and the Subscribe went out
+let sbSecret = '';            // the Streamer.bot password while a handshake uses it: removed from every log line (it is never logged)
+// GREENROOM_ALLOW_MOCK=1 (the tests): a peer that says it is the Greenroom mock, or says nothing, is served anyway.
+const ALLOW_MOCK = process.env.GREENROOM_ALLOW_MOCK === '1';
 let sbGoneTimer = null;       // grace countdown to graceful shutdown after SB drops
 let sbLastTry = false;        // the one last connect at the end of the exit grace window is running
 let sbLost = false;           // the SB socket closed after having been open, and has not been open again
@@ -1244,6 +1250,70 @@ function buildAvatarUrl(userId, avatarHash) {
 // ── Streamer.bot WS client (replaces the :7070 relay client) ─────────────────
 
 const sbOpen = () => !!sbWs && sbWs.readyState === WebSocket.OPEN;
+// Open AND past its Hello (and password): the only state frames are sent in.
+const sbReady = () => sbOpen() && sbSessionOn;
+// b64(sha256(b64(sha256(password + salt)) + challenge)): the documented value of an Authenticate request.
+const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
+const sbAuthValue = (password, salt, challenge) => b64sha256(b64sha256(password + salt) + challenge);
+
+// Streamer.bot's Hello (GRN-195, GRN-06). A peer that says it is the Greenroom mock is not served unless GREENROOM_ALLOW_MOCK=1. When Hello
+// carries an authentication block and discord-tokens.json holds an sbPassword, the bridge authenticates and starts the session when the
+// Authenticate is acknowledged ok; with no password it carries on as before (a Streamer.bot that does not enforce still serves it, and a
+// refused Subscribe is logged). A refused password is a visible failure and no session. The password is read from the file at every connect
+// (S14's loadTokens), kept only while the handshake runs, and never logged or pushed.
+let sbHelloTimer = null;
+let sbSubId = null;
+let sbAuthId = null;
+async function onSbHello(sock, m) {
+  if (sbWs !== sock || sbSessionOn || sbAuthId) return;
+  if (sbHelloTimer) { clearTimeout(sbHelloTimer); sbHelloTimer = null; }
+  const info = m.info && typeof m.info === 'object' ? m.info : {};
+  const mock = info.source === 'mock';
+  if (mock && !ALLOW_MOCK) {
+    log('the peer at ' + SB_WS_URL + ' says it is the Greenroom mock Streamer.bot (Hello info.source "mock"), not Streamer.bot: not subscribing. (GREENROOM_ALLOW_MOCK=1 is for the tests.)');
+    return;
+  }
+  const a = m.authentication;
+  if (!(a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string')) { startSbSession(sock); return; }
+  let password = '';
+  try { const t = await loadTokens(); if (t.status === 'ok') password = typeof t.tokens.sbPassword === 'string' ? t.tokens.sbPassword : ''; } catch { /* no password */ }
+  if (sbWs !== sock || sbSessionOn) return;
+  if (!password) {
+    log('Streamer.bot has Authentication on and discord-tokens.json has no sbPassword: carrying on without one (Streamer.bot refuses the bridge if Enforce is on).');
+    startSbSession(sock);
+    return;
+  }
+  sbSecret = password;
+  sbAuthId = String(++sbMsgId);
+  try { sock.send(JSON.stringify({ request: 'Authenticate', id: sbAuthId, authentication: sbAuthValue(password, a.salt, a.challenge) })); }
+  catch { sbAuthId = null; sbSecret = ''; }
+}
+function onSbAck(sock, m) {
+  if (sbWs !== sock) return;
+  const ok = typeof m.status !== 'string' || m.status === 'ok';
+  if (sbAuthId && m.id === sbAuthId) {
+    sbAuthId = null;
+    sbSecret = '';
+    if (ok) { log('Streamer.bot accepted the password.'); startSbSession(sock); }
+    else log(`Streamer.bot refused the password (sbPassword in discord-tokens.json): not subscribing. ${clean(m.error || m.status, 100)}`);
+    return;
+  }
+  if (!ok) log(`Streamer.bot refused a request: ${clean(m.error || m.status, 100)}${m.id === sbSubId ? ' (the Subscribe: is Authentication on with Enforce, and sbPassword missing or wrong?)' : ''}`);
+}
+function startSbSession(sock) {
+  if (sbWs !== sock || sbSessionOn || sock.readyState !== WebSocket.OPEN) return;
+  sbSessionOn = true;
+  // Lowercase `general` — the SB Subscribe case gotcha (delivered events carry
+  // capitalized 'General'; a capitalized Subscribe silently receives nothing).
+  sbSubId = String(++sbMsgId);
+  sock.send(JSON.stringify({ request: 'Subscribe', id: sbSubId, events: { general: ['Custom'] } }));
+  log(`Connected to Streamer.bot at ${SB_WS_URL}`);
+  // Hand the current roster to a freshly (re)connected SB: through the same 100 ms window as every other push, so a burst of
+  // changes at connect is one frame (GRN-02).
+  if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+  pushPending = false;
+  schedulePush();
+}
 
 function connectSb() {
   if (stopping || (sbWs && (sbWs.readyState === WebSocket.OPEN || sbWs.readyState === WebSocket.CONNECTING))) return;
@@ -1258,23 +1328,30 @@ function connectSb() {
       const wasLost = sbLost; sbLost = false;
       if (sbGoneTimer) { clearTimeout(sbGoneTimer); sbGoneTimer = null; log('Streamer.bot reconnected — cancelling shutdown.'); }
       else if (wasLost && shouldExitOnSbClose()) log('Streamer.bot reconnected on the last attempt — staying up.');
-      // Lowercase `general` — the SB Subscribe case gotcha (delivered events carry
-      // capitalized 'General'; a capitalized Subscribe silently receives nothing).
-      sock.send(JSON.stringify({ request: 'Subscribe', id: String(++sbMsgId), events: { general: ['Custom'] } }));
-      log(`Connected to Streamer.bot at ${SB_WS_URL}`);
-      // Hand the current roster to a freshly (re)connected SB: through the same 100 ms window as every other push, so a burst of
-      // changes at connect is one frame (GRN-02).
-      if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
-      pushPending = false;
-      schedulePush();
+      // Streamer.bot greets every connection with a Hello. The bridge acts on nothing before it has seen a genuine one (GRN-195).
+      sbSessionOn = false;
+      sbSecret = '';
+      if (sbHelloTimer) clearTimeout(sbHelloTimer);
+      sbHelloTimer = setTimeout(() => {
+        sbHelloTimer = null;
+        if (sbWs !== sock || sbSessionOn) return;
+        if (ALLOW_MOCK) { log('no Streamer.bot Hello (GREENROOM_ALLOW_MOCK=1: carrying on)'); startSbSession(sock); }
+        else log(`no Streamer.bot Hello within ${TIMING.sbHelloMs} ms: not subscribing. Is ${SB_WS_URL} Streamer.bot's WebSocket Server?`);
+      }, TIMING.sbHelloMs);
     });
-    sock.on('close', () => { if (sbWs === sock) sbWs = null; if (sbEverConnected) sbLost = true; armSbGoneTimer(); scheduleSbReconnect(); });
-    sock.on('error', (e) => { log(`SB WS error: ${e.message} — is SB's WebSocket Server on ${SB_WS_URL} with auth OFF?`); });
+    sock.on('close', () => {
+      if (sbHelloTimer && sbWs === sock) { clearTimeout(sbHelloTimer); sbHelloTimer = null; }
+      if (sbWs === sock) { sbWs = null; sbSessionOn = false; sbSecret = ''; }
+      if (sbEverConnected) sbLost = true;
+      armSbGoneTimer(); scheduleSbReconnect();
+    });
+    sock.on('error', (e) => { log(`SB WS error: ${e.message} — is SB's WebSocket Server on ${SB_WS_URL}?`); });
     sock.on('message', (raw) => {
       try {
         let m;
         try { m = JSON.parse(raw.toString()); } catch { return; }
-        if (m && m.id && !m.event) return; // request acks
+        if (m && m.request === 'Hello') { onSbHello(sock, m); return; }
+        if (m && m.id && !m.event) { onSbAck(sock, m); return; } // request acks
         if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
         let d = m.data;
         if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
@@ -1378,7 +1455,7 @@ function dispatch(command, value) {
 // responsive without flooding SB's action queue (worst case ~10 DoActions/s).
 function schedulePush() {
   if (stopping) return;                        // the clearing state is sent by shutdown(), once
-  if (!sbOpen()) return;                       // nothing to send to; the open handler pushes when SB is back
+  if (!sbReady()) return;                      // nothing to send to; the session start pushes when SB is back
   if (pushTimer) { pushPending = true; return; }
   pushNow();
   pushTimer = setTimeout(() => {
@@ -1420,7 +1497,7 @@ function frameOut() {
 }
 
 function pushNow() {
-  if (stopping || !sbOpen()) return;
+  if (stopping || !sbReady()) return;
   try { sbWs.send(frameOut()); } catch { /* SB closing */ }
 }
 
@@ -1431,7 +1508,9 @@ function pushNow() {
 // The token is removed BEFORE the text is cut or cleaned, so a limit that falls inside it cannot leave a piece of it.
 const redact = (s) => {
   const t = creds && creds.botToken;
-  return t && String(t).length >= 8 ? String(s ?? '').split(String(t)).join('[bot token]') : String(s ?? '');
+  let out = t && String(t).length >= 8 ? String(s ?? '').split(String(t)).join('[bot token]') : String(s ?? '');
+  if (sbSecret && sbSecret.length >= 4) out = out.split(sbSecret).join('[Streamer.bot password]'); // (it is never logged; this is the second lock)
+  return out;
 };
 const clean = (s, n) => redact(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, n);
 let logWorker = null;
@@ -1468,7 +1547,7 @@ function flushLog(ms) {
 
 // The clearing frame: stopped, hb 0, nobody in voice. Sent once, from shutdown().
 function pushFinal(cb) {
-  if (!sbOpen()) return cb();
+  if (!sbReady()) return cb();
   try { sbWs.send(frameOut(), () => cb()); } catch { cb(); }
 }
 

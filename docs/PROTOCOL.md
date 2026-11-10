@@ -1,7 +1,7 @@
 # Greenroom — wire protocol
 
-Everything rides Streamer.bot's WebSocket Server (default `ws://127.0.0.1:8080/`,
-authentication **off**). Producers call SB **actions** via `DoAction`; the actions
+Everything rides Streamer.bot's WebSocket Server (default `ws://127.0.0.1:8080/`;
+Authentication can be on, see the handshake below). Producers call SB **actions** via `DoAction`; the actions
 cache state in SB **global variables** and re-broadcast wrapped payloads with
 `CPH.WebsocketBroadcastJson`; consumers **Subscribe** to `General.Custom` events.
 Streamer.bot is the entire bus — there is no other server.
@@ -17,11 +17,22 @@ Streamer.bot is the entire bus — there is no other server.
 // (no "result" wrapper). Clients treat a `status` other than "ok" as a refusal: no
 // VDO Sync, a visible status (control pill, director-min status, the overlay's offline
 // class and a console warning). A reply with no `status` field is not read as a refusal.
-// On connect Streamer.bot also sends { "request": "Hello", … }. An "authentication" object in it
-// only means Authentication is switched on; with Enforce off Streamer.bot still serves every
-// request. If this connection's requests are then refused, or Streamer.bot hangs up before
-// accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off"
-// (Greenroom does not authenticate). It clears on the next healthy connection.
+// On connect Streamer.bot also sends { "request": "Hello", "info": {…}, "authentication": { "salt": …, "challenge": … } }
+// (the authentication object only when Authentication is on). Every Greenroom client (the overlay shim, control.html,
+// director-min.html, the Discord bridge and backup.mjs) waits about a second for the Hello. If it carries an authentication
+// block and the client has a password, the client sends
+//   { "request": "Authenticate", "id": …, "authentication": base64(sha256(base64(sha256(password + salt)) + challenge)) }
+// and subscribes (and syncs) only after the ack says status "ok"; it does this again on every reconnect, and a refused password is a
+// visible failure ("SB password refused …"), not a silent retry. With no authentication block, or with no password to give, it
+// carries on as before (with Enforce off Streamer.bot serves every request anyway). If requests are then refused, or Streamer.bot
+// hangs up before accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off, or add ?sbpass=…".
+// Where the password comes from: pages read `?sbpass=<password>` from their own address (an OBS source or dock URL: OBS keeps it in the
+// scene collection; the control page's Copy and Open buttons carry it into the guest-slot and nameplate addresses, and it goes into
+// no other address, log line or bus message); the bridge reads `sbPassword` from `sidecar/discord-tokens.json` (the bridge's only
+// password store; `persistTokens` keeps every field of that file); `backup.mjs` reads `GREENROOM_SB_PASSWORD`, else the same field.
+// The Hello's `info.source` is "mock" for the development mock: the bridge refuses a peer that says so (unless GREENROOM_ALLOW_MOCK=1,
+// for the tests) and acts on nothing before it has seen a genuine Hello; the control page shows a "MOCK Streamer.bot" banner; `backup.mjs`
+// names the peer it reached.
 
 // DoAction — an ack {id, status:'ok'} means only that the action STARTED, not that it
 // succeeded. An invalid argument or a runtime exception inside a running state action is
@@ -400,7 +411,7 @@ log if the bridge does not come up.
 
 ## Security posture
 
-Localhost-only, SB WS authentication assumed **off** (matching the prior PoCs).
+Localhost-only. Streamer.bot's WebSocket Authentication can be off (the default) or on; with it on and **Enforce** on, an unauthenticated client is refused. Greenroom's clients authenticate (see the handshake above).
 The room password travels in `vdoninja:update` by necessity (overlays embed it in
 view URLs) — same trust model as the toolkit it replaces. The Discord bot token
 is **file-only** (`sidecar/discord-tokens.json`, gitignored) and has no bus

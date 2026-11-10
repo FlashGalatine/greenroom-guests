@@ -30,6 +30,7 @@
 // roster-check.png, control-check.png, nameplate-check.png.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -85,15 +86,23 @@ async function launch() {
 
 // Pure producer: opens SB's WS and fires DoActions (what the control page and the
 // sidecar are to SB). No subscribe — it never needs to hear anything back.
-function producer(port = WS_PORT) {
+// With a password (a mock Streamer.bot started with SB_PASSWORD) it first answers the Hello's challenge, as every client does.
+function producer(port = WS_PORT, password = '') {
   return new Promise((res, rej) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
     let id = 0;
-    ws.on('error', rej);
-    ws.on('open', () => res({
+    const api = {
       doAction(name, args) { ws.send(JSON.stringify({ request: 'DoAction', id: String(++id), action: { name }, args })); },
       close() { try { ws.close(); } catch {} },
-    }));
+    };
+    ws.on('error', rej);
+    if (!password) { ws.on('open', () => res(api)); return; }
+    const b64 = (t) => createHash('sha256').update(t).digest('base64');
+    ws.on('message', (raw) => {
+      let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+      if (m.request === 'Hello' && m.authentication) ws.send(JSON.stringify({ request: 'Authenticate', id: 'prod-auth', authentication: b64(b64(password + m.authentication.salt) + m.authentication.challenge) }));
+      else if (m.id === 'prod-auth') { if (m.status === 'ok') res(api); else rej(new Error('producer: the mock refused the password')); }
+    });
   });
 }
 
@@ -175,7 +184,7 @@ async function main() {
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
     // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18; RENDER_ONLY=revision just R19.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness' && ONLY !== 'discordctl') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness' && ONLY !== 'discordctl' && ONLY !== 'sbauth') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -193,7 +202,7 @@ async function main() {
         let m, prod;
         try {
           m = await startChild('mock-sb-server.mjs', '[mock] READY', { httpPort, wsPort, env });
-          prod = await producer(wsPort);
+          prod = await producer(wsPort, env && env.SB_PASSWORD);
         } catch (e) { lastErr = e; if (m) { try { m.kill(); } catch {} } continue; }
         extra.push(m);
         extraProds.push(prod);
@@ -3427,6 +3436,117 @@ async function main() {
           n2.length === 50 && n2.includes('Member 00') && n2.includes('Member 59') && !n2.includes('Member 01') && !n2.includes('Member 10') && n2.includes('Member 11')
           && n3.length === 50 && n3.includes('Member 01') && n3.includes('Member 00'), JSON.stringify({ n2: n2.length, n3: n3.length, has01: n3.includes('Member 01') }));
         await p.close();
+      }
+    }
+
+    // ── R22: the pages and Streamer.bot's password (GRN-06, GRN-67, GRN-195) ──
+    if (!ONLY || ONLY === 'sbauth') {
+      console.log('\n[R22] Streamer.bot Authentication: ?sbpass on every page, Enforce on and off, the Hello wait, reconnects, the MOCK banner, Copy addresses');
+      const PW = 'pw-r22-' + Date.now().toString(36) + '-Zq7';
+      const enc = encodeURIComponent(PW);
+      const logs = []; // everything any page printed: the password must not be in it
+      const wire = (page) => { page.on('console', (m) => logs.push(m.text())); page.on('pageerror', (e) => logs.push(String(e && e.message))); return page; };
+      const open = async (x, rel, q, vp) => { const p = wire(await newPage(browser, vp || { width: 900, height: 700 })); await p.goto(`${x.api.base}${rel}?${q || ''}&sbport=${x.ws}`, { waitUntil: 'load' }); return p; };
+      const roster = (x, q, vp) => open(x, '/overlay/discord-roster.html', 'layout=row' + (q || ''), vp || { width: 900, height: 160 });
+      const members = (p) => p.evaluate(() => document.querySelectorAll('.member').length);
+      const talk = JSON.parse(ROSTER_STATE());
+      talk.users[STREAMER].speaking = true;
+
+      // (a) Authentication + Enforce on: every page that has ?sbpass connects and works
+      {
+        const x = await startExtra({ SB_PASSWORD: PW });
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(DISCORD_SLOT_VDO) });
+        const rost = await roster(x, `&sbpass=${enc}`);
+        const guest = await open(x, '/overlay/vdoninja-guest.html', `slot=1&sbpass=${enc}`, { width: 480, height: 270 });
+        const ctl = await open(x, '/control/control.html', `sbpass=${enc}`, { width: 920, height: 1300 });
+        const dmin = await open(x, '/control/director-min.html', `sbpass=${enc}`, { width: 480, height: 120 });
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(talk) });
+        const rOk = await wait(rost, () => document.querySelectorAll('.member').length === 3 && !document.body.classList.contains('absent'), null, 9000);
+        const gOk = await wait(guest, () => document.getElementById('dpfp') && document.getElementById('dpfp').classList.contains('speaking'), null, 9000);
+        const cOk = await wait(ctl, () => /SB: connected/.test(document.getElementById('sbStatus').textContent) && document.getElementById('vdoRoom').value === 'testroom' && /in voice/.test(document.getElementById('dvoStatus').textContent), null, 9000);
+        await sleep(1500);
+        const dTxt = await dmin.evaluate(() => document.getElementById('status').textContent);
+        check('R22a: with Authentication and Enforce on, the roster overlay, the guest slot, the control page and director-min all connect with ?sbpass and work (they wait for Hello, answer the challenge, and only then subscribe and sync)',
+          rOk && gOk && cOk && !/auth|password|offline|boot/i.test(dTxt), JSON.stringify({ rOk, gOk, cOk, dTxt }));
+        // the Copy and Open addresses carry the password like the port; no other address does
+        const urls = await ctl.evaluate(() => ({
+          guest2: window.__sourceUrls.guest(2), plate3: window.__sourceUrls.nameplate(3),
+          open: document.querySelector('.vdo-slot-row[data-slot="2"] .vdo-src-open').getAttribute('href'),
+          copy: document.querySelector('.vdo-slot-row[data-slot="2"] .vdo-src-copy').dataset.url,
+          elsewhere: [document.getElementById('vdoInviteLink').value, document.getElementById('vdoManageLink').value, document.getElementById('vdoDirector').getAttribute('src') || '', document.getElementById('vdoDirector').src || ''].join('\n'),
+        }));
+        check('R22b: the control page\'s guest-slot and nameplate Copy / Open addresses carry ?sbpass beside ?sbport, and the invite link, the manage link and the director frame do not',
+          urls.guest2.includes(`&sbpass=${enc}`) && /&sbport=\d+/.test(urls.guest2) && urls.plate3.includes(`&sbpass=${enc}`) && urls.open === urls.guest2.replace(/slot=2/, 'slot=2') && urls.copy.includes(`&sbpass=${enc}`) && !urls.elsewhere.includes(PW) && !urls.elsewhere.includes('sbpass'), JSON.stringify(urls).slice(0, 500));
+        // a dropped connection: every page authenticates again (Enforce would refuse anything else)
+        await fetch(x.api.base + '/mock/dropall').then((r) => r.arrayBuffer());
+        await sleep(1500);
+        const more = JSON.parse(ROSTER_STATE());
+        more.users['200000000000000003'] = { speaking: false, username: 'Guest Three', avatarUrl: embed(4), mute: false, deaf: false };
+        const prod2 = await producer(x.ws, PW); // (the producer was dropped with the rest, so a new one authenticates too)
+        prod2.doAction('Discord Voice Push', { payload: JSON.stringify(more) });
+        const back = await wait(rost, () => document.querySelectorAll('.member').length === 4, null, 14000);
+        const backCtl = await wait(ctl, () => /3 present|4 present/.test(document.getElementById('dvoStatus').textContent) && /4 present/.test(document.getElementById('dvoStatus').textContent), null, 14000);
+        check('R22c: after Streamer.bot drops every connection the pages reconnect and authenticate again: a new roster reaches the overlay and the control page (the handshake is repeated, not remembered)', back && backCtl, JSON.stringify({ back, backCtl }));
+        for (const p of [rost, guest, ctl, dmin]) await p.close();
+
+        // (b) no ?sbpass: the page says authentication is the problem
+        const rNo = await roster(x, '');
+        const cNo = await open(x, '/control/control.html', '', { width: 920, height: 900 });
+        const dNo = await open(x, '/control/director-min.html', '', { width: 480, height: 120 });
+        await sleep(3000);
+        const offNo = await rNo.evaluate(() => document.body.classList.contains('offline'));
+        const pillNo = await cNo.evaluate(() => document.getElementById('sbStatus').textContent);
+        const dminNo = await dNo.evaluate(() => document.getElementById('status').textContent);
+        const urlNo = await cNo.evaluate(() => window.__sourceUrls.guest(1));
+        check('R22d: with Authentication and Enforce on and no ?sbpass, the roster stays greyed out and the control page and director-min say authentication is enforced and how to fix it (add ?sbpass); the Copy addresses have no sbpass',
+          offNo && /SB auth enforced/.test(pillNo) && /sbpass/.test(pillNo) && /auth enforced/.test(dminNo) && !/sbpass/.test(urlNo), JSON.stringify({ offNo, pillNo, dminNo, urlNo }));
+        for (const p of [rNo, cNo, dNo]) await p.close();
+
+        // (c) a wrong password: a visible failure, not a silent retry loop of Subscribes
+        const rBad = await roster(x, '&sbpass=wrong-password');
+        const cBad = await open(x, '/control/control.html', 'sbpass=wrong-password', { width: 920, height: 900 });
+        const dBad = await open(x, '/control/director-min.html', 'sbpass=wrong-password', { width: 480, height: 120 });
+        await sleep(3000);
+        const offBad = await rBad.evaluate(() => document.body.classList.contains('offline'));
+        const pillBad = await cBad.evaluate(() => document.getElementById('sbStatus').textContent);
+        const dminBad = await dBad.evaluate(() => document.getElementById('status').textContent);
+        check('R22e: a wrong ?sbpass is reported as a refused password (the control page\'s pill, director-min\'s line, the overlay\'s console and grey state), not as a missing one',
+          offBad && /password refused/i.test(pillBad) && /password refused/i.test(dminBad) && logs.some((t) => /password refused/i.test(t)), JSON.stringify({ offBad, pillBad, dminBad }));
+        for (const p of [rBad, cBad, dBad]) await p.close();
+        check('R22f: the password is in no console line any of these pages printed', !logs.some((t) => t.includes(PW) || t.includes('wrong-password')), JSON.stringify(logs.filter((t) => t.includes(PW) || t.includes('wrong-password')).slice(0, 3)));
+      }
+      // (e) Authentication on but Enforce off: a page without a password is served as it always was
+      {
+        const x = await startExtra({ SB_PASSWORD: PW, SB_AUTH: 'serve' });
+        const rost = await roster(x, '');
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        const ok = await wait(rost, () => document.querySelectorAll('.member').length === 3, null, 9000);
+        const withPw = await roster(x, `&sbpass=${enc}`);
+        const ok2 = await wait(withPw, () => document.querySelectorAll('.member').length === 3, null, 9000);
+        check('R22g: with Authentication on and Enforce off, a page with no password is served as before, and one with the password too', ok && ok2, JSON.stringify({ ok, ok2 }));
+        await rost.close(); await withPw.close();
+      }
+      // (f) no Hello at all: the page waits about a second and carries on as before
+      {
+        const x = await startExtra({ SB_HELLO: 'none' });
+        const rost = await roster(x, '');
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        const ok = await wait(rost, () => document.querySelectorAll('.member').length === 3, null, 9000);
+        check('R22h: a Streamer.bot that sends no Hello is still served: the page carries on after about a second', ok, '');
+        await rost.close();
+      }
+      // (g) the MOCK banner: shown when the peer says it is the mock, not when it says nothing of the kind
+      {
+        const x = await startExtra({});
+        const real = await startExtra({ SB_HELLO: 'real' });
+        const c1 = await open(x, '/control/control.html', '', { width: 920, height: 900 });
+        const c2 = await open(real, '/control/control.html', '', { width: 920, height: 900 });
+        await wait(c1, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 8000);
+        await wait(c2, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 8000);
+        await sleep(500);
+        const shown = (p) => p.evaluate(() => { const b = document.getElementById('mockBanner'); return !b.hidden && getComputedStyle(b).display !== 'none' && /MOCK Streamer\.bot/.test(b.textContent); });
+        check('R22i: the control page shows a permanent "MOCK Streamer.bot" banner beside the SB pill when the Hello says the peer is the mock, and none when it is not', (await shown(c1)) === true && (await shown(c2)) === false, JSON.stringify({ mock: await shown(c1), real: await shown(c2) }));
+        await c1.close(); await c2.close();
       }
     }
 

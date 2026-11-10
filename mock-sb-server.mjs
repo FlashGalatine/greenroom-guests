@@ -47,15 +47,19 @@
 //       SB_SUBSCRIBE=none|error Subscribe is never answered, or answered {status:'error'}
 //       SB_SUBSCRIBE_DELAY_MS=<n>  the Subscribe reply (ok or error) comes n ms late
 //       SB_DOACTION=error       every DoAction is answered {status:'error'} and not run
-//       SB_HELLO=none|plain|auth every connection gets a Hello (info.source 'mock') unless SB_HELLO=none; 'plain' is the
-//                               same as the default, 'auth' adds an authentication block
+//       SB_HELLO=none|plain|auth|real every connection gets a Hello (info.source 'mock') unless SB_HELLO=none; 'plain' is the
+//                               same as the default, 'auth' adds an authentication block, 'real' sends the Hello of a real
+//                               Streamer.bot (name 'Streamer.bot', no info.source) so the clients that refuse a mock can be tried
+//       SB_PASSWORD=<text>      a test WebSocket password: every Hello carries a fresh salt and challenge, an Authenticate is checked
+//                               (b64(sha256(b64(sha256(password + salt)) + challenge))), and, as with SB_HELLO=auth, a client that has not
+//                               authenticated is refused (SB_AUTH=serve: served anyway, Enforce off)
 //       SB_AUTH=close|serve     with SB_HELLO=auth: close a client that sends any request, or serve
 //                               requests anyway (Authentication on, Enforce off); default: refuse them
 //       SB_SYNC_DROP=1          the first VDO Sync is acked but its replay is never broadcast
 //       SB_PUSH=error|drop      VDO Push is acked status:'error' and not run, or acked ok but stores and broadcasts nothing
 //       SB_MISSING=<a,b>        the named actions do not exist: acked status:'error' (so does any name outside the five)
 //       The mode options above can also be changed while running (a value it does not know is a 400; missing= clears the list):
-//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth&auth=refuse|close|serve&push=ok|error|drop&missing=<names>   (hello=mock = the default)
+//       GET /mock/mode?subscribe=ok|none|error&doaction=ok|error&hello=none|plain|auth|real&auth=refuse|close|serve&password=<text>&push=ok|error|drop&missing=<names>   (hello=mock = the default)
 //       GET /mock/dropall       close every WebSocket client (they reconnect)
 //       GET /mock/drop?ms=<n>   close every WebSocket client AND refuse new connections (the upgrade is answered 503) for n ms, as a
 //                               Streamer.bot that is down for a while is; pages see no 'open', then reconnect after their backoff
@@ -99,6 +103,7 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { readFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { objectError, netTrim } from './tools/json-check.mjs';
@@ -118,8 +123,9 @@ const EMPTY_MARKER = process.env.SB_EMPTY_MARKER ? process.env.SB_EMPTY_MARKER =
 const modes = {
   subscribe: process.env.SB_SUBSCRIBE || 'ok',
   doaction: process.env.SB_DOACTION === 'error' ? 'error' : 'ok',
-  hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : (process.env.SB_HELLO === 'none' ? 'none' : 'mock')),
+  hello: process.env.SB_HELLO === 'auth' ? 'auth' : (process.env.SB_HELLO === 'plain' ? 'plain' : (process.env.SB_HELLO === 'none' ? 'none' : (process.env.SB_HELLO === 'real' ? 'real' : 'mock'))),
   auth: process.env.SB_AUTH === 'close' ? 'close' : (process.env.SB_AUTH === 'serve' ? 'serve' : 'refuse'),
+  password: process.env.SB_PASSWORD || '', // a WebSocket password (test password; GET /mock/mode?password= changes it): every Hello carries a fresh salt + challenge and Authenticate is checked
   push: process.env.SB_PUSH === 'error' || process.env.SB_PUSH === 'drop' ? process.env.SB_PUSH : 'ok', // VDO Push: ok | error (acked status:'error', not run) | drop (acked ok, stores and broadcasts nothing)
   missing: process.env.SB_MISSING || '', // comma-separated action names that do not exist: acked status:'error'
   rewrite: process.env.SB_REWRITE === 'fffd' ? 'fffd' : '', // VDO Push: '' (verbatim) | fffd (lone surrogates become U+FFFD, in the broadcast and in the cache)
@@ -412,7 +418,7 @@ async function handleHttp(req, res) {
   }
   if (path === '/mock/mode') {
     // Every value is checked first, so a typo changes nothing and says so. `missing` takes any text; an empty one clears it.
-    const ALLOWED = { subscribe: ['ok', 'none', 'error'], doaction: ['ok', 'error'], hello: ['none', 'plain', 'auth', 'mock'], auth: ['refuse', 'close', 'serve'], push: ['ok', 'error', 'drop'], rewrite: ['', 'fffd'] };
+    const ALLOWED = { subscribe: ['ok', 'none', 'error'], doaction: ['ok', 'error'], hello: ['none', 'plain', 'auth', 'mock', 'real'], auth: ['refuse', 'close', 'serve'], push: ['ok', 'error', 'drop'], rewrite: ['', 'fffd'] };
     for (const k of Object.keys(modes)) {
       if (query.has(k) && ALLOWED[k] && !ALLOWED[k].includes(query.get(k))) {
         res.writeHead(400, { 'content-type': 'application/json' });
@@ -548,8 +554,16 @@ wss.on('connection', (ws) => {
   if (modes.hello !== 'none') {
     // The Hello every connection gets. info.source says this is a mock (the bridge guard and, later, the pages read it); an
     // authentication block rides along when SB_HELLO=auth, as it does in Streamer.bot when Authentication is on.
-    const hello = { request: 'Hello', info: { name: 'greenroom-mock', source: 'mock', version: 'mock' } };
-    if (modes.hello === 'auth') hello.authentication = { challenge: 'mock-challenge', salt: 'mock-salt' };
+    const hello = modes.hello === 'real'
+      // what Streamer.bot itself sends (no info.source): a client that refuses mocks accepts this one
+      ? { request: 'Hello', info: { instanceId: 'mock-instance', name: 'Streamer.bot', version: '0.2.5', os: 'windows' } }
+      : { request: 'Hello', info: { name: 'greenroom-mock', source: 'mock', version: 'mock' } };
+    if (modes.password) {
+      // A real handshake (as in Streamer.bot with Authentication on): a fresh salt and challenge for this connection.
+      ws.authSalt = randomBytes(12).toString('base64');
+      ws.authChallenge = randomBytes(12).toString('base64');
+      hello.authentication = { challenge: ws.authChallenge, salt: ws.authSalt };
+    } else if (modes.hello === 'auth') hello.authentication = { challenge: 'mock-challenge', salt: 'mock-salt' };
     ws.send(JSON.stringify(hello));
   }
   ws.on('error', () => {}); // an abrupt close must never end the mock
@@ -561,7 +575,15 @@ function onMessage(ws, raw) {
     try { m = JSON.parse(raw.toString()); } catch { return; }
     if (!m || typeof m !== 'object' || Array.isArray(m)) return;
     if (DROP) return;
-    if (modes.hello === 'auth' && modes.auth !== 'serve' && m.request !== 'Authenticate') {
+    if (m.request === 'Authenticate') {
+      // b64(sha256(b64(sha256(password + salt)) + challenge)), the documented Streamer.bot handshake. Never logged.
+      const b64sha = (t) => createHash('sha256').update(t).digest('base64');
+      const want = modes.password && ws.authSalt ? b64sha(b64sha(modes.password + ws.authSalt) + ws.authChallenge) : null;
+      if (want && m.authentication === want) { ws.authed = true; console.log('[mock] Authenticate OK'); ws.send(JSON.stringify({ status: 'ok', id: m.id })); }
+      else { console.log('[mock] Authenticate REFUSED' + (want ? '' : ' (no password is set)')); ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: authentication failed' })); }
+      return;
+    }
+    if ((modes.hello === 'auth' || modes.password) && modes.auth !== 'serve' && !ws.authed) {
       // Unauthenticated: a server that enforces authentication refuses (or, with auth=close, hangs up on) the request.
       if (modes.auth === 'close') { try { ws.close(); } catch {} }
       else ws.send(JSON.stringify({ status: 'error', id: m.id, error: 'mock: authentication required' }));

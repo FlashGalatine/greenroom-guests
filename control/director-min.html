@@ -92,6 +92,29 @@
       reset() { delay = BASE_MS; },
     };
   }
+  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps it in the scene
+  // collection) and nowhere else: it is never logged, sent on the bus, or copied into any address except an OBS source or dock URL.
+  function sbPassParam(search) {
+    const raw = new URLSearchParams(search).get('sbpass');
+    return raw === null ? '' : raw;
+  }
+  // base64(sha256(text)) with subtle crypto (a page served from 127.0.0.1 is a secure context). Rejects where subtle crypto is missing.
+  async function sbB64Sha256(text) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    let bin = '';
+    for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+  // The value of an Authenticate request: b64(sha256(b64(sha256(password + salt)) + challenge)).
+  async function sbAuthValue(password, salt, challenge) {
+    return sbB64Sha256((await sbB64Sha256(password + salt)) + challenge);
+  }
+  // The authentication block of a Hello (salt and challenge), or null when there is none.
+  function sbHelloAuth(m) {
+    const a = m && m.authentication;
+    return a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' ? a : null;
+  }
+  const SB_HELLO_WAIT_MS = 1000; // how long a page waits for Streamer.bot's Hello before it carries on as it always has
   // </sb-conn>
   const WS_URL = window.__SB_WS_URL || sbWsUrl(location.search); // null: an invalid ?sbport
   const PUSH_ACTION = 'VDO Push';
@@ -408,7 +431,10 @@
   }
 
   // ── SB WS client ──────────────────────────────────────────────────────────
-  const MSG_AUTH = 'SB auth enforced — turn Enforce off';
+  const SB_PASS = sbPassParam(location.search);
+  const MSG_AUTH = "SB auth enforced — turn Enforce off, or add ?sbpass=<password> to this source's address";
+  const MSG_BADPASS = "SB password refused — check ?sbpass in this source's address";
+  const MSG_NOCRYPTO = 'SB password cannot be used here: open this page via http://127.0.0.1 (subtle crypto is unavailable)';
   const SYNC_FALLBACK_MS = 400; // sync anyway if the Subscribe is never answered
   let ws = null;
   let msgId = 0;
@@ -450,6 +476,10 @@
     let fallbackTimer = null;
     let healthy = false;
     let authHello = false; // this socket's Hello carried an authentication block
+    let helloTimer = null; // waiting for Streamer.bot's Hello
+    let started = false;   // the Subscribe has gone out on this socket
+    let authId = null;     // the id of this socket's Authenticate request
+    let authRefused = false;
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
@@ -465,6 +495,30 @@
       backoff.reset();
       if (connProblem) { connProblem = ''; if (synced) showSteady(); else show(waitText); }
     };
+    // The session proper: the Subscribe, then (once it is acknowledged) the sync. It starts when Hello says nothing about a password, when
+    // this page has no password to give, when Hello does not come within a second, or after an Authenticate was acknowledged ok.
+    const startSession = () => {
+      if (started || sock.readyState !== WebSocket.OPEN) return;
+      started = true;
+      clearTimeout(helloTimer); helloTimer = null;
+      subId = String(++msgId);
+      sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
+      fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
+    };
+    // Authentication is on and this page has a password: answer the challenge (the password itself never leaves the page).
+    const authenticate = (block) => {
+      authId = String(++msgId);
+      const id = authId;
+      sbAuthValue(SB_PASS, block.salt, block.challenge).then((value) => {
+        if (ws !== sock || started || authRefused || sock.readyState !== WebSocket.OPEN) return;
+        sock.send(JSON.stringify({ request: 'Authenticate', id, authentication: value }));
+      }, () => {
+        if (ws !== sock) return;
+        authRefused = true;
+        connProblem = MSG_NOCRYPTO;
+        show('');
+      });
+    };
     sock.onopen = () => {
       waitText = 'connected to SB — waiting for state';
       refusedSig = '';
@@ -472,9 +526,8 @@
         if (!synced) show(waitText);
         else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
       }
-      subId = String(++msgId);
-      sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
+      // Streamer.bot greets every connection with a Hello: wait a second for it, then carry on as always (a server that says nothing).
+      helloTimer = setTimeout(() => { helloTimer = null; startSession(); }, SB_HELLO_WAIT_MS);
       // Say why nothing is happening while the saved config has not come back (a connection
       // problem, if there is one, outranks these in show()).
       setTimeout(() => { if (!synced) { waitText = syncError || MSG_SYNC_SHORT; show(waitText); } }, SYNC_SAY_MS);
@@ -490,9 +543,20 @@
       // are then refused, or the socket is closed.
       if (m.request === 'Hello') {
         authHello = !!(m.authentication && typeof m.authentication === 'object');
+        if (started || authId) return;
+        clearTimeout(helloTimer); helloTimer = null;
+        const block = sbHelloAuth(m);
+        if (block && SB_PASS) authenticate(block); // the session starts when the Authenticate is acknowledged
+        else startSession(); // no password to give, or none asked for: as before (a refused Subscribe names authentication)
         return;
       }
       if (m.id && !m.event) {
+        if (m.id === authId) {
+          authId = null;
+          if (isRefusal(m)) { authRefused = true; connProblem = MSG_BADPASS; show(''); }
+          else startSession();
+          return;
+        }
         if (m.id === subId) {
           if (isRefusal(m)) { // no sync without an accepted Subscribe, and no retry loop on this socket
             clearTimeout(fallbackTimer);
@@ -594,6 +658,7 @@
       }
     };
     sock.onclose = () => {
+      clearTimeout(helloTimer);
       clearTimeout(fallbackTimer);
       clearTimeout(syncTimer);
       syncFired = true;
