@@ -215,8 +215,9 @@ through the WebSocket. Only add sources and docks you trust.
 keeps out anything that is not given the Streamer.bot WebSocket password: a page
 in an ordinary browser on the PC, another program, a stray tab. It does not keep
 out your own OBS sources and docks, which are the unprompted route in: they carry the
-password in their address (`?sbpass=<password>`), and OBS stores that address in the
-scene collection, so treat the scene collection like the password. Enforce is what
+password in their address (`?sbpass=<password>`, percent-encoded), and OBS stores a
+source's address in the scene collection and a dock's in its own settings, so treat
+both like the password. Enforce is what
 breaks a Greenroom piece that has not been updated; Authentication alone does not.
 The bridge keeps its copy in `sidecar/discord-tokens.json` (`"sbPassword"`, the only
 place it keeps one) and `backup.mjs` uses `GREENROOM_SB_PASSWORD` or the same field.

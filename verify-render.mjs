@@ -3466,8 +3466,9 @@ async function main() {
         const cOk = await wait(ctl, () => /SB: connected/.test(document.getElementById('sbStatus').textContent) && document.getElementById('vdoRoom').value === 'testroom' && /in voice/.test(document.getElementById('dvoStatus').textContent), null, 9000);
         await sleep(1500);
         const dTxt = await dmin.evaluate(() => document.getElementById('status').textContent);
+        const dSynced = (t) => !/auth|password|offline|boot|waiting for state|not answered|nothing is pushed until/i.test(t); // (it got its state: it is past 'waiting for state' and any 'has not answered')
         check('R22a: with Authentication and Enforce on, the roster overlay, the guest slot, the control page and director-min all connect with ?sbpass and work (they wait for Hello, answer the challenge, and only then subscribe and sync)',
-          rOk && gOk && cOk && !/auth|password|offline|boot/i.test(dTxt), JSON.stringify({ rOk, gOk, cOk, dTxt }));
+          rOk && gOk && cOk && dSynced(dTxt), JSON.stringify({ rOk, gOk, cOk, dTxt }));
         // the Copy and Open addresses carry the password like the port; no other address does
         const urls = await ctl.evaluate(() => ({
           guest2: window.__sourceUrls.guest(2), plate3: window.__sourceUrls.nameplate(3),
@@ -3486,7 +3487,9 @@ async function main() {
         prod2.doAction('Discord Voice Push', { payload: JSON.stringify(more) });
         const back = await wait(rost, () => document.querySelectorAll('.member').length === 4, null, 14000);
         const backCtl = await wait(ctl, () => /3 present|4 present/.test(document.getElementById('dvoStatus').textContent) && /4 present/.test(document.getElementById('dvoStatus').textContent), null, 14000);
-        check('R22c: after Streamer.bot drops every connection the pages reconnect and authenticate again: a new roster reaches the overlay and the control page (the handshake is repeated, not remembered)', back && backCtl, JSON.stringify({ back, backCtl }));
+        await sleep(1500);
+        const dTxt2 = await dmin.evaluate(() => document.getElementById('status').textContent);
+        check('R22c: after Streamer.bot drops every connection the pages reconnect and authenticate again: a new roster reaches the overlay and the control page, and director-min is served again (the handshake is repeated, not remembered)', back && backCtl && dSynced(dTxt2), JSON.stringify({ back, backCtl, dTxt2 }));
         for (const p of [rost, guest, ctl, dmin]) await p.close();
 
         // (b) no ?sbpass: the page says authentication is the problem
@@ -3514,6 +3517,34 @@ async function main() {
           offBad && /password refused/i.test(pillBad) && /password refused/i.test(dminBad) && logs.some((t) => /password refused/i.test(t)), JSON.stringify({ offBad, pillBad, dminBad }));
         for (const p of [rBad, cBad, dBad]) await p.close();
         check('R22f: the password is in no console line any of these pages printed', !logs.some((t) => t.includes(PW) || t.includes('wrong-password')), JSON.stringify(logs.filter((t) => t.includes(PW) || t.includes('wrong-password')).slice(0, 3)));
+      }
+      // (c2) Streamer.bot refuses the password and hangs up: the pages keep saying "refused" (not "add ?sbpass") and do not hammer it with the same wrong password
+      {
+        const x = await startExtra({ SB_PASSWORD: PW, SB_AUTHFAIL: 'close' });
+        let mout = '';
+        x.proc.stdout.on('data', (d) => { mout += d; });
+        const rost = await roster(x, '&sbpass=wrong-password');
+        const ctl = await open(x, '/control/control.html', 'sbpass=wrong-password', { width: 920, height: 900 });
+        const dmin = await open(x, '/control/director-min.html', 'sbpass=wrong-password', { width: 480, height: 120 });
+        await sleep(7000);
+        const pill = await ctl.evaluate(() => document.getElementById('sbStatus').textContent);
+        const dtxt = await dmin.evaluate(() => document.getElementById('status').textContent);
+        const attempts = (mout.match(/Authenticate REFUSED/g) || []).length;
+        check('R22j: a wrong ?sbpass that Streamer.bot answers with a hang-up stays "password refused" on the control page and in director-min (never "add ?sbpass"), and the three pages try the same wrong password about once each in 7 s, not every second', /password refused/i.test(pill) && /password refused/i.test(dtxt) && !/add \?sbpass/.test(pill + dtxt) && attempts >= 3 && attempts <= 5, JSON.stringify({ pill, dtxt, attempts }));
+        for (const p of [rost, ctl, dmin]) await p.close();
+      }
+      // (c3) Streamer.bot never answers the Authenticate: a visible message after a few seconds, not a page that looks connected for ever
+      {
+        const x = await startExtra({ SB_PASSWORD: PW });
+        await fetch(x.api.base + '/mock/mode?authsilent=1').then((r) => r.arrayBuffer()); // (after the producer got in: from now on an Authenticate is never answered)
+        const rost = await roster(x, `&sbpass=${enc}`);
+        const ctl = await open(x, '/control/control.html', `sbpass=${enc}`, { width: 920, height: 900 });
+        const dmin = await open(x, '/control/director-min.html', `sbpass=${enc}`, { width: 480, height: 120 });
+        await sleep(7500);
+        const pill = await ctl.evaluate(() => document.getElementById('sbStatus').textContent);
+        const dtxt = await dmin.evaluate(() => document.getElementById('status').textContent);
+        check('R22k: an Authenticate that Streamer.bot never answers is reported after about five seconds (the control pill, director-min, the overlay\'s console) and the connection is retried', /did not answer the password/i.test(pill) && /did not answer the password/i.test(dtxt) && logs.some((t) => /did not answer the password/i.test(t)), JSON.stringify({ pill, dtxt }));
+        for (const p of [rost, ctl, dmin]) await p.close();
       }
       // (e) Authentication on but Enforce off: a page without a password is served as it always was
       {

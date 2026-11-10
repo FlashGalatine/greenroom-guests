@@ -3060,7 +3060,24 @@ async function main() {
             await nap(2000);
             check('[8f] GRN-195: a peer that says it is the Greenroom mock is not served (GREENROOM_ALLOW_MOCK unset): the bridge says so, subscribes to nothing and pushes nothing, and stays up', /says it is the Greenroom mock/.test(a.out) && a.got.length === 0 && a.code === null, JSON.stringify({ out: a.out.slice(-300), got: a.got.length, code: a.code }));
           }
-          // (B) a genuine-looking Hello (no info.source): served
+          // (A2) a peer the bridge refused (it says it is the mock, or it says nothing) pushes commands anyway: none is obeyed (GRN-195)
+          for (const [label, hello] of [['mock', { request: 'Hello', info: { name: 'greenroom-mock', source: 'mock' } }], ['silent', null]]) {
+            const wssPort = await freePort();
+            const wss = new WebSocketServer({ port: wssPort, host: '127.0.0.1' });
+            const cmdFrame = (command, value) => JSON.stringify({ event: { source: 'General', type: 'Custom' }, data: JSON.stringify({ type: 'discord:voice:command', command, value }) });
+            wss.on('connection', (ws) => {
+              ws.on('error', () => {});
+              if (hello) ws.send(JSON.stringify(hello));
+              setTimeout(() => { try { ws.send(cmdFrame('favorite-add', JSON.stringify({ name: 'INJECTED', serverId: '900', channelId: '910' }))); ws.send(cmdFrame('quit', '')); } catch { /* gone */ } }, 600);
+            });
+            const fake = { url: `ws://127.0.0.1:${wssPort}/`, child: { kill() { try { wss.close(); } catch { /* closing */ } } } };
+            const g = await rig({ sb: fake, env: noMock, noWait: true });
+            await nap(2500);
+            const cfgText = await readFile(g.env.DISCORD_BRIDGE_CONFIG, 'utf8').catch(() => '');
+            check(`[8f] GRN-195: a peer the bridge refused (${label === 'mock' ? 'it says it is the mock' : 'it says nothing'}) cannot drive it: the favorite-add and quit it pushes are not obeyed (no INJECTED favorite, the bridge is still running)`,
+              !/INJECTED/.test(cfgText) && g.code === null && !/command: (favorite-add|quit)/.test(g.out), JSON.stringify({ cfg: cfgText.slice(0, 120), code: g.code, out: g.out.slice(-200) }));
+          }
+          // (B) a genuine-looking Hello (info.source "websocketServer", not "mock"): served
           {
             const b = await rig({ sb: await startMockWith({ SB_HELLO: 'real' }), env: noMock });
             const first = await b.waitFor(() => true, 6000);
@@ -3093,6 +3110,11 @@ async function main() {
             await fetch(sb.base + '/mock/dropall').then((r) => r.arrayBuffer());
             const again = await until(() => (mout.text.match(/Authenticate OK/g) || []).length > before, 10000);
             check('[8f] GRN-06: the handshake is repeated on every reconnect (the connection dropped: the bridge authenticated again)', again, `${before} → ${(mout.text.match(/Authenticate OK/g) || []).length}`);
+            await fetch(sb.base + '/mock/mode?authdrop=1').then((r) => r.arrayBuffer());
+            const okBefore = (mout.text.match(/Authenticate OK/g) || []).length;
+            await fetch(sb.base + '/mock/dropall').then((r) => r.arrayBuffer());
+            const recovered = await until(() => /Authenticate DROPPED/.test(mout.text) && (mout.text.match(/Authenticate OK/g) || []).length > okBefore, 16000);
+            check('[8f] GRN-06: a connection that drops while the Authenticate waits for its answer does not wedge the bridge: the next connection authenticates again', recovered, mout.text.slice(-300));
             // backup.mjs: the same password from GREENROOM_SB_PASSWORD, or from the token file; the peer is named
             const bkDir = await mkdtemp(resolve(tmpdir(), 'greenroom-bk17-'));
             scratchDirs.push(bkDir);
@@ -3115,10 +3137,30 @@ async function main() {
             check('[8f] GRN-06/125: a wrong sbPassword is a visible failure ("refused the password") and no Subscribe: nothing is pushed', /refused the password/.test(wrong.out) && wrong.got.length === 0 && !wrong.out.includes('wrong-pw-1'), wrong.out.slice(-250));
             const none = await rig({ sb: sbE, sbPassword: PW, env: noMock, noWait: true });
             await nap(2000);
-            check('[8f] GRN-06/125: Authentication on and no sbPassword: the bridge says so, carries on, and the refused Subscribe is logged (a non-ok ack is no longer silent); nothing is pushed', /no sbPassword/.test(none.out) && /refused a request/.test(none.out) && none.got.length === 0, none.out.slice(-300));
+            await nap(5500); // (past a heartbeat: a bridge that kept pushing would log a refusal for it)
+            check('[8f] GRN-06/125: Authentication on and no sbPassword: the bridge says so and the refused Subscribe is logged (a non-ok ack is no longer silent); it then stops sending (one refusal in the log, not one per push) and does not claim to be connected', /no sbPassword/.test(none.out) && /refused the Subscribe/.test(none.out) && (none.out.match(/Streamer\.bot refused/g) || []).length === 1 && !/Connected to Streamer\.bot/.test(none.out) && none.got.length === 0, none.out.slice(-400));
+            // a password written as a number, a UTF-16 token file
+            const sbI = await startMockWith({ SB_PASSWORD: PW, SB_HELLO: 'real' });
+            const numPw = await rig({ sb: sbI, sbPassword: PW, tokData: '{ "botToken": "", "enabled": false, "sbPassword": 12345678 }', env: noMock, noWait: true });
+            await nap(2000);
+            check('[8f] GRN-06: an sbPassword written as a number is named ("is not text … write the password in quotes"), not reported as missing', /is not text/.test(numPw.out) && !/has no sbPassword/.test(numPw.out), numPw.out.slice(-300));
+            const bk16 = await mkdtemp(resolve(tmpdir(), 'greenroom-bk17b-'));
+            scratchDirs.push(bk16);
+            const tok16 = resolve(bk16, 'tok16.json');
+            await writeFile(tok16, Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(JSON.stringify({ sbPassword: PW }), 'utf16le')]));
+            const u16 = await runNode(['backup.mjs', 'save', resolve(bk16, 'u.json')], { SB_WS_URL: sbI.url, GREENROOM_BACKUP_DIR: bk16, DISCORD_BRIDGE_TOKENS: tok16 });
+            check('[8f] GRN-06: backup.mjs reads the sbPassword from a UTF-16 token file (with a BOM) as the bridge does', /peer:   Streamer\.bot 0\.2\.5/.test(u16.out) && !/refused|closed the connection/.test(u16.out), u16.out.slice(-250));
             const off = await rig({ sb: await startMockWith({ SB_PASSWORD: PW, SB_HELLO: 'real', SB_AUTH: 'serve' }), env: noMock });
             const served = await off.waitFor(() => true, 6000);
             check('[8f] GRN-06: Authentication on with Enforce off and no sbPassword: served as before', !!served, off.out.slice(-200));
+          }
+          // (E2) obs-browser writes an error-level console message of a page to the OBS log with the page's address (query included) as its source,
+          // and these two pages hold their client in an inline script and can carry ?sbpass: they print warnings, never errors
+          {
+            const inline = async (rel) => { const t = await readFile(resolve(__dirname, rel), 'utf8'); return [...t.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join('\n'); };
+            const errs = [];
+            for (const rel of ['control/control.html', 'control/director-min.html']) if (/console\.error\s*\(/.test(await inline(rel))) errs.push(rel);
+            check('[8f] GRN-67: control.html and director-min.html (which can carry ?sbpass in their address) print no error-level console message from their inline scripts (OBS logs those with the page address as the source)', errs.length === 0, errs.join(', '));
           }
           // (F) the helpers all three pages share
           {

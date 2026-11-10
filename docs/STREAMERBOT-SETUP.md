@@ -386,12 +386,19 @@ Do this only after **every** piece is updated (the overlay folder, the control f
 **Enforce** (not Authentication alone) is what refuses it.
 
 1. In Streamer.bot (Settings → WebSocket Server) set a password.
-2. Add `&sbpass=<password>` by hand to the dock URL (the control page), the
-   director-min source and the roster source, and re-copy the guest-slot and
-   nameplate addresses from the control page: its Copy and Open buttons carry
-   `?sbpass` once the control page itself was opened with it. OBS keeps these
-   addresses in the scene collection, so the password is in it; that is the accepted
-   cost (and the reason the password is never on the bus or in a log).
+2. Add `sbpass=<password>` by hand to the dock URL (the control page), the
+   director-min source and the roster source: write `?sbpass=...` when the address
+   has no `?` yet (`http://127.0.0.1:7474/greenroom-control/control.html?sbpass=...`)
+   and `&sbpass=...` after an existing `?sbport=...`. **Percent-encode the password**:
+   a page reads it as URL text, so `+` becomes a space, `&` ends it and `#` cuts it
+   off (write `%2B`, `%26`, `%23`, `%25` and `%20` for `+ & # %` and a space, or
+   use a password of letters and digits). Then re-copy the guest-slot and nameplate
+   addresses from the control page: its Copy and Open buttons carry `sbpass` (already
+   encoded) once the control page itself was opened with it. OBS keeps a source's
+   address in the scene collection and a dock's in its own settings (the custom
+   browser docks list), so the password is in both; that is the accepted cost (and
+   the reason the password is never on the bus or in a log). A page that gets no
+   greeting from Streamer.bot within about a second carries on without a password.
 3. Put `"sbPassword": "<password>"` into `sidecar/discord-tokens.json` (next to
    `botToken`; it is the only place the bridge reads it from, since `Discord Bridge Start`
    cannot pass an environment variable to node) and restart the bridge.

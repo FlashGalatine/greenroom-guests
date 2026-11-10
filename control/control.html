@@ -395,8 +395,9 @@
       reset() { delay = BASE_MS; },
     };
   }
-  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps it in the scene
-  // collection) and nowhere else: it is never logged, sent on the bus, or copied into any address except an OBS source or dock URL.
+  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps a source's address in
+  // the scene collection and a dock's in its own settings) and nowhere else: it is never logged, sent on the bus, or copied into any address
+  // except an OBS source or dock URL. The value is read as URL-encoded text: '+' is a space, '%2B' is '+'.
   function sbPassParam(search) {
     const raw = new URLSearchParams(search).get('sbpass');
     return raw === null ? '' : raw;
@@ -727,6 +728,10 @@
   const MSG_AUTH = "SB auth enforced — turn Enforce off, or add ?sbpass=<password> to this page's address";
   const MSG_BADPASS = "SB password refused — check ?sbpass in this page's address";
   const MSG_NOCRYPTO = 'SB password cannot be used here: open this page via http://127.0.0.1 (subtle crypto is unavailable)';
+  const MSG_NOANSWER = 'SB did not answer the password: retrying';
+  const AUTH_ACK_MS = 5000;               // an Authenticate that is not answered within this long is reported and the socket retried
+  const PASSWORD_RETRY_MS = 30000;        // after a refused password a retry is no use until the address is changed: ask only now and then
+  let passwordRefused = false;
   const SYNC_FALLBACK_MS = 400; // sync anyway if the Subscribe is never answered
   let ws = null;
   let msgId = 0;
@@ -762,7 +767,7 @@
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    reconnectTimer = setTimeout(connect, backoff.next());
+    reconnectTimer = setTimeout(connect, passwordRefused ? PASSWORD_RETRY_MS : backoff.next());
   }
 
   function connect() {
@@ -779,6 +784,8 @@
     let started = false;   // the Subscribe has gone out on this socket
     let authId = null;     // the id of this socket's Authenticate request
     let authRefused = false;
+    let authFailMsg = ''; // why this socket's handshake failed (what a hang-up after it should still say)
+    let authTimer = null; // the Authenticate has gone out and is not answered yet
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
@@ -814,6 +821,14 @@
       sbAuthValue(SB_PASS, block.salt, block.challenge).then((value) => {
         if (ws !== sock || started || authRefused || sock.readyState !== WebSocket.OPEN) return;
         sock.send(JSON.stringify({ request: 'Authenticate', id, authentication: value }));
+        authTimer = setTimeout(() => {
+          authTimer = null;
+          if (ws !== sock || authId !== id) return;
+          authId = null; authFailMsg = MSG_NOANSWER; connFault = true;
+          showFault('auth', MSG_NOANSWER);
+          renderSyncStatus();
+          try { sock.close(); } catch { /* closing */ }
+        }, AUTH_ACK_MS);
       }, () => {
         if (ws !== sock) return;
         authRefused = true; connFault = true;
@@ -853,7 +868,8 @@
       if (m.id && !m.event) {
         if (m.id === authId) {
           authId = null;
-          if (isRefusal(m)) { authRefused = true; connFault = true; showFault('auth', MSG_BADPASS); renderSyncStatus(); }
+          if (authTimer) { clearTimeout(authTimer); authTimer = null; }
+          if (isRefusal(m)) { authRefused = true; passwordRefused = true; authFailMsg = MSG_BADPASS; connFault = true; showFault('auth', MSG_BADPASS); renderSyncStatus(); }
           else startSession();
           return;
         }
@@ -910,13 +926,14 @@
     };
     sock.onclose = () => {
       clearTimeout(helloTimer);
+      clearTimeout(authTimer);
       clearTimeout(fallbackTimer);
       clearTimeout(syncTimer);
       syncFired = true;
       if (ws !== sock) return;
       pendingActions.clear();
       connFault = !!(authHello && !healthy); // (the sync line stays quiet under an authentication notice)
-      if (authHello && !healthy) showFault('auth', MSG_AUTH); // hung up on after an authentication Hello
+      if (authHello && !healthy) showFault('auth', authFailMsg || MSG_AUTH); // hung up on after an authentication Hello (a refused password stays a refused password)
       else {
         pillFault = '';
         // A push still waiting for its echo may not have reached Streamer.bot: if the reconnect replay does not show it, it is sent again.
@@ -3003,7 +3020,7 @@ This REPLACES the current room, slots, and guest directory (${dirKept} guest ent
   renderAll();
   if (!WS_URL) { // an invalid ?sbport: say so, and never connect (nor fall back to 8080)
     setPill(els.sbStatus, 'SB: invalid ?sbport (use a port number, 1-65535)', 'error');
-    console.error('[control] invalid ?sbport ' + JSON.stringify(P.get('sbport')) + ': use a port number from 1 to 65535. Not connecting.');
+    console.warn('[control] invalid ?sbport ' + JSON.stringify(P.get('sbport')) + ': use a port number from 1 to 65535. Not connecting.');
   } else {
     connect();
   }

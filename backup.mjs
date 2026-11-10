@@ -134,7 +134,13 @@ function sbPassword() {
   if (env) return env;
   try {
     const p = process.env.DISCORD_BRIDGE_TOKENS || resolve(__dirname, 'sidecar', 'discord-tokens.json');
-    const t = JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
+    // The bridge reads this file as UTF-8 (a BOM is stripped) or UTF-16 with a BOM (what PowerShell's > writes): so does this.
+    const buf = readFileSync(p);
+    let text;
+    if (buf[0] === 0xFF && buf[1] === 0xFE) text = buf.subarray(2).toString('utf16le');
+    else if (buf[0] === 0xFE && buf[1] === 0xFF) text = Buffer.from(buf.subarray(2)).swap16().toString('utf16le');
+    else text = buf.toString('utf8').replace(/^\uFEFF/, '');
+    const t = JSON.parse(text);
     return t && typeof t.sbPassword === 'string' ? t.sbPassword : '';
   } catch { return ''; }
 }
@@ -168,6 +174,8 @@ function connect(url) {
     }
 
     ws.on('error', (e) => { clearTimeout(timer); rejectConn(e); });
+    // A hang-up before the Subscribe is answered (a refused password can end like that): say so now, not after the 6 s timer.
+    ws.on('close', () => { clearTimeout(timer); rejectConn(new Error('Streamer.bot closed the connection before it served the request. If its WebSocket Server has Authentication on, check the password (GREENROOM_SB_PASSWORD, or "sbPassword" in sidecar/discord-tokens.json, written in quotes).')); });
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw.toString()); } catch { return; }
       if (m && m.request === 'Hello') {
@@ -214,7 +222,7 @@ function connect(url) {
       wait(ackWaiters, CONNECT_MS, (m) => m.id === subId, 'Subscribe ack').then((ack) => {
         clearTimeout(timer);
         if (ack.status && ack.status !== 'ok') {
-          rejectConn(new Error(`Streamer.bot refused the Subscribe (${ack.error || ack.status}). If its WebSocket Server has Authentication on and enforced, set GREENROOM_SB_PASSWORD (or sbPassword in sidecar/discord-tokens.json), or turn Enforce off.`));
+          rejectConn(new Error(`Streamer.bot refused the Subscribe (${ack.error || ack.status}). If its WebSocket Server has Authentication on and enforced, ${sbPassword() ? 'the password may be wrong, or Streamer.bot was slow to greet (try again)' : 'set GREENROOM_SB_PASSWORD (or "sbPassword" in sidecar/discord-tokens.json, written in quotes), or turn Enforce off'}.`));
           return;
         }
         resolveConn({

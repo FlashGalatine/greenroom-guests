@@ -26,8 +26,8 @@ Streamer.bot is the entire bus — there is no other server.
 // visible failure ("SB password refused …"), not a silent retry. With no authentication block, or with no password to give, it
 // carries on as before (with Enforce off Streamer.bot serves every request anyway). If requests are then refused, or Streamer.bot
 // hangs up before accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off, or add ?sbpass=…".
-// Where the password comes from: pages read `?sbpass=<password>` from their own address (an OBS source or dock URL: OBS keeps it in the
-// scene collection; the control page's Copy and Open buttons carry it into the guest-slot and nameplate addresses, and it goes into
+// Where the password comes from: pages read `?sbpass=<password>` from their own address, as URL-encoded text (an OBS source or dock URL: OBS
+// keeps a source's in the scene collection and a dock's in its own settings; the control page's Copy and Open buttons carry it into the guest-slot and nameplate addresses, and it goes into
 // no other address, log line or bus message); the bridge reads `sbPassword` from `sidecar/discord-tokens.json` (the bridge's only
 // password store; `persistTokens` keeps every field of that file); `backup.mjs` reads `GREENROOM_SB_PASSWORD`, else the same field.
 // The Hello's `info.source` is "mock" for the development mock: the bridge refuses a peer that says so (unless GREENROOM_ALLOW_MOCK=1,
@@ -417,8 +417,18 @@ view URLs) — same trust model as the toolkit it replaces. The Discord bot toke
 is **file-only** (`sidecar/discord-tokens.json`, gitignored) and has no bus
 command that can read or write it (`reset-auth` only turns `enabled` off; deleting the
 file by hand forgets the token at the next Connect or restart). Bus commands can still stop and move the bot, so
-SB's WebSocket must stay localhost-only. Do not expose SB's WS/HTTP beyond localhost
-without adding SB's auth handshake to every client in this repo (unimplemented).
-Until it is implemented, any page running in OBS (a browser source or dock) or in
+SB's WebSocket must stay localhost-only, whether Authentication is on or off.
+With Authentication off, any page running in OBS (a browser source or dock) or in
 a browser on the same PC can read the room password and drive Greenroom through
-the auth-off WebSocket, so only load pages you trust.
+the WebSocket, so only load pages you trust. **Authentication plus Enforce**
+(recommended once every Greenroom piece is updated) keeps out everything that is
+not given the password: a page in an ordinary browser, another program, a stray
+tab. It does not keep out your own OBS sources and docks, the unprompted route in,
+because they carry the password in their address (`?sbpass=`; OBS stores it in
+the scene collection or its own settings). **Enforce**, not Authentication alone, is
+what breaks a client that was not updated. The bridge's only password store is
+`sidecar/discord-tokens.json` (`sbPassword`); the password is in no log line, bus
+message or payload, and a Hello that arrives later than about a second after the
+connection is not waited for. The Authenticate itself is answered within five
+seconds or the client reports it and retries; a refused password is retried only
+every 30 seconds by a page (it cannot become right without a new address).

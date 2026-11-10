@@ -69,8 +69,9 @@
       reset() { delay = BASE_MS; },
     };
   }
-  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps it in the scene
-  // collection) and nowhere else: it is never logged, sent on the bus, or copied into any address except an OBS source or dock URL.
+  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps a source's address in
+  // the scene collection and a dock's in its own settings) and nowhere else: it is never logged, sent on the bus, or copied into any address
+  // except an OBS source or dock URL. The value is read as URL-encoded text: '+' is a space, '%2B' is '+'.
   function sbPassParam(search) {
     const raw = new URLSearchParams(search).get('sbpass');
     return raw === null ? '' : raw;
@@ -104,6 +105,10 @@
   const MSG_AUTH = "SB auth enforced — turn Enforce off, or add ?sbpass=<password> to this source's address";
   const MSG_BADPASS = "SB password refused — check ?sbpass in this source's address";
   const MSG_NOCRYPTO = 'SB password cannot be used here: open the page via http://127.0.0.1 (subtle crypto is unavailable)';
+  const MSG_NOANSWER = 'SB did not answer the password: retrying';
+  const AUTH_ACK_MS = 5000;               // an Authenticate that is not answered within this long is reported and the socket retried
+  const PASSWORD_RETRY_MS = 30000;        // after a refused password a retry is no use until the address is changed: ask only now and then
+  let passwordRefused = false;
 
   let ws = null;
   let msgId = 0;
@@ -145,7 +150,7 @@
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    reconnectTimer = setTimeout(connect, backoff.next());
+    reconnectTimer = setTimeout(connect, passwordRefused ? PASSWORD_RETRY_MS : backoff.next());
   }
 
   function connect() {
@@ -173,6 +178,8 @@
     let started = false;       // the session began: the Subscribe has gone out (or is not going to)
     let authId = null;         // the id of this socket's Authenticate request
     let authRefused = false;   // the Authenticate was refused: nothing more is asked of this socket
+    let authFailMsg = '';      // why this socket's handshake failed (what a hang-up after it should still say)
+    let authTimer = null;      // the Authenticate has gone out and is not answered yet
     let syncRefusedGrey = false; // greyed because the sync request was refused, until live frames arrive
     let syncRefused = false;     // the sync request was refused: asking again would only be refused again
     const syncIds = new Set();
@@ -228,6 +235,14 @@
         if (ws !== sock || started || authRefused) return;
         send({ request: 'Authenticate', id, authentication: value });
         log('sent Authenticate (id', id + ')');
+        authTimer = setTimeout(() => {
+          authTimer = null;
+          if (ws !== sock || authId !== id) return;
+          authId = null; authFailMsg = MSG_NOANSWER;
+          warn(MSG_NOANSWER);
+          setOffline(true);
+          try { sock.close(); } catch { /* closing */ }
+        }, AUTH_ACK_MS);
       }, () => {
         if (ws !== sock) return;
         authRefused = true;
@@ -264,7 +279,8 @@
       if (m.id && !m.event) {
         if (m.id === authId) {
           authId = null;
-          if (isRefusal(m)) { authRefused = true; warn(MSG_BADPASS); setOffline(true); }
+          if (authTimer) { clearTimeout(authTimer); authTimer = null; }
+          if (isRefusal(m)) { authRefused = true; passwordRefused = true; authFailMsg = MSG_BADPASS; warn(MSG_BADPASS); setOffline(true); }
           else { log('Authenticate acknowledged'); startSession(); }
           return;
         }
@@ -325,11 +341,12 @@
     sock.onclose = () => {
       // A close before the fallback timer must not leave a sync behind to fire later.
       if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+      if (authTimer) { clearTimeout(authTimer); authTimer = null; }
       if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
       if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
       syncFired = true;
       if (ws !== sock) return;
-      if (authHello && !healthy) warn(MSG_AUTH); // hung up on after an authentication Hello
+      if (authHello && !healthy) warn(authFailMsg || MSG_AUTH); // hung up on after an authentication Hello (a refused password stays a refused password)
       setOffline(true);
       window.dispatchEvent(new CustomEvent('svc:disconnect'));
       log('connection closed; reconnecting');
