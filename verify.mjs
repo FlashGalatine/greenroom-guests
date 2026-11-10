@@ -1418,10 +1418,10 @@ async function main() {
       check('discord-bridge-start.cs: BUNDLE is the placeholder C:\\path\\to\\greenroom-guests\\sidecar (no one\'s own path), UseShellExecute stays true and is never false, and the launch waits 2 s for an early exit',
         /const string BUNDLE = @"C:\\path\\to\\greenroom-guests\\sidecar";/.test(launcher) && !/StreamerGraphics/.test(launcherRaw) && launcher.includes('UseShellExecute = true') && !/UseShellExecute\s*=\s*false/.test(launcher) && launcher.includes('WaitForExit(2000)'));
       check('discord-bridge-start.cs: the pre-flight (BUNDLE exists, discord-bridge.mjs in it, node_modules in it) comes before Process.Start, and node is looked up in the registry key, Program Files and the Machine and User PATH',
-        before(launcher, 'Directory.Exists(BUNDLE)', 'Process.Start(psi)') && before(launcher, 'File.Exists(Path.Combine(BUNDLE, "discord-bridge.mjs"))', 'Process.Start(psi)') && before(launcher, 'Directory.Exists(Path.Combine(BUNDLE, "node_modules"))', 'Process.Start(psi)')
+        before(launcher, 'Directory.Exists(BUNDLE)', 'Launch(') && before(launcher, 'File.Exists(Path.Combine(BUNDLE, "discord-bridge.mjs"))', 'Launch(') && before(launcher, 'Directory.Exists(Path.Combine(BUNDLE, "node_modules"))', 'Launch(')
         && launcher.includes('SOFTWARE\\Node.js') && launcher.includes('InstallPath') && launcher.includes('"ProgramFiles"') && launcher.includes('EnvironmentVariableTarget.Machine') && launcher.includes('EnvironmentVariableTarget.User'));
       check('discord-bridge-start.cs: the header says "any" Streamer.bot exit (not only an unclean one) and warns against Run a Program with environment variables or Wait for Exit (GRN-142)',
-        /orphaned bridge after ANY Streamer\.bot exit/.test(launcherRaw) && /Run a Program/.test(launcherRaw) && /waits for the program to exit/.test(launcherRaw));
+        /outlives Streamer\.bot \(after a normal close as well as a crash or a kill\)/.test(launcherRaw) && /Run a Program/.test(launcherRaw) && /waits for the program to exit/.test(launcherRaw));
       const cmdSrc = await cs('discord-voice-command.cs');
       check('discord-voice-command.cs: the log line is sanitised and capped (Safe), and the command itself is not concatenated into a log call as it came (GRN-16)',
         cmdSrc.includes('Safe(command, 40)') && !/Log(Info|Warn)\([^;]*\+\s*command\s*\)/.test(cmdSrc) && !/Log(Info|Warn)\([^;]*\+\s*ex\s*\)/.test(cmdSrc));
@@ -1451,40 +1451,48 @@ async function main() {
           child.on('exit', (code) => { clearTimeout(timer); res({ code, out }); });
           child.on('error', (e) => { clearTimeout(timer); res({ code: -1, out: String(e && e.message) }); });
         });
-        const build = async (name, src) => {
+        const MSCORLIB = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll';
+        const SYSTEM_DLL = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.dll';
+        // Only what Streamer.bot gives an action: mscorlib, and System.dll where the action needs it (the docs' References step). No default references.
+        const build = async (name, src, o) => {
           const body = '\uFEFF' + src.replace(/\r\n/g, '\n').replace('public class CPHInline', 'public class CPHInline : CPHInlineBase');
           await writeFile(resolve(cdir, name + '.cs'), body);
-          const r = await runExe(CSC, ['/nologo', '/target:exe', '/out:' + resolve(cdir, name + '.exe'), resolve(cdir, name + '.cs'), resolve(cdir, 'stub.cs')]);
+          const refs = ['/noconfig', '/nostdlib+', '/r:' + MSCORLIB].concat(o && o.system ? ['/r:' + SYSTEM_DLL] : []);
+          const r = await runExe(CSC, ['/nologo'].concat(refs, ['/target:exe', '/out:' + resolve(cdir, name + '.exe'), resolve(cdir, name + '.cs'), resolve(cdir, 'stub.cs')]));
           return { ok: r.code === 0, out: r.out, exe: resolve(cdir, name + '.exe') };
         };
         const lines = (o) => o.split(/\r?\n/).filter(Boolean);
 
         // Discord Voice Command
         const vc = await build('voicecmd', await readFile(resolve(__dirname, 'actions', 'discord-voice-command.cs'), 'utf8'));
-        check('[6b] discord-voice-command.cs compiles (C# 5, stubbed CPH)', vc.ok, vc.out.slice(0, 400));
+        check('[6b] discord-voice-command.cs compiles (C# 5, mscorlib only, stubbed CPH)', vc.ok, vc.out.slice(0, 400));
         if (vc.ok) {
-          const evil = 'leave\r\nINFO forged line \u0007 ' + 'x'.repeat(200);
+          const evil = 'leave\r\nINFO forged line \u0007\u0085\u2028\u2029\u009b\u202e ' + 'x'.repeat(200);
           const r = await runExe(vc.exe, [], { ...process.env, ARG_command: evil, ARG_value: 'v' });
           const L = lines(r.out);
           const info = L.filter((l) => l.startsWith('INFO '));
           const bc = L.find((l) => l.startsWith('BROADCAST ')) || '';
           check('[6b] GRN-16: a command with a line break and a bell in it is logged as ONE line, control characters as spaces, cut at 40 characters; the broadcast still carries it whole',
-            info.length === 1 && /^INFO \[Discord Voice Command\] leave +INFO forged line/.test(info[0]) && info[0].length <= 'INFO [Discord Voice Command] '.length + 43 && info[0].endsWith('...') && !L.some((l) => l.startsWith('INFO forged'))
+            info.length === 1 && /^INFO \[Discord Voice Command\] leave +INFO forged line/.test(info[0]) && !/[\u0085\u2028\u2029\u009b\u202e\u0007]/.test(info[0]) && info[0].length <= 'INFO [Discord Voice Command] '.length + 43 && info[0].endsWith('...') && !L.some((l) => l.startsWith('INFO forged'))
             && bc.includes('\\r\\n') && bc.includes('x'.repeat(200)) && /RESULT True/.test(r.out), JSON.stringify(L).slice(0, 500));
+          // a surrogate pair at the cut is not split
+          const emoji = await runExe(vc.exe, [], { ...process.env, ARG_command: 'a'.repeat(39) + '\u{1F600}\u{1F600}', ARG_value: 'v' });
+          const einfo = lines(emoji.out).find((l) => l.startsWith('INFO ')) || '';
+          check('[6b] GRN-16: the 40-character cut does not split a surrogate pair (an emoji at the cut leaves no lone half in the log line)', einfo.endsWith('...') && !/[\ud800-\udbff](?![\udc00-\udfff])/.test(einfo) && !/(?<![\ud800-\udbff])[\udc00-\udfff]/.test(einfo), JSON.stringify(einfo));
           const none = await runExe(vc.exe, [], { ...process.env });
           check('[6b] discord-voice-command.cs: no command argument is a warning, an error broadcast and false', /WARN \[Discord Voice Command\] called without a 'command'/.test(none.out) && /discord:voice:error/.test(none.out) && /RESULT False/.test(none.out), none.out.slice(0, 300));
         }
 
         // Discord Bridge Start, as shipped: the placeholder BUNDLE
-        const shipped = await build('bridgestart', await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8'));
-        check('[6b] discord-bridge-start.cs compiles (C# 5, stubbed CPH)', shipped.ok, shipped.out.slice(0, 400));
+        const shipped = await build('bridgestart', await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8'), { system: true });
+        check('[6b] discord-bridge-start.cs compiles (C# 5, mscorlib + System.dll only, stubbed CPH)', shipped.ok, shipped.out.slice(0, 400));
         if (shipped.ok) {
           const r = await runExe(shipped.exe, [], process.env);
           check('[6b] GRN-10/21: as shipped (BUNDLE still the placeholder) it logs "set BUNDLE" and starts nothing', /WARN \[Discord Bridge Start\] BUNDLE is still the placeholder/.test(r.out) && /RESULT False/.test(r.out), r.out.slice(0, 300));
         }
         // the same code with BUNDLE read from the environment, so each case can have its own folder
-        const forTest = (await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8')).replace(/const string BUNDLE = @"[^"]*";/, 'static readonly string BUNDLE = Environment.GetEnvironmentVariable("TEST_BUNDLE");');
-        const tb = await build('bridgetest', forTest);
+        const forTest = (await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8')).replace(/const string BUNDLE = @"[^"]*";/, 'static readonly string BUNDLE = Environment.GetEnvironmentVariable("TEST_BUNDLE");').replace('string found = FindNode();', 'string found = Environment.GetEnvironmentVariable("TEST_NO_NODE") == "1" ? null : FindNode();');
+        const tb = await build('bridgetest', forTest, { system: true });
         check('[6b] discord-bridge-start.cs (BUNDLE from the environment) compiles', tb.ok, tb.out.slice(0, 400));
         if (tb.ok) {
           const base = resolve(cdir, 'sidecar-cases');
@@ -1496,16 +1504,27 @@ async function main() {
           const already = await go(await mk('exit0', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true));
           const failing = await go(await mk('exit3', { 'discord-bridge.mjs': 'process.exit(3);\n' }, true));
           const running = await go(await mk('stays', { 'discord-bridge.mjs': 'setTimeout(() => {}, 2600);\n' }, true));
+          const slowRefusal = await go(await mk('late1', { 'discord-bridge.mjs': 'setTimeout(() => process.exit(1), 3000);\n' }, true)); // (a refusal after the 2 s window, like a guard port held by something else: ~5 s in the real bridge)
           check('[6b] GRN-21: a BUNDLE that does not exist, one without discord-bridge.mjs and one without node_modules each log their own specific warning and return false (nothing is started)',
             /WARN .*BUNDLE does not exist/.test(none.out) && /RESULT False/.test(none.out) && /WARN .*discord-bridge\.mjs is not in .*not the sidecar folder/.test(empty.out) && /RESULT False/.test(empty.out) && /WARN .*node_modules is missing.*npm install/.test(noMods.out) && /RESULT False/.test(noMods.out),
             JSON.stringify([none.out, empty.out, noMods.out]).slice(0, 700));
           check('[6b] GRN-21: a bridge that exits 0 at once is reported as already running (true); one that exits with code 3 is reported with the code and the .bat hint (false); one that stays up is "launched" (true)',
             /INFO .*bridge already running/.test(already.out) && /RESULT True/.test(already.out) && /WARN .*bridge exited with code 3.*start-discord-bridge\.bat/.test(failing.out) && /RESULT False/.test(failing.out) && /INFO .*launched node discord-bridge\.mjs/.test(running.out) && /RESULT True/.test(running.out),
             JSON.stringify([already.out, failing.out, running.out]).slice(0, 700));
+          check('[6b] GRN-21: a refusal that comes AFTER the 2 s window is still "launched" (true) but the line says to run the .bat if no bridge appears (the limit is stated, not hidden)', /INFO .*launched node discord-bridge\.mjs/.test(slowRefusal.out) && /start-discord-bridge\.bat to see why/.test(slowRefusal.out) && /RESULT True/.test(slowRefusal.out), slowRefusal.out.slice(0, 300));
           const pf = process.env.ProgramFiles || 'C:\\Program Files';
           if (existsSync(resolve(pf, 'nodejs', 'node.exe')) || existsSync(resolve(process.env.ProgramW6432 || pf, 'nodejs', 'node.exe'))) {
             const noPath = await go(await mk('nopath', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true), { PATH: resolve(process.env.SystemRoot || 'C:\\Windows', 'System32') });
-            check('[6b] GRN-132: with node missing from the process PATH (a Node installed after Streamer.bot started) the action still finds it (registry or Program Files) and starts the bridge', /INFO .*bridge already running/.test(noPath.out) && /RESULT True/.test(noPath.out) && !/node was not found/.test(noPath.out), noPath.out.slice(0, 300));
+            check('[6b] GRN-132: with node missing from the process PATH (a Node installed after Streamer.bot started) the first launch fails with "not found" (Win32 error 2), and the retry with the Node found in the usual places starts the bridge', /INFO .*bridge already running/.test(noPath.out) && /RESULT True/.test(noPath.out) && !/node was not found/.test(noPath.out), noPath.out.slice(0, 300));
+            const notFound = await go(await mk('nonode', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true), { PATH: resolve(process.env.SystemRoot || 'C:\\Windows', 'System32'), TEST_NO_NODE: '1' });
+            check('[6b] GRN-132: with node missing from PATH and from the usual places the message says node was not found in Streamer.bot\'s PATH and to restart Streamer.bot or use the .bat (false)', /WARN .*node was not found in Streamer\.bot's PATH.*restart Streamer\.bot.*start-discord-bridge\.bat/.test(notFound.out) && /RESULT False/.test(notFound.out), notFound.out.slice(0, 300));
+            // a Node that the user put first in PATH wins over the one in Program Files: a fake node.exe (it exits 7) in a PATH folder is the one that runs
+            const fakeDir = resolve(cdir, 'fakebin');
+            await mkdir(fakeDir, { recursive: true });
+            await writeFile(resolve(cdir, 'fakenode.cs'), 'public static class FakeNode { public static int Main() { return 7; } }');
+            const fb = await runExe(CSC, ['/nologo', '/noconfig', '/nostdlib+', '/r:' + MSCORLIB, '/target:exe', '/out:' + resolve(fakeDir, 'node.exe'), resolve(cdir, 'fakenode.cs')]);
+            const pathFirst = await go(await mk('pathfirst', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true), { PATH: fakeDir + ';' + resolve(process.env.SystemRoot || 'C:\\Windows', 'System32') });
+            check('[6b] GRN-132: a node.exe the user put first in PATH is the one that runs (the Program Files copy is only the fallback): the fake node.exe that exits 7 is reported', fb.code === 0 && /WARN .*bridge exited with code 7/.test(pathFirst.out) && /RESULT False/.test(pathFirst.out), JSON.stringify({ fb: fb.out.slice(0, 200), out: pathFirst.out.slice(0, 300) }));
           } else console.log('  (the node-search check of [6b] is skipped: Node is not under Program Files on this machine)');
           await new Promise((r) => setTimeout(r, 3200)); // (the stub that stays up for 2.6 s has ended by now: its folder can go)
         }
@@ -3743,7 +3762,7 @@ async function main() {
     await rm(resolve(__dirname, '.verify-backup.json'), { force: true });
     await rm(resolve(__dirname, '.verify-backup-object.json'), { force: true });
     await rm(resolve(__dirname, '.verify-backup-oor.json'), { force: true });
-    for (const d of scratchDirs) await rm(d, { recursive: true, force: true });
+    for (const d of scratchDirs) await rm(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 }); // (a hidden child may still hold a folder for a moment)
   }
 
   console.log(`\n${failed === 0 ? 'ALL GREEN' : 'FAILURES'}: ${passed} passed, ${failed} failed`);

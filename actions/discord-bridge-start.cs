@@ -8,7 +8,7 @@
 //   2. Streamer.bot -> Actions -> add an action named "Discord Bridge Start";
 //      sub-action Core -> C# -> Execute C# Code; paste everything below.
 //   3. THE REFERENCES STEP (required): compiling as-is fails with
-//        CS0246 'ProcessStartInfo' could not be found / CS0103 'Process' does not exist
+//        CS0234 'ComponentModel' ... / CS0246 'Process' (or 'ProcessStartInfo') could not be found
 //      because Streamer.bot 1.0.4 does not reference System.dll by default. Fix: in
 //      the C# editor open the References tab (next to the Compiling Log) and add
 //      System.dll (browse to C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.dll
@@ -18,23 +18,32 @@
 //      start. No trigger? Run the action manually once per session.
 //
 // UseShellExecute = true is LOAD-BEARING: launching via the shell does NOT pass SB's
-// open listening sockets (WS :8080 / HTTP :7474) to the node child. With false, an
-// orphaned bridge after ANY Streamer.bot exit that does not close it (a crash, a kill,
-// not only an unclean one) keeps those ports bound and SB cannot restart its servers
-// until the child is killed. Because of it this action cannot set environment variables
-// for node, and in the same way do NOT start the bridge with a "Run a Program"
-// sub-action that sets some, or that waits for the program to exit.
+// open listening sockets (WS :8080 / HTTP :7474) to the node child. With false, a
+// bridge that outlives Streamer.bot (after a normal close as well as a crash or a kill)
+// keeps those ports bound and SB cannot restart its servers until the child is killed.
+// Because of it this action cannot set environment variables for node, and in the same
+// way do NOT start the bridge with a "Run a Program" sub-action that sets some, or that
+// waits for the program to exit.
 //
 // Before it starts anything it checks that BUNDLE is set and is the sidecar folder with
-// its dependencies installed, and says so in the log if not. It finds node.exe itself
-// (the Node.js registry key, then Program Files, then the Machine and User PATH), so a
-// Node installed after Streamer.bot started is found; if node still cannot be found,
-// restart Streamer.bot (it reads PATH once, when it starts) or use the .bat. It waits two
-// seconds for the process: a bridge that exits at once is reported with its exit code.
+// its dependencies installed, and says so in the log if not. It starts "node" as Windows
+// finds it (Streamer.bot's own PATH, so a Node you put first in PATH wins); only if that
+// fails because node.exe is not found there (a Node installed after Streamer.bot started
+// is not in Streamer.bot's copy of PATH) does it look in the Node.js registry key, then
+// Program Files, then the freshly read Machine and User PATH, and start the node.exe it
+// finds by its full path. If node still cannot be found, restart Streamer.bot (it reads
+// PATH once, when it starts) or use the .bat. nvm-windows, volta and fnm are not covered.
+//
+// It waits two seconds for the process: a bridge that exits within that time is reported
+// with its exit code (a missing package, Node older than 22.12, or "already running").
+// A refusal that takes longer, such as the guard port :7495 held by another program or
+// by an older Greenroom bridge, is logged by the bridge itself, in its own hidden
+// window, after about five seconds: if no bridge appears, run start-discord-bridge.bat
+// to see why.
 //
 // Running it twice is harmless: the bridge binds a single-instance guard port
-// (:7495) — a second instance logs and exits 0 (reported here as "already running").
-// Requires Node >= 22.12.
+// (:7495) — a second instance logs and exits 0 if one of the same or a newer version
+// is already running (reported here as "already running"). Requires Node >= 22.12.
 
 using System;
 using System.ComponentModel;
@@ -51,6 +60,7 @@ public class CPHInline
 
     public bool Execute()
     {
+        string tried = "node"; // what was last asked to start (for the message when it fails)
         try
         {
             // Pre-flight: say what is wrong instead of launching something that fails silently.
@@ -75,42 +85,41 @@ public class CPHInline
                 return false;
             }
 
-            // node.exe: the full path when it can be found (a Node installed after Streamer.bot started is not on its PATH), else "node".
-            string node = FindNode();
+            // "node" as Windows resolves it first; the full path of a Node found in the usual places only when that is not found.
             Process p = null;
             try
             {
-                p = Launch(node ?? "node");
+                p = Launch(tried);
             }
             catch (Win32Exception w)
             {
                 if (w.NativeErrorCode != 2) throw;
-                // not found: look again (Node may have been installed meanwhile), and retry with the full path if there is one now
-                string again = FindNode();
-                if (again == null) throw;
-                p = Launch(again);
+                string found = FindNode();
+                if (found == null) throw;
+                tried = found;
+                p = Launch(found);
             }
 
-            // A bridge that is going to refuse to start (a missing package, Node too old, the guard port held) exits within a moment.
+            // A bridge that is going to refuse to start (a missing package, Node too old, a guard it loses) exits within a moment.
             if (p != null && p.WaitForExit(2000))
             {
                 int code = p.ExitCode;
                 if (code == 0)
                 {
-                    CPH.LogInfo("[Discord Bridge Start] bridge already running (the single-instance guard found one of the same version): nothing launched");
+                    CPH.LogInfo("[Discord Bridge Start] bridge already running (the single-instance guard found one of the same or a newer version): nothing launched");
                     return true;
                 }
                 CPH.LogWarn("[Discord Bridge Start] bridge exited with code " + code + " — run start-discord-bridge.bat to see the error");
                 return false;
             }
-            CPH.LogInfo("[Discord Bridge Start] launched node discord-bridge.mjs in " + BUNDLE);
+            CPH.LogInfo("[Discord Bridge Start] launched node discord-bridge.mjs in " + BUNDLE + " (it was still running after 2 s; if no bridge appears, run start-discord-bridge.bat to see why)");
             return true;
         }
         catch (Win32Exception w2)
         {
             CPH.LogWarn("[Discord Bridge Start] ERROR: " + (w2.NativeErrorCode == 2
                 ? "node was not found in Streamer.bot's PATH or the usual Node.js places — if you installed Node after starting Streamer.bot, restart Streamer.bot, or start the bridge with start-discord-bridge.bat"
-                : w2.Message));
+                : "could not start " + tried + ": " + w2.Message));
             return false;
         }
         catch (Exception ex)

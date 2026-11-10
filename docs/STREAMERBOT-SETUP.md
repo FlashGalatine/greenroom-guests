@@ -128,19 +128,27 @@ Streamer.bot's persisted `vdo.state`.
    action then logs "BUNDLE is still the placeholder" and starts nothing) to your
    `…\greenroom-guests\sidecar` path. The action checks that the folder exists, holds
    `discord-bridge.mjs` and has `node_modules`, and logs which one is wrong; it finds
-   `node.exe` itself (the Node.js registry key, `%ProgramFiles%\nodejs`, then the
-   Machine and User PATH), waits two seconds, and reports a bridge that exits at once
-   with its exit code ("bridge already running" for a clean exit 0).
-2. Compiling as-is fails with `CS0246 'ProcessStartInfo'` / `CS0103 'Process'` —
-   SB 1.0.4 doesn't reference `System.dll` by default. In the C# editor open the
+   Node as Windows finds it (Streamer.bot's own PATH first); only if `node` is not found
+   there does it look for `node.exe` in the Node.js registry key, `%ProgramFiles%\nodejs`
+   and the freshly read Machine and User PATH. It then waits two seconds and reports a
+   bridge that exits in that time with its exit code ("bridge already running" for a
+   clean exit 0: one of the same or a newer version holds the guard). A refusal that
+   takes longer, such as the guard port held by another program or by an older bridge,
+   is logged by the bridge itself in its hidden window after about five seconds: the
+   action says "launched", so if no bridge appears run `start-discord-bridge.bat` to see why.
+2. Compiling as-is fails with `CS0234 'ComponentModel'` / `CS0246 'Process'` (or
+   `'ProcessStartInfo'`) — SB 1.0.4 doesn't reference `System.dll` by default. In the C# editor open the
    **References** tab (next to the Compiling Log) and add `System.dll` (browse to
    `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.dll` if needed). Compile → green.
 3. Optional auto-start: in the action's **Triggers** box search "start" and add
    your SB version's application-started trigger.
 4. `UseShellExecute = true` in that action is load-bearing: with `false` the node
-   child inherits SB's listening sockets (WS :8080 / HTTP :7474), and after an
-   unclean SB exit the orphaned child keeps those ports bound so SB can't restart
-   its servers until the child is killed.
+   child inherits SB's listening sockets (WS :8080 / HTTP :7474), and after any SB
+   exit that does not close the bridge (a normal close too, unless exit-on-SB-close is
+   on, as well as a crash or a kill) the child keeps those ports bound so SB can't
+   restart its servers until the child is killed. For the same reason do not start the
+   bridge with a "Run a Program" sub-action that sets environment variables or waits
+   for the program to exit.
 
 ## 3. OBS sources
 
@@ -242,8 +250,9 @@ Webcam-only users skip this whole section — nothing else depends on it.
 1. `cd sidecar && npm install` (Node **≥ 22.12**; the only place the discord.js
    stack exists). If you start the bridge with the `Discord Bridge Start` action,
    **restart Streamer.bot after installing Node**: it reads its PATH only when it
-   starts (the action also looks for Node in the registry and Program Files, so a
-   Node installed under nvm-windows, volta or fnm is the case it cannot find).
+   starts (the action also looks in the registry, Program Files and the saved
+   Machine and User PATH; a version manager that changes PATH only per shell, such
+   as fnm, is not covered: restart Streamer.bot or use the `.bat`).
 2. Create a bot at https://discord.com/developers/applications → Bot. It needs
    only the non-privileged **Guilds** + **Guild Voice States** intents (nothing
    to toggle for those) and, on the target channel, **View Channel + Connect**
