@@ -2345,6 +2345,12 @@ async function main() {
             md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
             const carol = await t.waitFor((p) => p.users['2002'] && /\/guilds\/900\//.test(p.users['2002'].avatarUrl), 3000) || t.last;
             check('GRN-166: a member with a per-server avatar shows it (the guild avatar path), not the account avatar', !!carol && !!carol.users['2002'] && /\/guilds\/900\/users\/2002\/avatars\/abc123def/.test(carol.users['2002'].avatarUrl), JSON.stringify(carol && carol.users['2002']));
+            // a member who mutes or deafens themselves shows it (the voice state's self flags count, not only the server's), mutant M80
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { selfMute: true, member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
+            const carolMuted = await t.waitFor((p) => p.users['2002'] && p.users['2002'].mute === true && p.users['2002'].deaf === false, 3000);
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { selfMute: true, selfDeaf: true, member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
+            const carolDeaf = await t.waitFor((p) => p.users['2002'] && p.users['2002'].deaf === true, 3000);
+            check('GRN-12/210 (M80): a member who mutes, then deafens, themselves shows mute, then deaf, in the roster', !!carolMuted && !!carolDeaf, JSON.stringify(t.last.users['2002']));
             md.dispatchAll('VOICE_STATE_UPDATE', vstate('2001', '914'));
             await nap(600);
             check('GRN-210: a member who moves to another channel leaves the roster of the working channel', !t.last.users['2001'] && !!t.last.users['2002'], JSON.stringify(Object.keys(t.last.users)));
@@ -3791,7 +3797,7 @@ async function main() {
           ['a snapshot of a different kind', JSON.stringify({ kind: 'something-else', vdoninja: snapshot().vdoninja }), ['--yes']],
           ['a raw payload with no kind, without --force', JSON.stringify(snapshot().vdoninja), ['--yes']],
           ['a room that is not text', JSON.stringify(snapshot({ room: 42 })), ['--yes']],
-          ['slots that are not a list', JSON.stringify(snapshot({ slots: 'x' })), ['--yes']],
+          ['slots that are not a list', JSON.stringify(snapshot({ slots: 'x' })), ['--yes'], /no slots list/],
           ['a Discord ID written as a number (its digits are already rounded)', '{"kind":"greenroom-vdo-backup","vdoninja":' + JSON.stringify({ ...VDO_PAYLOAD, directory: [] }).replace('"discordUserId":""', '"discordUserId":123456789012345678') + '}', ['--yes']],
           ['a Discord ID written as a number inside a directory entry', '{"kind":"greenroom-vdo-backup","vdoninja":' + JSON.stringify({ ...VDO_PAYLOAD, directory: [{ vdoLabel: 'A', discordUserId: '1', displayName: 'A', socials: [] }] }).replace('"discordUserId":"1"', '"discordUserId":123456789012345678') + '}', ['--yes']],
           ['a slot entry that is not an object', JSON.stringify(snapshot({ slots: [null, ...VDO_PAYLOAD.slots.slice(1)] })), ['--yes']],
@@ -3799,11 +3805,12 @@ async function main() {
           ['a good snapshot, but no --yes', JSON.stringify(snapshot()), []],
         ];
         const failed = [];
-        for (const [what, text, flags] of refusals) {
+        for (const [what, text, flags, say] of refusals) {
           const p = await put('refuse.json', text);
           const r = await bk(mA, ['restore', p, ...flags]);
           const pushes = (await actionsOf(mA)).filter((a) => a.name === 'VDO Push').length;
-          if (!(r.code !== 0 && pushes === 0 && (await stateRoom(mA)) === 'liveroom')) failed.push(what + ' -> code ' + r.code + ', pushes ' + pushes);
+          // (some refusals must also say why, in their own words: a crash with a stack trace refuses too, but tells the operator nothing; mutant M43)
+          if (!(r.code !== 0 && pushes === 0 && (await stateRoom(mA)) === 'liveroom' && (!say || say.test(r.out)))) failed.push(what + ' -> code ' + r.code + ', pushes ' + pushes + (say && !say.test(r.out) ? ', said: ' + r.out.trim().slice(0, 120) : ''));
         }
         check('restore refuses each of ' + refusals.length + ' unsafe or unconfirmed inputs (exit non-zero, nothing pushed, the live vdo.state unchanged)', failed.length === 0, JSON.stringify(failed));
         const p2 = await put('forced.json', JSON.stringify(snapshot().vdoninja));

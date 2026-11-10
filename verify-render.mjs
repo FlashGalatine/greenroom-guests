@@ -586,6 +586,44 @@ async function main() {
     check('?nameplate=0 → guest overlay renders video with NO plate ever created', gp0Rendering && gp0NoPlate);
     await gp0.close();
 
+    // GRN-218 (mutant M49): a slot with mirror ticked flips its picture (the frame is scaled by -1 horizontally); a slot without it does not
+    {
+      const mx = await startExtra({});
+      mx.prod.doAction('VDO Push', { payload: JSON.stringify({ ...NAMEPLATE_VDO, slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222', mirror: true }), slot(3), slot(4)] }) });
+      await sleep(300);
+      const m1 = await newPage(browser, { width: 640, height: 360 });
+      const m2 = await newPage(browser, { width: 640, height: 360 });
+      // (counts every write of the frame's src attribute, even one that stores the same value: the video of a live guest must not be reloaded by a push that changes nothing, mutant M51)
+      await m1.addInitScript(`document.addEventListener('DOMContentLoaded', () => { window.__srcMut = 0; new MutationObserver((rs) => { window.__srcMut += rs.length; }).observe(document.getElementById('frame'), { attributes: true, attributeFilter: ['src'] }); });`);
+      await m1.goto(`${mx.api.base}/overlay/vdoninja-guest.html?slot=1&nameplate=0&sbport=${mx.ws}`, { waitUntil: 'load' });
+      await m2.goto(`${mx.api.base}/overlay/vdoninja-guest.html?slot=2&nameplate=0&sbport=${mx.ws}`, { waitUntil: 'load' });
+      const up1 = await wait(m1, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=aaa111'), null, 8000);
+      const up2 = await wait(m2, () => (document.getElementById('frame')?.getAttribute('src') || '').includes('view=bbb222'), null, 8000);
+      const tr1 = await m1.evaluate(() => document.getElementById('frame').style.transform);
+      const tr2 = await m2.evaluate(() => document.getElementById('frame').style.transform);
+      check('GRN-218 (M49): a slot with mirror ticked flips its picture (scaleX(-1)); a slot without it does not', up1 && up2 && tr2 === 'scaleX(-1)' && tr1 !== 'scaleX(-1)', JSON.stringify({ up1, up2, tr1, tr2 }));
+      const writes0 = await m1.evaluate(() => window.__srcMut);
+      mx.prod.doAction('VDO Push', { payload: JSON.stringify({ ...NAMEPLATE_VDO, slots: [slot(1, { label: 'ALPHA', streamID: 'aaa111' }), slot(2, { label: 'BRAVO', streamID: 'bbb222', mirror: true }), slot(3), slot(4)] }) });
+      await sleep(1500);
+      const writes1 = await m1.evaluate(() => window.__srcMut);
+      check('GRN-218 (M51): a push that changes nothing for a live slot does not rewrite its frame (the guest\'s video is not reloaded)', writes0 >= 1 && writes1 === writes0, JSON.stringify({ writes0, writes1 }));
+      await m1.close(); await m2.close();
+    }
+    // GRN-218 (mutant M50): a Discord user with no picture shows Discord's default avatar number (id >> 22) % 6, computed with BigInt (this id gives 3; a shift by 20 gives 1)
+    {
+      const DID = '170000000000000000';
+      const dx = await startExtra({});
+      dx.prod.doAction('VDO Push', { payload: JSON.stringify({ ...NAMEPLATE_VDO, slots: [slot(1), slot(2), slot(3, { mode: 'discord', discordUserId: DID }), slot(4)] }) });
+      dx.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ users: { [DID]: { speaking: false, username: 'Odd One', mute: false, deaf: false } } }) });
+      await sleep(300);
+      const dp = await newPage(browser, { width: 640, height: 360 });
+      await dp.goto(`${dx.api.base}/overlay/vdoninja-guest.html?slot=3&nameplate=0&sbport=${dx.ws}`, { waitUntil: 'load' });
+      const defSrc = await wait(dp, () => (document.getElementById('dpfp')?.querySelector('img')?.getAttribute('src') || '').includes('embed/avatars'), null, 8000);
+      const src = await dp.evaluate(() => document.getElementById('dpfp')?.querySelector('img')?.getAttribute('src') || '');
+      check('GRN-218 (M50): a Discord user with no picture gets default avatar number (id >> 22) % 6 (3 for this id), not another', defSrc && src.endsWith('/embed/avatars/' + Number((BigInt(DID) >> 22n) % 6n) + '.png') && Number((BigInt(DID) >> 22n) % 6n) === 3, src);
+      await dp.close();
+    }
+
     // ── R7: sync guard — nothing is pushed before Streamer.bot returns the saved config ──
     // GRN-24 + GRN-154. Each scenario runs against its own mock instance with a test
     // option (slow Sync, empty cache, the empty marker), so the main mock's seeded
