@@ -9,6 +9,29 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.75] — 2026-11-09
+
+The Discord bridge reads and writes its files safely, holds its settings to one set of rules, and its dependencies are refreshed. The sidecar version is now 1.0.75.
+
+### Fixed
+
+- **A bad config or token file is never silently replaced.** The bridge reads UTF-8 and UTF-16 files, with or without a BOM (what PowerShell's `>` writes); a config that is not JSON, is `null`, is an array or is locked is **not** reseeded from the example: a copy is kept as `discord-voice-config.json.corrupt-<time>`, the bridge runs on its defaults, and when even the copy fails the file is left alone for the whole session. Only a **missing** config is seeded from the example. Temp files left by a crash are deleted at startup. Hand-edited favorites need 17 to 20 digit server and channel ids (a bare number keeps its exact digits); a repeated favorite id is made new.
+- **Saves are atomic and queued.** A config or token file is written to a temp file, flushed and renamed over the target (a few retries while something locks it, then a flushed in-place write), one at a time per file in the order commands arrived; the exit waits up to 2 seconds for a save in flight. A save that fails no longer stops the change: the pick, the favorite or the Connect is used all the same, and the status shows a sticky `rpc.configWarning` ("Could not save discord-voice-config.json (EPERM): the change is not kept after a restart") that goes when a later save works.
+- **The token file follows the file.** **Connect** re-reads `discord-tokens.json` every time: a corrected token is adopted, an empty one or a deleted file forgets the token, and a file that exists but is not valid JSON is reported as that (in fixed words), never as missing. The bridge never writes a token from memory: it reads the file, sets only `enabled` and writes the whole object back (so every other field survives), and never replaces a file it cannot parse. **Reset auth** now disables and stops the bot but does **not** blank the token in the file, so a forged bus command cannot erase it (delete the file by hand to forget it). Press Connect after editing the token.
+- **Writes cannot empty a file.** A temp file that cannot be written (a full disk) leaves the target alone; the in-place fallback is only for a rename that keeps failing, only for the config, and puts the old bytes back if it fails; the token file is never written in place. A token file the operator saves while an update of it is in flight is merged on top of, never overwritten with the older copy; a bare big integer in any field of it keeps its digits; a Connect that is still reading it gives way to a Reset auth sent after it; "enabled" counts only when it is true. A token file that is locked says so (not "not valid JSON"), and a bad or locked token file is a sticky warning that stays after the login.
+- **A bad config you fix by hand is not overwritten.** If a config was copied aside and the bridge runs on its defaults, a fix you make to the file meanwhile is left alone by the next save (the warning says to stop the bridge first and restart it). Favorites that a restart skips (a server or channel id that is not 17 to 20 digits) are named in the warning and the file is kept as a copy; favorite-add and favorite-update hold a favorite to the same rule, so nothing is saved that the loader would drop.
+- **Settings and favorites are held to one set of rules** (`sidecar/settings.mjs`, shared with the mock bridge later): only known keys are taken, a wrong type changes nothing (null, an empty string or a boolean is not a size), `exitOnSbClose` turns on only for a real true, a bare-number `streamerUserId` keeps its digits, and the unused `height` setting is gone. A favorite change that would leave it without a server or a channel is refused and says so; a repeated Save adds no duplicate; a name over 80 characters is cut by code point, never through an emoji.
+
+### Changed
+
+- **Dependencies refreshed** (`npm update` in `sidecar/`): discord.js 14.28.1, ws 8.22.2 and the fixed undici 6.29.1 (`npm audit` reports 0 vulnerabilities; the floor is now `^14.28.0` so an old lock cannot return). `start-discord-bridge.bat` now stops with a message if the folder is missing, checks that `ws`, `discord.js` and `@discordjs/voice` can be found, reinstalls with `npm ci` when they cannot or when `package-lock.json` changed since the last good install, and treats any failing exit code of npm as a failure. It never installs under a running bridge (a new file, `sidecar/guard-probe.mjs`, asks the guard port first: a running bridge has its packages loaded and an install under it would leave `node_modules` half deleted), and it works in a folder whose name contains a ")".
+- Documented splits: the overlay half of the id and size rules (the roster overlay's `String(...).trim()` and px clamps) is Sprint 15 (GRN-140); the control page's half (GRN-112, the "Reset auth" button now labelled "Disable bot", the `rpc.configWarning` line) is Sprint 16.
+
+### Added
+
+- Tests: `verify` section [8e] (BOM, UTF-16, literal null, array, number, empty and half files, a config that is a folder, stale temp files, a missing config, a burst of saves followed by Quit, a failed write and its recovery, wrong-type settings at load and on the bus, bad, short, bare-number and repeated favorite ids, a name with an emoji across the cut, a repeated Save, a refused favorite update, a corrected token file, a deleted one, one that is not valid JSON, BOM and UTF-16 token files, an empty token, a read-only token file, reset-auth) and section [7b] (a random canary token in the token file appears in no frame, state, action, log or config, and survives reset-auth). The mock Discord records the token each login used; the labels that claimed a bus guarantee about the token are reworded.
+
+**Deploy:** **stop the running bridge first** (close its window, or send `quit`), copy the `sidecar/` folder (it now has a new file, `settings.mjs`) and `start-discord-bridge.bat`, then run `npm --prefix sidecar ci` (or just start `start-discord-bridge.bat`, which now installs what is missing or stale) and start the bridge again. Nothing to re-paste; no page reload. The control page and the overlays are unchanged. **Not yet checked live** (they need a real bot token and a throwaway voice channel): one login, one voice join and speaking events with the refreshed discord.js stack. `verify` 503/503, `verify:render` 357/357.
 ## [1.0.72] — 2026-11-09
 
 The Discord bridge keeps itself in its voice channel, and follows Discord when the connection drops, resumes or restarts. The sidecar version is now 1.0.72.
@@ -483,6 +506,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.75]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.72...v1.0.75
 [1.0.72]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.69...v1.0.72
 [1.0.69]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.66...v1.0.69
 [1.0.66]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.63...v1.0.66
