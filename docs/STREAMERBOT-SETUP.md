@@ -124,7 +124,13 @@ Streamer.bot's persisted `vdo.state`.
   password.
 
 **Discord Bridge Start extras** (skip for webcam-only setups):
-1. Edit the `BUNDLE` const to your `…\Greenroom\sidecar` path.
+1. Edit the `BUNDLE` const (it reads `C:\path\to\greenroom-guests\sidecar` until you do, and the
+   action then logs "BUNDLE is still the placeholder" and starts nothing) to your
+   `…\greenroom-guests\sidecar` path. The action checks that the folder exists, holds
+   `discord-bridge.mjs` and has `node_modules`, and logs which one is wrong; it finds
+   `node.exe` itself (the Node.js registry key, `%ProgramFiles%\nodejs`, then the
+   Machine and User PATH), waits two seconds, and reports a bridge that exits at once
+   with its exit code ("bridge already running" for a clean exit 0).
 2. Compiling as-is fails with `CS0246 'ProcessStartInfo'` / `CS0103 'Process'` —
    SB 1.0.4 doesn't reference `System.dll` by default. In the C# editor open the
    **References** tab (next to the Compiling Log) and add `System.dll` (browse to
@@ -234,7 +240,10 @@ in a slot, make way first; entries you named never do).
 Webcam-only users skip this whole section — nothing else depends on it.
 
 1. `cd sidecar && npm install` (Node **≥ 22.12**; the only place the discord.js
-   stack exists).
+   stack exists). If you start the bridge with the `Discord Bridge Start` action,
+   **restart Streamer.bot after installing Node**: it reads its PATH only when it
+   starts (the action also looks for Node in the registry and Program Files, so a
+   Node installed under nvm-windows, volta or fnm is the case it cannot find).
 2. Create a bot at https://discord.com/developers/applications → Bot. It needs
    only the non-privileged **Guilds** + **Guild Voice States** intents (nothing
    to toggle for those) and, on the target channel, **View Channel + Connect**
@@ -422,6 +431,7 @@ enforced", it has none.
   `file://` Local-file source; use the `http://127.0.0.1:7474/...` URL field.
 - **SB can't restart its WS/HTTP server after a crash** → an orphaned helper
   child is holding the sockets; kill stray `node.exe` (see §2 UseShellExecute).
+- **`Discord Bridge Start` logs a warning and no bridge appears** → the log line says which: `BUNDLE is still the placeholder` or `BUNDLE does not exist` (edit the `BUNDLE` const and compile again), `discord-bridge.mjs is not in …` (BUNDLE is not the sidecar folder), `node_modules is missing` (run `npm install` in `sidecar/` or run `start-discord-bridge.bat` once), `node was not found` (restart Streamer.bot after installing Node, or use the .bat), `bridge exited with code N` (run `start-discord-bridge.bat` to see the error). An older copy of the action logs `launched` in the first three cases and starts nothing: re-paste it.
 - **Bridge exits immediately** → it says why in its log. Another program, or a
   Greenroom bridge older than this release (it sends no banner), holds the guard
   port `:7495` ("held by another program or by a Greenroom bridge older than this

@@ -1411,6 +1411,107 @@ async function main() {
     check('discord-voice-command.cs: broadcasts discord:voice:command', cmd.includes('discord:voice:command'));
     const launcher = await cs('discord-bridge-start.cs');
     check('discord-bridge-start.cs: UseShellExecute = true (socket-inheritance guard)', launcher.includes('UseShellExecute = true'));
+    // ── 6b. the two launching actions, compiled and run (Sprint 18: GRN-21, 132, 10, 16, 142, 202) ──
+    console.log('\n[6b] Discord Bridge Start and Discord Voice Command: pre-flight, the node search, the launch report, the sanitised log line (C# 5 with the .NET Framework csc and a stubbed CPH)');
+    {
+      const launcherRaw = (await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8')).replace(/\r\n/g, '\n');
+      check('discord-bridge-start.cs: BUNDLE is the placeholder C:\\path\\to\\greenroom-guests\\sidecar (no one\'s own path), UseShellExecute stays true and is never false, and the launch waits 2 s for an early exit',
+        /const string BUNDLE = @"C:\\path\\to\\greenroom-guests\\sidecar";/.test(launcher) && !/StreamerGraphics/.test(launcherRaw) && launcher.includes('UseShellExecute = true') && !/UseShellExecute\s*=\s*false/.test(launcher) && launcher.includes('WaitForExit(2000)'));
+      check('discord-bridge-start.cs: the pre-flight (BUNDLE exists, discord-bridge.mjs in it, node_modules in it) comes before Process.Start, and node is looked up in the registry key, Program Files and the Machine and User PATH',
+        before(launcher, 'Directory.Exists(BUNDLE)', 'Process.Start(psi)') && before(launcher, 'File.Exists(Path.Combine(BUNDLE, "discord-bridge.mjs"))', 'Process.Start(psi)') && before(launcher, 'Directory.Exists(Path.Combine(BUNDLE, "node_modules"))', 'Process.Start(psi)')
+        && launcher.includes('SOFTWARE\\Node.js') && launcher.includes('InstallPath') && launcher.includes('"ProgramFiles"') && launcher.includes('EnvironmentVariableTarget.Machine') && launcher.includes('EnvironmentVariableTarget.User'));
+      check('discord-bridge-start.cs: the header says "any" Streamer.bot exit (not only an unclean one) and warns against Run a Program with environment variables or Wait for Exit (GRN-142)',
+        /orphaned bridge after ANY Streamer\.bot exit/.test(launcherRaw) && /Run a Program/.test(launcherRaw) && /waits for the program to exit/.test(launcherRaw));
+      const cmdSrc = await cs('discord-voice-command.cs');
+      check('discord-voice-command.cs: the log line is sanitised and capped (Safe), and the command itself is not concatenated into a log call as it came (GRN-16)',
+        cmdSrc.includes('Safe(command, 40)') && !/Log(Info|Warn)\([^;]*\+\s*command\s*\)/.test(cmdSrc) && !/Log(Info|Warn)\([^;]*\+\s*ex\s*\)/.test(cmdSrc));
+
+      const CSC = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
+      if (!existsSync(CSC)) {
+        console.log('  (the compile-and-run checks of [6b] are skipped: no .NET Framework csc.exe on this machine)');
+      } else {
+        const cdir = await mkdtemp(resolve(tmpdir(), 'greenroom-cs18-'));
+        scratchDirs.push(cdir);
+        const STUB = [
+          'using System;',
+          'public class StubCPH {',
+          '  public bool TryGetArg<T>(string name, out T value) { string s = Environment.GetEnvironmentVariable("ARG_" + name); if (s == null) { value = default(T); return false; } value = (T)(object)s; return true; }',
+          '  public void LogInfo(string s) { Console.WriteLine("INFO " + s); }',
+          '  public void LogWarn(string s) { Console.WriteLine("WARN " + s); }',
+          '  public void WebsocketBroadcastJson(string j) { Console.WriteLine("BROADCAST " + j); }',
+          '}',
+          'public class CPHInlineBase { public StubCPH CPH = new StubCPH(); }',
+          'public static class HarnessMain { public static int Main(string[] a) { var i = new CPHInline(); bool ok = i.Execute(); Console.WriteLine("RESULT " + ok); return 0; } }',
+        ].join('\n');
+        await writeFile(resolve(cdir, 'stub.cs'), STUB);
+        const runExe = (exe, args, env) => new Promise((res) => {
+          const child = spawn(exe, args, { cwd: cdir, stdio: ['ignore', 'pipe', 'pipe'], env: env || process.env });
+          let out = ''; child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => (out += d)); child.stderr.setEncoding('utf8'); child.stderr.on('data', (d) => (out += d));
+          const timer = setTimeout(() => { try { child.kill(); } catch {} }, 20000);
+          child.on('exit', (code) => { clearTimeout(timer); res({ code, out }); });
+          child.on('error', (e) => { clearTimeout(timer); res({ code: -1, out: String(e && e.message) }); });
+        });
+        const build = async (name, src) => {
+          const body = '\uFEFF' + src.replace(/\r\n/g, '\n').replace('public class CPHInline', 'public class CPHInline : CPHInlineBase');
+          await writeFile(resolve(cdir, name + '.cs'), body);
+          const r = await runExe(CSC, ['/nologo', '/target:exe', '/out:' + resolve(cdir, name + '.exe'), resolve(cdir, name + '.cs'), resolve(cdir, 'stub.cs')]);
+          return { ok: r.code === 0, out: r.out, exe: resolve(cdir, name + '.exe') };
+        };
+        const lines = (o) => o.split(/\r?\n/).filter(Boolean);
+
+        // Discord Voice Command
+        const vc = await build('voicecmd', await readFile(resolve(__dirname, 'actions', 'discord-voice-command.cs'), 'utf8'));
+        check('[6b] discord-voice-command.cs compiles (C# 5, stubbed CPH)', vc.ok, vc.out.slice(0, 400));
+        if (vc.ok) {
+          const evil = 'leave\r\nINFO forged line \u0007 ' + 'x'.repeat(200);
+          const r = await runExe(vc.exe, [], { ...process.env, ARG_command: evil, ARG_value: 'v' });
+          const L = lines(r.out);
+          const info = L.filter((l) => l.startsWith('INFO '));
+          const bc = L.find((l) => l.startsWith('BROADCAST ')) || '';
+          check('[6b] GRN-16: a command with a line break and a bell in it is logged as ONE line, control characters as spaces, cut at 40 characters; the broadcast still carries it whole',
+            info.length === 1 && /^INFO \[Discord Voice Command\] leave +INFO forged line/.test(info[0]) && info[0].length <= 'INFO [Discord Voice Command] '.length + 43 && info[0].endsWith('...') && !L.some((l) => l.startsWith('INFO forged'))
+            && bc.includes('\\r\\n') && bc.includes('x'.repeat(200)) && /RESULT True/.test(r.out), JSON.stringify(L).slice(0, 500));
+          const none = await runExe(vc.exe, [], { ...process.env });
+          check('[6b] discord-voice-command.cs: no command argument is a warning, an error broadcast and false', /WARN \[Discord Voice Command\] called without a 'command'/.test(none.out) && /discord:voice:error/.test(none.out) && /RESULT False/.test(none.out), none.out.slice(0, 300));
+        }
+
+        // Discord Bridge Start, as shipped: the placeholder BUNDLE
+        const shipped = await build('bridgestart', await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8'));
+        check('[6b] discord-bridge-start.cs compiles (C# 5, stubbed CPH)', shipped.ok, shipped.out.slice(0, 400));
+        if (shipped.ok) {
+          const r = await runExe(shipped.exe, [], process.env);
+          check('[6b] GRN-10/21: as shipped (BUNDLE still the placeholder) it logs "set BUNDLE" and starts nothing', /WARN \[Discord Bridge Start\] BUNDLE is still the placeholder/.test(r.out) && /RESULT False/.test(r.out), r.out.slice(0, 300));
+        }
+        // the same code with BUNDLE read from the environment, so each case can have its own folder
+        const forTest = (await readFile(resolve(__dirname, 'actions', 'discord-bridge-start.cs'), 'utf8')).replace(/const string BUNDLE = @"[^"]*";/, 'static readonly string BUNDLE = Environment.GetEnvironmentVariable("TEST_BUNDLE");');
+        const tb = await build('bridgetest', forTest);
+        check('[6b] discord-bridge-start.cs (BUNDLE from the environment) compiles', tb.ok, tb.out.slice(0, 400));
+        if (tb.ok) {
+          const base = resolve(cdir, 'sidecar-cases');
+          const mk = async (name, files, withModules) => { const d = resolve(base, name); await mkdir(d, { recursive: true }); for (const [f, t] of Object.entries(files)) await writeFile(resolve(d, f), t); if (withModules) await mkdir(resolve(d, 'node_modules'), { recursive: true }); return d; };
+          const go = (dir, env) => runExe(tb.exe, [], { ...process.env, TEST_BUNDLE: dir, ...(env || {}) });
+          const none = await go(resolve(base, 'does-not-exist'));
+          const empty = await go(await mk('empty', {}, false));
+          const noMods = await go(await mk('nomods', { 'discord-bridge.mjs': 'process.exit(0);\n' }, false));
+          const already = await go(await mk('exit0', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true));
+          const failing = await go(await mk('exit3', { 'discord-bridge.mjs': 'process.exit(3);\n' }, true));
+          const running = await go(await mk('stays', { 'discord-bridge.mjs': 'setTimeout(() => {}, 2600);\n' }, true));
+          check('[6b] GRN-21: a BUNDLE that does not exist, one without discord-bridge.mjs and one without node_modules each log their own specific warning and return false (nothing is started)',
+            /WARN .*BUNDLE does not exist/.test(none.out) && /RESULT False/.test(none.out) && /WARN .*discord-bridge\.mjs is not in .*not the sidecar folder/.test(empty.out) && /RESULT False/.test(empty.out) && /WARN .*node_modules is missing.*npm install/.test(noMods.out) && /RESULT False/.test(noMods.out),
+            JSON.stringify([none.out, empty.out, noMods.out]).slice(0, 700));
+          check('[6b] GRN-21: a bridge that exits 0 at once is reported as already running (true); one that exits with code 3 is reported with the code and the .bat hint (false); one that stays up is "launched" (true)',
+            /INFO .*bridge already running/.test(already.out) && /RESULT True/.test(already.out) && /WARN .*bridge exited with code 3.*start-discord-bridge\.bat/.test(failing.out) && /RESULT False/.test(failing.out) && /INFO .*launched node discord-bridge\.mjs/.test(running.out) && /RESULT True/.test(running.out),
+            JSON.stringify([already.out, failing.out, running.out]).slice(0, 700));
+          const pf = process.env.ProgramFiles || 'C:\\Program Files';
+          if (existsSync(resolve(pf, 'nodejs', 'node.exe')) || existsSync(resolve(process.env.ProgramW6432 || pf, 'nodejs', 'node.exe'))) {
+            const noPath = await go(await mk('nopath', { 'discord-bridge.mjs': 'process.exit(0);\n' }, true), { PATH: resolve(process.env.SystemRoot || 'C:\\Windows', 'System32') });
+            check('[6b] GRN-132: with node missing from the process PATH (a Node installed after Streamer.bot started) the action still finds it (registry or Program Files) and starts the bridge', /INFO .*bridge already running/.test(noPath.out) && /RESULT True/.test(noPath.out) && !/node was not found/.test(noPath.out), noPath.out.slice(0, 300));
+          } else console.log('  (the node-search check of [6b] is skipped: Node is not under Program Files on this machine)');
+          await new Promise((r) => setTimeout(r, 3200)); // (the stub that stays up for 2.6 s has ended by now: its folder can go)
+        }
+      }
+    }
+
     const bridgeSrc = await readFile(resolve(__dirname, 'sidecar', 'discord-bridge.mjs'), 'utf8');
     check('sidecar: subscribes with LOWERCASE general', bridgeSrc.includes("events: { general: ['Custom'] }"));
     check("sidecar: pushes via DoAction 'Discord Voice Push'", bridgeSrc.includes("name: 'Discord Voice Push'"));

@@ -81,7 +81,9 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
    (docs/THEMING.md).
 
 **B — add Discord voice (roster overlay + voice-only slots):**
-1. `cd sidecar && npm install` (Node ≥ 22.12).
+1. `cd sidecar && npm install` (Node ≥ 22.12; if you start the bridge from Streamer.bot's
+   `Discord Bridge Start` action, **restart Streamer.bot after installing Node**: it reads its
+   PATH only when it starts).
 2. Create a bot (non-privileged Guilds + Guild Voice States intents; View
    Channel + Connect on the target channel), paste its token into
    `sidecar/discord-tokens.json` — file-only, never enters the control page.

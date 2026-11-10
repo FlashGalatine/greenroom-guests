@@ -37,15 +37,30 @@ public class CPHInline
             CPH.WebsocketBroadcastJson(
                 "{\"type\":\"discord:voice:command\",\"command\":" + JsonStr(command) +
                 ",\"value\":" + JsonStr(value) + "}");
-            CPH.LogInfo("[Discord Voice Command] " + command);
+            CPH.LogInfo("[Discord Voice Command] " + Safe(command, 40));
             return true;
         }
         catch (Exception ex)
         {
-            CPH.LogWarn("[Discord Voice Command] ERROR: " + ex);
+            CPH.LogWarn("[Discord Voice Command] ERROR: " + ex.GetType().Name + ": " + Safe(ex.Message, 200));
             CPH.WebsocketBroadcastJson("{\"type\":\"discord:voice:error\",\"message\":" + JsonStr(ex.Message) + "}");
             return false;
         }
+    }
+
+    // For the LOG only (the broadcast keeps the text exactly): any frame can reach this action, so a command with a line break in it must
+    // not forge a log line, and a very long one must not fill the log. Control characters (CR and LF included) become spaces and the text
+    // is cut at `max` characters.
+    static string Safe(string s, int max)
+    {
+        if (s == null) return "";
+        var sb = new StringBuilder();
+        foreach (char c in s)
+        {
+            if (sb.Length >= max) { sb.Append("..."); break; }
+            sb.Append(c < ' ' || c == '\u007f' ? ' ' : c);
+        }
+        return sb.ToString();
     }
 
     // Minimal, correct JSON string encoder (escapes quotes, backslashes, controls).
