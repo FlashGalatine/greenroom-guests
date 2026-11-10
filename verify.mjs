@@ -1668,9 +1668,9 @@ async function main() {
       check('GRN-234: ids with letters or dashes in them are stored as their digits', !!messy && messy.serverId === '12345678901234567' && messy.channelId === '23456789012345678', JSON.stringify(messy));
       c = await cmd7('favorite-remove', { id: messy && messy.id });
       check('GRN-234: favorite-remove takes exactly that favorite out of the file', !c.favorites.some((f) => f.name === 'Messy') && c.favorites.length === n0 + 1, JSON.stringify(c.favorites.map((f) => f.name)));
-      c = await cmd7('set-settings', { avatarPx: -5, streamerPx: 9999, height: 'abc', accent: '<script>', bogus: 1 });
-      check('GRN-234: set-settings clamps the sizes (24 and 160), leaves the accent alone for a value that is not one of the three, and saves neither "height" nor an unknown key',
-        c.settings.avatarPx === 24 && c.settings.streamerPx === 160 && c.settings.accent === 'neon-green' && !('height' in c.settings) && !('bogus' in c.settings), JSON.stringify(c.settings));
+      c = await cmd7('set-settings', { avatarPx: -5, streamerPx: 9999, height: 'abc', accent: '<script>', bogus: 1, streamerUserId: '<@100000000000000001>' });
+      check('GRN-234: set-settings clamps the sizes (24 and 160), leaves the accent alone for a value that is not one of the three, saves a pasted "<@id>" as its digits, and saves neither "height" nor an unknown key',
+        c.settings.avatarPx === 24 && c.settings.streamerPx === 160 && c.settings.accent === 'neon-green' && c.settings.streamerUserId === '100000000000000001' && !('height' in c.settings) && !('bogus' in c.settings), JSON.stringify(c.settings));
     }
 
     // ── 8. exit-on-SB-close lifecycle: closing SB leaves voice + quits (opt-in) ──
@@ -2290,6 +2290,15 @@ async function main() {
             md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910'));
             await nap(600);
             check('GRN-210: a voice-state frame with no member object does not add a nameless row (an id nobody knows, the bot itself)', !t.last.users['4001'] && !t.last.users[ME], JSON.stringify(Object.keys(t.last.users)));
+            // a bot member that joins the working channel is never listed (the frame's member says it is a bot); a human right after it is
+            // (so the frames were processed), GRN-171 / mutant M82
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('3007', '910', { member: mem('3007', 'helperbot', { bot: true }) }));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2004', '910', { member: mem('2004', 'erin') }));
+            const erin = await t.waitFor((p) => p.users['2004'], 3000);
+            await nap(300);
+            check('GRN-12/210: a bot that joins the working channel is not listed, and a human who joins right after it is', !!erin && !t.last.users['3007'] && !!t.last.users['2004'], JSON.stringify(Object.keys(t.last.users)));
+            md.dispatchAll('VOICE_STATE_UPDATE', vstate('2004', null, { member: mem('2004', 'erin') })); // (and she leaves again: the cases below count on the roster as it was)
+            await nap(400);
             // a member with a per-server avatar joins, a member departs (GRN-166)
             md.dispatchAll('VOICE_STATE_UPDATE', vstate('2002', '910', { member: memberOf('2002', 'carol', { global: 'Carol', guildAvatar: 'abc123def' }) }));
             const carol = await t.waitFor((p) => p.users['2002'] && /\/guilds\/900\//.test(p.users['2002'].avatarUrl), 3000) || t.last;

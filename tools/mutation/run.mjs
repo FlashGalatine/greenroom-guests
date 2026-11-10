@@ -16,6 +16,8 @@
 //   --jobs=N    N copies in parallel (default 3); each one runs a suite at a time, so N verify runs (and N browsers) are alive at once
 //   --repeat=N  run each chosen mutant N times (a repeatable kill needs N kills: `--only=M18 --repeat=5`)
 //   --out=FILE  append one JSON line per result to FILE (default: <tmp>/greenroom-mutation/results.jsonl)
+//   --skip=FILE do not run the mutants that FILE (a results file of an earlier run) already settles (KILLED or SURVIVED)
+//   --confirm=0 do not run a kill a second time (halves the cost of a kill; a kill whose check names look like load, not logic, is then yours to re-run)
 //   --keep      do not delete the copies afterwards
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -34,6 +36,8 @@ const ONLY = String(opt('only', '')).split(',').map((s) => s.trim()).filter(Bool
 const JOBS = Math.max(1, Number(opt('jobs', 3)) || 3);
 const REPEAT = Math.max(1, Number(opt('repeat', 1)) || 1);
 const KEEP = !!opt('keep', false);
+const CONFIRM = String(opt('confirm', '1')) !== '0';
+const SKIP_FILE = String(opt('skip', ''));
 const WORK = mkdirSync(join(tmpdir(), 'greenroom-mutation'), { recursive: true }) || join(tmpdir(), 'greenroom-mutation');
 const OUT = String(opt('out', join(WORK, 'results.jsonl')));
 const TIMEOUT = { verify: 25 * 60_000, render: 60 * 60_000, cs: 5 * 60_000 };
@@ -58,7 +62,11 @@ function parses(file, text) {
   } catch (e) { return String(e.message).slice(0, 160); }
 }
 
-const todo = MUTANTS.filter((m) => !m.skip && (!ONLY.length || ONLY.includes(m.id)));
+const settled = new Set();
+if (SKIP_FILE && existsSync(SKIP_FILE)) {
+  for (const line of readFileSync(SKIP_FILE, 'utf8').split('\n').filter(Boolean)) { try { const r = JSON.parse(line); if (r.status === 'KILLED' || r.status === 'SURVIVED') settled.add(r.id); } catch { /* a torn line */ } }
+}
+const todo = MUTANTS.filter((m) => !m.skip && (!ONLY.length || ONLY.includes(m.id)) && !settled.has(m.id));
 if (CHECK) {
   let bad = 0;
   for (const m of todo) {
@@ -138,7 +146,7 @@ async function worker(slot, queue) {
       try {
         const t0 = Date.now();
         let run = await oneRun(slot, m);
-        if (run.status === 'KILLED') {
+        if (run.status === 'KILLED' && CONFIRM) {
           const again = await oneRun(slot, m); // a kill must reproduce
           run = again.status === 'KILLED' ? { ...run, confirmed: true } : { ...run, status: 'FLAKY', again: again.status };
         }
@@ -156,5 +164,9 @@ for (let i = 0; i < REPEAT; i++) queue.push(...todo);
 const n = Math.min(JOBS, queue.length);
 for (let k = 0; k < n; k++) slots.push(makeSlot(k));
 try { await Promise.all(slots.map((s) => worker(s, queue))); }
-finally { if (!KEEP) rmSync(SESSION, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 }); }
+finally {
+  // best effort: a hidden child of a killed run may hold a folder for a moment; the results are already written, so a copy that cannot
+  // be removed is reported (and removed by the next run's cleanup of the temp folder), never an error
+  if (!KEEP) { try { rmSync(SESSION, { recursive: true, force: true, maxRetries: 30, retryDelay: 300 }); } catch (e) { console.log(`left behind (remove it by hand): ${SESSION} (${e && e.code})`); } }
+}
 console.log('done');

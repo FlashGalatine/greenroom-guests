@@ -3126,17 +3126,20 @@ async function main() {
           { room: 'caf\u00e9', password: 'caf\u00e9', mode: 'hash', expect: /[?&]hash=0570(&|$)/ },
           { room: 'roomname', password: 'a&b c', mode: 'plaintext', expect: /[?&]password=a%2526b%2520c(&|$)/ },
         ];
-        const got = {};
+        const got = {}, mgr = {};
         for (const v of vec) {
           const sd = mkSeed({ room: v.room, password: v.password, invite: { passwordMode: v.mode } });
           const mx = await seededMock(sd);
           const mp = await openControl(mx, QUIET, sd);
           if (v.mode === 'hash') await wait(mp, () => /hash=/.test(document.getElementById('vdoInviteLink').value), null, 5000);
           got[v.room + '|' + v.password] = await link(mp);
+          mgr[v.room] = await mp.evaluate(() => document.getElementById('vdoManageLink').value);
           await mp.close();
         }
         check('R17h: the hash and plaintext invite links for a spaced room and password, a non-ASCII pair, and a password with & and a space are exactly the plan\'s',
           vec.every((v) => v.expect.test(got[v.room + '|' + v.password])) && /room=my%20room%2F1/.test(got['my room/1| p@ss word ']), JSON.stringify(got));
+        check('R17h4: the Manage (director) link encodes the room too: a room with a space and a slash is director=my%20room%2F1 (mutant M71), and a non-ASCII room is encoded as well',
+          /^https:\/\/vdo\.ninja\/\?director=my%20room%2F1(&|$)/.test(mgr['my room/1']) && /^https:\/\/vdo\.ninja\/\?director=caf%C3%A9(&|$)/.test(mgr['café']), JSON.stringify(mgr));
         const cx = await seededMock(mkSeed());
         const cp = await openControl(cx, QUIET, mkSeed());
         await cp.selectOption('#vdoInvCapture', 'webcam');
