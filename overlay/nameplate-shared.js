@@ -17,7 +17,8 @@ window.GRNameplate = (function () {
   // Provenance and licences of the glyphs (THIRD_PARTY_NOTICES.md has the notices):
   //   tiktok   Boxicons 2.1.4 (bxl-tiktok), MIT, Copyright (c) 2015-2021 Aniket Suvarna; the path is byte-identical to the Boxicons one.
   //   twitch   derived from the Boxicons 2.1.4 Twitch glyph (MIT, as above).
-  //   discord  Material Icons / Material Design Icons Discord glyph, Apache License 2.0.
+  //   discord  the Discord glyph of Google's Material Icons (github.com/google/material-design-icons), Apache License 2.0; same outline as
+  //            Iconify's `ic:baseline-discord` (not the Pictogrammers `mdi:discord`, a different drawing). Upstream copyright line unconfirmed.
   //   twitter (X), bluesky, youtube, instagram   source unconfirmed: the platforms' own marks are trademarks of their owners, drawn here only
   //            to say which service a handle is on (not affiliated with or endorsed by them). Replace with a confirmed-source glyph if in doubt.
   //   website  an original globe drawn for this kit.
@@ -243,7 +244,8 @@ window.GRNameplate = (function () {
   // Standard "icon + handle" renderer. Handle is HTML-escaped; platform is only
   // ever an ICONS key lookup.
   function socialSlide(s) {
-    return icon(s.platform) + '<span class="np-handle">' + escapeHtml(s.handle) + '</span>';
+    // dir="auto": a handle in a right-to-left script runs from the right, so a long one is cut (ellipsis) at its end, not its beginning.
+    return icon(s.platform) + '<span class="np-handle" dir="auto">' + escapeHtml(s.handle) + '</span>';
   }
 
   // ── Plate CSS + builder ─────────────────────────────────────────────────────
@@ -296,6 +298,7 @@ window.GRNameplate = (function () {
 
     const name = document.createElement('div');
     name.className = 'np-name';
+    name.dir = 'auto'; // (same reason as the handle's)
     const socials = document.createElement('div');
     socials.className = 'np-socials';
     const rot = document.createElement('span');

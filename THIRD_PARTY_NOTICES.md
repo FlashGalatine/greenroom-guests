@@ -32,12 +32,27 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Material Icons: the Discord glyph (Apache License 2.0)
+## Google Material Icons: the Discord glyph (Apache License 2.0)
 
-`overlay/nameplate-shared.js` contains the Discord glyph from the Material Icons / Material Design Icons set, licensed under the Apache License, Version 2.0.
-The full licence text is at <https://www.apache.org/licenses/LICENSE-2.0.txt>; it is applied to this glyph as follows: "Licensed under the Apache License,
-Version 2.0 (the "License"); you may not use this file except in compliance with the License. Unless required by applicable law or agreed to in writing,
-software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied."
+`overlay/nameplate-shared.js` contains the Discord glyph of Google's Material Icons set (<https://github.com/google/material-design-icons>), which is
+licensed under the Apache License, Version 2.0. The outline is the one the Iconify distribution of that set publishes as `ic:baseline-discord` (checked
+against it; the coordinates here are written to a different precision). It is not the glyph of the Pictogrammers "Material Design Icons" set
+(`mdi:discord`), which is a different drawing. The upstream copyright line was not confirmed. The licence text is at
+<https://www.apache.org/licenses/LICENSE-2.0.txt>, and its standard notice reads:
+
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
 
 ## Other glyphs and marks
 

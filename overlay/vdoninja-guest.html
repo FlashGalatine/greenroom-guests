@@ -118,12 +118,22 @@
   let dpfpWantUrl = '';     // the picture last asked for (a failed one is not asked for again on every update)
 
   // Feed liveness (GRN-34): the bridge pushes at least every `hb` ms; three missed beats and the feed is stale, which means nobody speaks.
-  // A payload without `hb` (an older bridge, the mock bridge, a single replayed push) is never stale.
+  // A payload without `hb` (an older bridge, a single replayed push) is never stale. Timing uses the page's monotonic clock (a step of the
+  // system clock changes nothing); hb counts only as a number, between a floor and a ceiling; age only as a number, between 0 and three
+  // heartbeats (the same rules as the roster's, overlay/discord-roster.html).
+  const HB_FLOOR = 1000;
+  const HB_CEIL = 60000;
+  let fed = false;
   let lastFeedAt = 0;
   let wasStale = false;
-  const feedHb = () => { const n = Number(lastDiscord && lastDiscord.hb); return Number.isFinite(n) && n > 0 ? n : 0; };
-  const isStale = () => { const hb = feedHb(); return hb > 0 && lastFeedAt > 0 && Date.now() - lastFeedAt > 3 * hb; };
-  const noteFeed = (msg) => { lastFeedAt = Date.now() - (Number(msg && msg.age) || 0); };
+  const feedHb = () => { const h = lastDiscord && lastDiscord.hb; return typeof h === 'number' && Number.isFinite(h) && h > 0 ? Math.min(HB_CEIL, Math.max(HB_FLOOR, h)) : 0; };
+  const isStale = () => { const hb = feedHb(); return hb > 0 && fed && performance.now() - lastFeedAt > 3 * hb; };
+  const noteFeed = (msg) => {
+    const a = msg && msg.age;
+    const age = typeof a === 'number' && Number.isFinite(a) ? Math.max(0, Math.min(a, 3 * feedHb())) : 0;
+    fed = true;
+    lastFeedAt = performance.now() - age;
+  };
 
   // A missing/broken avatar image falls back to the user's default embed avatar, and the real one is tried again a minute later.
   dpfpImg.addEventListener('error', () => {

@@ -344,8 +344,17 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   its last state still in `discord.state`. A frame with `stopped: true` (and
   `hb: 0`, no users, offline) is the bridge's one last push before it exits: a
   signal, the `quit` command, Streamer.bot closing with exit-on-close on, or a
-  crash (then `rpc.error` says "Bridge crashed: …"). The overlays use them in
-  Sprint 15, the control pill in Sprint 16.
+  crash (then `rpc.error` says "Bridge crashed: …"). The roster and the guest
+  slot call the feed stale when three `hb` periods pass with no message (on the
+  page's own monotonic clock): the roster then counts as nobody there and the
+  glow goes out. They take `hb` only as a number (raised to 1000 ms if smaller,
+  lowered to 60000 if larger; a payload without one is never stale), and an
+  optional `age` (ms, a number on the message beside `discordVoice`: how old the
+  push already was, held between 0 and three periods). Known limit: VDO Sync
+  replays the cached last push as a plain update, which a page cannot tell from
+  a live one, so a dead bridge's last state reappears for up to 15 s whenever a
+  page connects, until a producer stamps `age` on the replay. The control pill
+  uses them in Sprint 16.
 - Pushed leading-edge with a 100 ms trailing coalesce: worst case ~10
   DoActions/s in a rowdy channel.
 

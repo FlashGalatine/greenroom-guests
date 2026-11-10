@@ -128,8 +128,9 @@ function startBurst() {
   state.channelId = state.current ? state.current.channelId : '222';
   state.users = {};
   for (let n = 1; n <= 20; n++) {
-    const id = '30000000000000' + String(n).padStart(4, '0');
-    state.users[id] = { speaking: false, username: `Burst ${n}`, avatarUrl: embed(n % 6), mute: n % 7 === 0, deaf: n % 11 === 0 };
+    // (the first of the twenty is the streamer, as in a real call: hideWhenAbsent follows the streamer, so a burst without them would be hidden)
+    const id = n === 1 ? STREAMER_ID : '30000000000000' + String(n).padStart(4, '0');
+    state.users[id] ={ speaking: false, username: `Burst ${n}`, avatarUrl: embed(n % 6), mute: n % 7 === 0, deaf: n % 11 === 0 };
   }
   pushNow();
   burstTimer = setInterval(() => {

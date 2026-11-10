@@ -314,7 +314,7 @@ async function main() {
 
     prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ hostInChannel: false }) });
     const hidden = await wait(rosterPage, () => getComputedStyle(document.getElementById('stage')).display === 'none', null, 6000);
-    check('hideWhenAbsent: streamer leaves → overlay hides', hidden);
+    check('hideWhenAbsent: the bot leaves voice (hostInChannel false) → overlay hides (the streamer leaving is R20f)', hidden);
     prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
 
     const gridPage = await newPage(browser, { width: 640, height: 480 });
@@ -330,7 +330,9 @@ async function main() {
     gridPage.on('pageerror', (e) => pageErrors.push(String(e)));
     prod.doAction('Discord Voice Command', { command: 'mock-burst', value: 'on' });
     const burst20 = await wait(gridPage, () => document.querySelectorAll('#roster .member').length === 20, null, 8000);
-    check('burst on → 20 members render', burst20, await gridPage.evaluate(() => document.querySelectorAll('#roster .member').length));
+    // (the stage must be on air and laid out, not display:none: the streamer is one of the burst's users, so hideWhenAbsent does not hide it)
+    const burstShown = await gridPage.evaluate(() => getComputedStyle(document.getElementById('stage')).display !== 'none' && document.getElementById('roster').offsetHeight > 0);
+    check('burst on → 20 members render, on air and laid out', burst20 && burstShown, JSON.stringify({ n: await gridPage.evaluate(() => document.querySelectorAll('#roster .member').length), burstShown }));
 
     const samples = [];
     for (let i = 0; i < 10; i++) {
@@ -3312,11 +3314,11 @@ async function main() {
         const seed = mkSeed({ directory: [{ vdoLabel: '', discordUserId: '300000000000000010', displayName: 'Zoe', socials: [], auto: false }] });
         const x = await seededMock(seed);
         const r = await newPage(browser, { width: 1000, height: 300 });
-        await r.goto(x.api.base + '/overlay/discord-roster.html?layout=row&sbport=' + x.ws, { waitUntil: 'load' });
+        await r.goto(x.api.base + '/overlay/discord-roster.html?layout=row&hidewhenabsent=0&sbport=' + x.ws, { waitUntil: 'load' }); // (the streamer is not among these members: shown anyway, so the names are on air)
         voice(x, { '300000000000000010': U('Alice', 1), '300000000000000011': U('Bob', 2) });
         await wait(r, () => document.querySelectorAll('.member').length === 2, null, 8000);
         await sleep(500);
-        const st = await r.evaluate(() => [...document.querySelectorAll('.member')].map((m) => m.querySelector('.name')?.textContent));
+        const st = await r.evaluate(() => (getComputedStyle(document.getElementById('stage')).display === 'none' ? ['(the stage is hidden)'] : [...document.querySelectorAll('.member')].map((m) => m.querySelector('.name')?.textContent)));
         check('R18h: a chip with a curated directory name shows it, and the chips are ordered by the shown names ("Bob" before "Zoe", although the member behind Zoe is named Alice)', st.join() === 'Bob,Zoe', JSON.stringify(st));
         await r.close();
       }
@@ -3391,11 +3393,11 @@ async function main() {
         const seed2 = mkSeed({ directory: [{ vdoLabel: '', discordUserId: '300000000000000010', displayName: 'placeholder', socials: [], auto: true }] });
         const y = await seededMock(seed2);
         const r = await newPage(browser, { width: 1000, height: 300 });
-        await r.goto(y.api.base + '/overlay/discord-roster.html?layout=row&sbport=' + y.ws, { waitUntil: 'load' });
+        await r.goto(y.api.base + '/overlay/discord-roster.html?layout=row&hidewhenabsent=0&sbport=' + y.ws, { waitUntil: 'load' }); // (as in R18h: the streamer is not in this call)
         voice(y, { '300000000000000010': U('RealName', 1) });
         await wait(r, () => document.querySelectorAll('.member').length === 1, null, 8000);
         await sleep(400);
-        const nm = await r.evaluate(() => document.querySelector('.member .name')?.textContent);
+        const nm = await r.evaluate(() => (getComputedStyle(document.getElementById('stage')).display === 'none' ? '(the stage is hidden)' : document.querySelector('.member .name')?.textContent));
         check('R18m2: an auto placeholder does not freeze a renamed member\'s roster name: the live Discord name is shown', nm === 'RealName', String(nm));
         await r.close();
       }
@@ -3433,8 +3435,18 @@ async function main() {
       const HB = 400; // the test's heartbeat period: stale after 3 missed beats (1.2 s) plus the 1 s redraw timer
       const absent = (page) => page.evaluate(() => document.body.classList.contains('absent'));
       const rosterUrl = (x, q) => `${x.api.base}/overlay/discord-roster.html?${q || 'layout=row'}&sbport=${x.ws}`;
-      const mkUsers = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => ['4' + String(i).padStart(17, '0'), { speaking: false, username: 'Member ' + (i + 1), avatarUrl: embed((i % 5) + 1), mute: false, deaf: false }]));
+      // uniq: every member gets an avatar URL of their own (so a second request for the same picture can be counted)
+      const mkUsers = (n, o) => Object.fromEntries(Array.from({ length: n }, (_, i) => { const id = '4' + String(i).padStart(17, '0'); return [id, { speaking: false, username: (o && o.name ? o.name(i) : 'Member ' + (i + 1)), avatarUrl: o && o.uniq ? `https://cdn.discordapp.com/avatars/${id}/h.png` : embed((i % 5) + 1), mute: false, deaf: false }]; }));
       const watch = (page) => { const w = { errors: [], warns: [] }; page.on('pageerror', (e) => w.errors.push(String(e && e.message))); page.on('console', (m) => { if (m.type() === 'warning' || m.type() === 'warn') w.warns.push(m.text()); }); return w; };
+      // A page whose clocks can be moved: time passing = both clocks jump (a minute stands in for a minute of waiting); a wall-clock step = only Date.now jumps.
+      const SKEW = '(() => { window.__skew = 0; window.__skewWall = 0; const d = Date.now.bind(Date), p = performance.now.bind(performance); Date.now = () => d() + window.__skewWall; performance.now = () => p() + window.__skew; })();';
+      const skewPage = async (w, h) => { const p = await newPage(browser, { width: w, height: h }); await p.addInitScript(SKEW); return p; };
+      const passTime = (page, ms) => page.evaluate((n) => { window.__skew += n; window.__skewWall += n; }, ms);
+      const stepWall = (page, ms) => page.evaluate((n) => { window.__skewWall += n; }, ms);
+      // How many nodes were added to the roster so far (a rebuild adds every member again); the count is read after the observer has delivered.
+      const trackAdds = (page) => page.evaluate(() => { window.__adds = 0; new MutationObserver((rs) => { for (const r of rs) window.__adds += r.addedNodes.length; }).observe(document.getElementById('roster'), { childList: true }); });
+      const adds = async (page) => { await sleep(50); return page.evaluate(() => window.__adds); };
+      const resetAdds = async (page) => { await sleep(50); await page.evaluate(() => { window.__adds = 0; }); };
 
       // (a) a bridge that died: three missed heartbeats and the roster hides (hideWhenAbsent), the guest slot's glow goes out; a push brings both back
       {
@@ -3458,19 +3470,81 @@ async function main() {
         check('R20a3: …and a push from the restarted bridge brings the roster back', back, '');
         await roster.close(); await guest.close();
       }
-      // (b) no hb (an older bridge, the mock bridge, one replayed push): never stale. (c) heartbeats keep it live.
+      // (b) no hb (an older bridge, one replayed push): never stale, however long it has been (a minute of time passing, in the page's clocks, stands in
+      // for the wait: a default heartbeat such as 5 s would hide it), in the roster and in the guest slot's glow.
       {
         const x = await startExtra({});
-        const roster = await newPage(browser, { width: 900, height: 160 });
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(DISCORD_SLOT_VDO) });
+        const roster = await skewPage(900, 160);
         await roster.goto(rosterUrl(x), { waitUntil: 'load' });
-        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
+        const guest = await skewPage(480, 270);
+        await guest.goto(`${x.api.base}/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}`, { waitUntil: 'load' });
+        const talk = JSON.parse(ROSTER_STATE());
+        talk.users[STREAMER].speaking = true;
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(talk) });
+        await wait(roster, () => document.querySelectorAll('.member').length === 3 && !document.body.classList.contains('absent'), null, 6000);
+        await wait(guest, () => document.getElementById('dpfp') && document.getElementById('dpfp').classList.contains('speaking'), null, 6000);
+        await passTime(roster, 60000); await passTime(guest, 60000);
+        await sleep(1500); // (at least one redraw tick)
+        const rosterLive = !(await absent(roster)) && (await roster.evaluate(() => document.querySelectorAll('.member').length)) === 3;
+        const glowLive = await guest.evaluate(() => document.getElementById('dpfp').classList.contains('speaking'));
+        check('R20b: a payload with no hb is never marked stale: after a minute with no further push the roster is still there and the guest slot still glows', rosterLive && glowLive, JSON.stringify({ rosterLive, glowLive }));
+        await roster.close(); await guest.close();
+      }
+      // (c) heartbeats keep it live; time passing without one makes it stale (and a step of the wall clock alone does not)
+      {
+        const x = await startExtra({});
+        const roster = await skewPage(900, 160);
+        await roster.goto(rosterUrl(x), { waitUntil: 'load' });
+        x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ hb: HB }) });
         await wait(roster, () => document.querySelectorAll('.member').length === 3, null, 6000);
-        await sleep(4500);
-        check('R20b: a payload with no hb is never marked stale: the roster is still there 4.5 s after the only push', !(await absent(roster)) && (await roster.evaluate(() => document.querySelectorAll('.member').length)) === 3, '');
         const hb = JSON.parse(ROSTER_STATE({ hb: HB }));
         let everAbsent = false;
         for (let i = 0; i < 14; i++) { x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(hb) }); await sleep(250); if (await absent(roster)) everAbsent = true; }
         check('R20c: pushes that keep coming within the heartbeat keep the roster live (it never hides)', !everAbsent, '');
+        const slow = JSON.parse(ROSTER_STATE({ hb: 3000 }));
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(slow) });
+        await wait(roster, () => !document.body.classList.contains('absent'), null, 4000);
+        await stepWall(roster, 60000); // the system clock is stepped forward by a minute (a time sync): the feed is as live as it was
+        await sleep(2500);
+        const stepped = !(await absent(roster));
+        check('R20c2: a step of the system clock does not hide a live feed (staleness is measured on the page\'s monotonic clock)', stepped, '');
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(slow) });
+        await wait(roster, () => !document.body.classList.contains('absent'), null, 4000);
+        await passTime(roster, 60000); // a minute really passes with no push
+        const wentStale = await wait(roster, () => document.body.classList.contains('absent'), null, 3000);
+        check('R20c3: …while a minute with no push does (the time machinery used here moves the page\'s clocks)', wentStale, '');
+        await roster.close();
+      }
+      // (c4) hb and age are checked: a value that is not a number is no heartbeat, a tiny one is raised to a floor, an age that is negative or
+      // beyond reason does not make the feed immortal
+      {
+        const x = await startExtra({});
+        const roster = await skewPage(900, 160);
+        await roster.goto(rosterUrl(x), { waitUntil: 'load' });
+        const kept = {};
+        for (const [label, v] of [['true', true], ['array', [400]], ['string', '400']]) {
+          const st = JSON.parse(ROSTER_STATE()); st.hb = v;
+          x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(st) });
+          await wait(roster, () => document.querySelectorAll('.member').length === 3 && !document.body.classList.contains('absent'), null, 4000);
+          await passTime(roster, 60000);
+          await sleep(1400);
+          kept[label] = !(await absent(roster));
+        }
+        check('R20c4: an hb that is not a number (true, [400], "400") is no heartbeat: the feed is not marked stale', kept.true && kept.array && kept.string, JSON.stringify(kept));
+        const tiny = JSON.parse(ROSTER_STATE()); tiny.hb = 1;
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(tiny) });
+        await wait(roster, () => document.querySelectorAll('.member').length === 3 && !document.body.classList.contains('absent'), null, 4000);
+        await sleep(2000);
+        check('R20c5: a tiny hb (1 ms) has a floor: the roster is still there two seconds after the push', !(await absent(roster)), '');
+        const aged = {};
+        for (const [label, age] of [['negative', -1e9], ['huge', 1e13]]) {
+          const st = JSON.parse(ROSTER_STATE()); st.hb = HB;
+          await x.api.broadcast({ type: 'discord:voice:update', discordVoice: st, age });
+          await sleep(300);
+          aged[label] = await wait(roster, () => document.body.classList.contains('absent'), null, 6000); // (hb 400 is raised to the 1 s floor: stale after 3 s, seen at the next 1 s tick)
+        }
+        check('R20c6: an age that is negative or absurd (-1e9, 1e13) does not make the feed immortal: with no further push it goes stale all the same', aged.negative && aged.huge, JSON.stringify(aged));
         await roster.close();
       }
       // (d) a crowded roster folds into +N, the streamer first, nothing clipped, one console warning
@@ -3478,9 +3552,13 @@ async function main() {
         const x = await startExtra({});
         const roster = await newPage(browser, { width: 420, height: 120 });
         const w = watch(roster);
+        const reqs = new Map();
+        roster.on('request', (r) => { const m = /\/avatars\/(\d+)\/h\.png/.exec(r.url()); if (m) reqs.set(m[1], (reqs.get(m[1]) || 0) + 1); });
         await roster.goto(rosterUrl(x), { waitUntil: 'load' });
+        await trackAdds(roster);
         const crowd = JSON.parse(ROSTER_STATE());
-        crowd.users = { [STREAMER]: crowd.users[STREAMER], ...mkUsers(13) };
+        crowd.users = { [STREAMER]: crowd.users[STREAMER], ...mkUsers(13, { uniq: true }) };
+        crowd.users[STREAMER].speaking = true;
         x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(crowd) });
         const folded = await wait(roster, () => !!document.querySelector('.overflow-chip'), null, 6000);
         await sleep(300);
@@ -3490,14 +3568,84 @@ async function main() {
         });
         check('R20d: 14 members in a 420 px source: the ones that do not fit fold into one "+N" chip (the members shown + N = 14), the streamer is first, and nothing is clipped at either end', folded && info.n >= 1 && info.n < 14 && info.chip === '+' + (14 - info.n) && info.first === STREAMER && info.firstStreamer && info.left >= -1 && info.right <= info.w + 1, JSON.stringify(info));
         check('R20d2: …and the console says so once', w.warns.filter((t) => /does not fit/.test(t)).length === 1, JSON.stringify(w.warns));
+        // more pushes of the same call (the bridge sends up to ten a second while people talk): the folded roster is not rebuilt, so the speaking
+        // glow keeps pulsing, the chips stay the same nodes, and no picture (shown or folded) is asked for again
+        await roster.evaluate(() => { window.__tag = document.querySelector('.member.streamer'); });
+        await resetAdds(roster);
+        for (let i = 0; i < 12; i++) {
+          const again = JSON.parse(JSON.stringify(crowd));
+          again.users['4' + String(1).padStart(17, '0')].speaking = i % 2 === 0;
+          x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(again) });
+          await sleep(110);
+        }
+        await sleep(150);
+        const st = await roster.evaluate(() => {
+          const el = document.querySelector('.member.streamer .avatar');
+          const a = el && el.getAnimations().find((an) => an.animationName === 'roster-blink');
+          return { anim: a ? Math.round(a.currentTime) : -1, same: document.querySelector('.member.streamer') === window.__tag };
+        });
+        const added = await adds(roster);
+        const maxReq = Math.max(0, ...reqs.values());
+        check('R20d3: further pushes to a folded roster do not rebuild it: no member is added again, the speaking glow keeps pulsing (its animation is past 900 ms), the streamer\'s chip is the same node, and no avatar is requested twice', added === 0 && st.anim > 900 && st.same && maxReq <= 1, JSON.stringify({ added, st, maxReq, requested: reqs.size }));
         await roster.close();
       }
-      // (e) hardened against shapes any bus client or an older bridge can send: a numeric streamerUserId, a null and a number as users entries, an out-of-range size
+      // (d4) the grid layout folds by height, worked out at once (not one member per rebuild); a source shorter than one chip folds by what fits in a row
+      {
+        const x = await startExtra({});
+        const grid = await newPage(browser, { width: 500, height: 200 });
+        await grid.goto(rosterUrl(x, 'layout=grid&labels=0'), { waitUntil: 'load' });
+        await trackAdds(grid);
+        const crowd = JSON.parse(ROSTER_STATE());
+        crowd.users = { [STREAMER]: crowd.users[STREAMER], ...mkUsers(39) };
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(crowd) });
+        const folded = await wait(grid, () => !!document.querySelector('.overflow-chip'), null, 6000);
+        await sleep(300);
+        const info = await grid.evaluate(() => {
+          const kids = [...document.querySelectorAll('#roster > *')];
+          return { n: document.querySelectorAll('.member').length, chip: (document.querySelector('.overflow-chip') || {}).textContent || '', first: (document.querySelector('.member') || {}).dataset ? document.querySelector('.member').dataset.uid : '', bottom: Math.max(...kids.map((k) => k.getBoundingClientRect().bottom)), right: Math.max(...kids.map((k) => k.getBoundingClientRect().right)), w: window.innerWidth, h: window.innerHeight };
+        });
+        const first = await adds(grid);
+        check('R20d4: 40 members in a 500 × 200 grid fold into "+N" with nothing cut off below, the streamer first, and as many shown as fit (more than 6)', folded && info.n > 6 && info.n < 40 && info.chip === '+' + (40 - info.n) && info.first === STREAMER && info.bottom <= info.h + 1 && info.right <= info.w + 1, JSON.stringify(info));
+        check('R20d5: …worked out in one go: the whole fold added at most four rosters\' worth of nodes (it used to rebuild the roster once per member folded)', first <= 4 * 40, String(first));
+        await resetAdds(grid);
+        for (let i = 0; i < 6; i++) {
+          const again = JSON.parse(JSON.stringify(crowd));
+          again.users['4' + String(2).padStart(17, '0')].speaking = i % 2 === 0;
+          x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(again) });
+          await sleep(120);
+        }
+        const more = await adds(grid);
+        check('R20d6: …and further pushes of the same call do not touch the roster\'s nodes', more === 0, String(more));
+        await grid.close();
+        // a source shorter than one chip: everyone who fits in the first row stays (it used to fold all but the streamer)
+        const strip = await newPage(browser, { width: 1200, height: 60 });
+        await strip.goto(rosterUrl(x, 'layout=grid&labels=0'), { waitUntil: 'load' });
+        const few = JSON.parse(ROSTER_STATE());
+        few.users = { [STREAMER]: few.users[STREAMER], ...mkUsers(7) };
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(few) });
+        await wait(strip, () => document.querySelectorAll('.member').length >= 1, null, 6000);
+        await sleep(300);
+        const eight = await strip.evaluate(() => ({ n: document.querySelectorAll('.member').length, chip: !!document.querySelector('.overflow-chip') }));
+        check('R20d7: 8 members in a 1200 × 60 grid (shorter than one chip, wide enough for the row): all 8 stay, none is folded', eight.n === 8 && !eight.chip, JSON.stringify(eight));
+        const many = JSON.parse(ROSTER_STATE());
+        many.users = { [STREAMER]: many.users[STREAMER], ...mkUsers(29) };
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(many) });
+        await wait(strip, () => !!document.querySelector('.overflow-chip'), null, 6000);
+        await sleep(300);
+        const row = await strip.evaluate(() => {
+          const ms = [...document.querySelectorAll('.member')];
+          const chip = document.querySelector('.overflow-chip');
+          return { n: ms.length, chip: chip ? chip.textContent : '', maxTop: Math.round(Math.max(...ms.concat(chip ? [chip] : []).map((k) => k.getBoundingClientRect().top))), right: Math.max(...ms.map((k) => k.getBoundingClientRect().right), chip ? chip.getBoundingClientRect().right : 0), w: window.innerWidth, h: window.innerHeight };
+        });
+        check('R20d8: 30 members in a 1200 × 60 grid: the first row stays (8 or more) with the "+N" chip at its end, all on that one line (every chip starts inside the 60 px) and inside the source', row.n >= 8 && row.n < 30 && row.chip === '+' + (30 - row.n) && row.maxTop < row.h && row.right <= row.w + 1, JSON.stringify(row));
+        await strip.close();
+      }
+      // (e) hardened against shapes any bus client or an older bridge can send: a numeric (or object) streamerUserId, a null and a number as users entries, an out-of-range size
       {
         const x = await startExtra({});
         const roster = await newPage(browser, { width: 900, height: 200 });
         const w = watch(roster);
-        await roster.goto(rosterUrl(x, 'layout=row&hidewhenabsent=0'), { waitUntil: 'load' }); // (the streamer id 12345 is not in the call: shown anyway, to measure)
+        await roster.goto(rosterUrl(x, 'layout=row'), { waitUntil: 'load' }); // (the default hideWhenAbsent: a streamerUserId that is not a digit string must not hide the roster)
         const odd = JSON.parse(ROSTER_STATE());
         odd.settings.streamerUserId = 12345; // a number
         odd.settings.avatarPx = 9999;
@@ -3506,9 +3654,27 @@ async function main() {
         odd.users['301'] = 5;
         odd.users['302'] = { username: 777, avatarUrl: 42 };
         x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(odd) });
-        await wait(roster, () => document.querySelectorAll('.member').length >= 3, null, 6000);
-        const r = await roster.evaluate(() => ({ n: document.querySelectorAll('.member').length, px: [...document.querySelectorAll('.avatar-wrap')].map((e) => Math.round(e.getBoundingClientRect().width)), absent: document.body.classList.contains('absent') }));
-        check('R20e: a numeric streamerUserId, null and number entries in users, a username that is a number and an out-of-range avatarPx/streamerPx: no page error, the valid members (and the number-named one) render, sizes are clamped to 24-128 / 32-160', w.errors.length === 0 && r.n === 4 && Math.max(...r.px) <= 128 && Math.min(...r.px) >= 24, JSON.stringify({ errors: w.errors, r }));
+        await wait(roster, () => document.querySelectorAll('.member').length >= 4, null, 6000);
+        await sleep(300);
+        const measure = () => roster.evaluate(() => ({ n: document.querySelectorAll('.member').length, px: [...document.querySelectorAll('.avatar-wrap')].map((e) => Math.round(e.getBoundingClientRect().width)), absent: document.body.classList.contains('absent') }));
+        const r = await measure();
+        check('R20e: a numeric streamerUserId (default hideWhenAbsent), null and number entries in users, a username that is a number and an out-of-range avatarPx: no page error, the roster is shown with the valid members (and the number-named one) at the clamped size (128)', w.errors.length === 0 && r.n === 4 && !r.absent && Math.max(...r.px) === 128 && Math.min(...r.px) === 128, JSON.stringify({ errors: w.errors, r }));
+        odd.settings.streamerUserId = { id: STREAMER }; // an object
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(odd) });
+        await sleep(400);
+        const o = await measure();
+        check('R20e2: …and an object as streamerUserId is no streamer id either: no page error, the roster stays', w.errors.length === 0 && o.n === 4 && !o.absent, JSON.stringify({ errors: w.errors, o }));
+        // the streamer's own size is clamped too (32-160), with the guests' (24-128) untouched
+        const sized = async (streamerPx) => {
+          const st = JSON.parse(ROSTER_STATE());
+          st.settings.avatarPx = 9999; st.settings.streamerPx = streamerPx;
+          x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(st) });
+          await sleep(500);
+          return roster.evaluate(() => ({ streamer: Math.round(document.querySelector('.member.streamer .avatar-wrap').getBoundingClientRect().width), guests: [...document.querySelectorAll('.member:not(.streamer) .avatar-wrap')].map((e) => Math.round(e.getBoundingClientRect().width)) }));
+        };
+        const small = await sized(5);
+        const big = await sized(9999);
+        check('R20e3: with the streamer in the call, streamerPx 5 is raised to 32 and 9999 lowered to 160, and the guests are held at 128', small.streamer === 32 && big.streamer === 160 && small.guests.every((g) => g === 128) && big.guests.every((g) => g === 128), JSON.stringify({ small, big }));
         await roster.close();
       }
       // (f) hideWhenAbsent follows the streamer when one is set
@@ -3542,7 +3708,21 @@ async function main() {
         await wait(plate, () => { const p = document.querySelector('.np-plate'); return p && !p.hidden; }, null, 6000);
         const pr = await plate.evaluate(() => { const p = document.querySelector('.np-plate').getBoundingClientRect(); const h = document.querySelector('.np-handle'); return { l: p.left, r: p.right, w: window.innerWidth, handleClipped: !!h && h.scrollWidth > h.clientWidth }; });
         check('R20g: a long display name and a long handle on the nameplate stay inside a 320 px source (the plate fits and the handle ellipsises)', pr.l >= -1 && pr.r <= pr.w + 1 && pr.handleClipped, JSON.stringify(pr));
+        // a long right-to-left name is cut at its logical end (the ellipsis closes the name, as it does for a left-to-right one)
+        const ARABIC = 'مرحبا بكم في قناة البث المباشر الخاصة بنا اليوم ومرحبا بكم جميعا في هذا البث الطويل جدا جدا';
+        const rtlVdo = JSON.parse(JSON.stringify(longVdo));
+        rtlVdo.directory[0].displayName = ARABIC;
+        rtlVdo.directory[0].socials[0].handle = 'مرحبا_بكم_في_قناة_البث_المباشر_الخاصة_بنا_اليوم_ومرحبا_بكم_جميعا';
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(rtlVdo) });
+        await wait(plate, (t) => { const n = document.querySelector('.np-name'); return !!n && n.textContent === t; }, ARABIC, 6000);
+        await sleep(400);
+        const rtl = await plate.evaluate(() => {
+          const edge = (el) => { const nr = el.getBoundingClientRect(); const r = document.createRange(); r.selectNodeContents(el); const tr = r.getBoundingClientRect(); return { dir: getComputedStyle(el).direction, clipped: el.scrollWidth > el.clientWidth, startAtRight: Math.abs(tr.right - nr.right) <= 1 }; };
+          return { name: edge(document.querySelector('.np-name')), handle: edge(document.querySelector('.np-handle')) };
+        });
+        check('R20g3: a long Arabic name (and handle) in the plate is right-to-left and clipped at its end: it begins at the right edge and the ellipsis closes it on the left', rtl.name.dir === 'rtl' && rtl.name.clipped && rtl.name.startAtRight && rtl.handle.dir === 'rtl' && rtl.handle.clipped && rtl.handle.startAtRight, JSON.stringify(rtl));
         const guestSlot = await newPage(browser, { width: 320, height: 200 });
+        x.prod.doAction('VDO Push', { payload: JSON.stringify(longVdo) });
         await guestSlot.goto(`${x.api.base}/overlay/vdoninja-guest.html?slot=1&sbport=${x.ws}`, { waitUntil: 'load' });
         await wait(guestSlot, () => { const p = document.querySelector('.np-plate'); return p && !p.hidden; }, null, 6000);
         const gr = await guestSlot.evaluate(() => { const p = document.querySelector('.np-plate').getBoundingClientRect(); return { l: p.left, r: p.right, w: window.innerWidth }; });
@@ -3583,6 +3763,21 @@ async function main() {
         const anim2 = await gs.evaluate(() => getComputedStyle(document.querySelector('#dpfp img')).animationName);
         check('R20i2: …and with neonBlink on it blinks', anim2 === 'dpfp-blink', anim2);
         await plate.close(); await guestSlot.close(); await bad.close(); await badPlate.close(); await gs.close();
+      }
+      // (j) the sizing advice in docs/STREAMERBOT-SETUP.md: 12 people with the longest names (a name is cut at 90 px) fit a 1450 × 140 source
+      {
+        const x = await startExtra({});
+        const roster = await newPage(browser, { width: 1450, height: 140 });
+        const w = watch(roster);
+        await roster.goto(rosterUrl(x), { waitUntil: 'load' });
+        const crowd = JSON.parse(ROSTER_STATE());
+        crowd.users = { [STREAMER]: Object.assign({}, crowd.users[STREAMER], { username: 'S'.repeat(32) }), ...mkUsers(11, { name: (i) => 'WWWWWWWWWWWWWWWWWWWWWWWWWWWW' + String(i).padStart(2, '0') }) };
+        x.prod.doAction('Discord Voice Push', { payload: JSON.stringify(crowd) });
+        await wait(roster, () => document.querySelectorAll('.member').length >= 1, null, 6000);
+        await sleep(400);
+        const fit = await roster.evaluate(() => { const kids = [...document.querySelectorAll('#roster > *')]; return { n: document.querySelectorAll('.member').length, chip: !!document.querySelector('.overflow-chip'), right: Math.max(...kids.map((k) => k.getBoundingClientRect().right)), w: window.innerWidth }; });
+        check('R20j: 12 members with 32-letter names (the widest a chip gets) fit a 1450 × 140 source with labels on: none is folded, nothing is cut off (the documented size)', fit.n === 12 && !fit.chip && fit.right <= fit.w && w.warns.length === 0, JSON.stringify({ fit, warns: w.warns }));
+        await roster.close();
       }
     }
 

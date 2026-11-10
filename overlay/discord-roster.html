@@ -154,13 +154,24 @@
   const nodes = new Map(); // uid -> { root, img, name, wantUrl }
 
   // Feed liveness (GRN-34): the bridge pushes at least every `hb` ms; three missed beats and the feed is stale, which counts as nobody
-  // there. A payload without `hb` (an older bridge, the mock bridge, a single replayed push) is never stale. `age` (how old the push already
-  // was when it reached us) is used when a producer sends it. hb and age are not part of the roster's DOM signature.
+  // there. A payload without `hb` (an older bridge, a single replayed push) is never stale. `age` (how old the push already was when it
+  // reached us) is used when a producer sends it. hb and age are not part of the roster's DOM signature.
+  // Timing uses the page's monotonic clock, so a step of the system clock (a time sync) neither hides a live feed nor keeps a dead one on air.
+  // hb counts only when it is a number, raised to a floor and lowered to a ceiling (a bus client or a unit slip can send anything); age only
+  // when it is a number, held between 0 and three heartbeats.
+  const HB_FLOOR = 1000;
+  const HB_CEIL = 60000;
+  let fed = false;
   let lastFeedAt = 0;
   let wasStale = false;
-  const feedHb = () => { const n = Number(lastDiscord && lastDiscord.hb); return Number.isFinite(n) && n > 0 ? n : 0; };
-  const isStale = () => { const hb = feedHb(); return hb > 0 && lastFeedAt > 0 && Date.now() - lastFeedAt > 3 * hb; };
-  const noteFeed = (msg) => { lastFeedAt = Date.now() - (Number(msg && msg.age) || 0); };
+  const feedHb = () => { const h = lastDiscord && lastDiscord.hb; return typeof h === 'number' && Number.isFinite(h) && h > 0 ? Math.min(HB_CEIL, Math.max(HB_FLOOR, h)) : 0; };
+  const isStale = () => { const hb = feedHb(); return hb > 0 && fed && performance.now() - lastFeedAt > 3 * hb; };
+  const noteFeed = (msg) => {
+    const a = msg && msg.age;
+    const age = typeof a === 'number' && Number.isFinite(a) ? Math.max(0, Math.min(a, 3 * feedHb())) : 0;
+    fed = true;
+    lastFeedAt = performance.now() - age;
+  };
   const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
   function defaultAvatar(userId) {
@@ -181,7 +192,9 @@
       avatarPx: numOr(URL_CFG.avatarPx, px(s.avatarPx, 56, 24, 128)),
       streamerPx: numOr(URL_CFG.streamerPx, px(s.streamerPx, 72, 32, 160)),
       accent: accentTriplet(URL_CFG.accent) || accentTriplet(s.accent) || ACCENTS.cyan,
-      streamer: String(URL_CFG.streamer || s.streamerUserId || '').trim(), // (a number from a hand-edited config must not throw on every render)
+      // The URL's id is the operator's own. The payload's is taken only as a string of digits, as the bridge writes it: a number (a snowflake
+      // loses its last digits as a JSON number) or an object is no id, and would hide the roster for good under hideWhenAbsent.
+      streamer: URL_CFG.streamer ? String(URL_CFG.streamer).trim() : (typeof s.streamerUserId === 'string' && /^\d{1,32}$/.test(s.streamerUserId.trim()) ? s.streamerUserId.trim() : ''),
       hideWhenAbsent: boolOr(URL_CFG.hideWhenAbsent, s.hideWhenAbsent !== false),
       scanlines: s.scanlines !== false,
       neonBlink: s.neonBlink !== false,
@@ -209,7 +222,8 @@
     img.addEventListener('error', () => {
       const fb = defaultAvatar(uid);
       if (img.getAttribute('src') !== fb) img.src = fb;
-      setTimeout(() => { node.wantUrl = ''; }, 60000);
+      // (the timer holds the id, not the member's nodes, so a member who has left is not kept alive for the minute)
+      setTimeout(() => { const n = nodes.get(uid); if (n) n.wantUrl = ''; }, 60000);
     });
     const badges = document.createElement('div');
     badges.className = 'badges';
@@ -242,13 +256,17 @@
     });
   }
 
-  // The automatic +N fold (GRN-78): the most members that fit the stage, measured after layout; 0 = everyone fits. It is worked out afresh
-  // after every message (a message resets it), and only lowered by fit() while the roster overflows.
+  // The automatic +N fold (GRN-78): the most members that fit the stage, measured after layout; 0 = everyone fits (or not measured yet).
+  // It is measured for what the roster looks like (fitKey: who is in the call, the names shown, the sizes, the layout) and kept across
+  // messages: the bridge sends up to ten a second while people talk, and measuring means drawing the whole roster, which would restart the
+  // speaking glow. It is measured again only when that changes or the stage is resized.
   let fitCap = 0;
+  let fitKey = '';
+  let fitDone = false;
+  let fitBusy = false;
   let warnedFit = false;
 
-  function render(keepFit) {
-    if (!keepFit) fitCap = 0;
+  function render() {
     const dv = lastDiscord;
     const cfg = effective(dv && isObj(dv.settings) ? dv.settings : null);
 
@@ -273,7 +291,17 @@
     const absent = !dv || !dv.connected || !dv.hostInChannel || Object.keys(users).length === 0 || streamerGone;
     document.body.classList.toggle('absent', cfg.hideWhenAbsent && absent);
 
-    let ids = orderedIds(users, cfg.streamer);
+    const all = orderedIds(users, cfg.streamer);
+    const key = JSON.stringify([all, all.map((uid) => shownName(uid, users[uid])), cfg.layout, cfg.labels, cfg.avatarPx, cfg.streamerPx, cfg.streamer, cfg.plain, cfg.max]);
+    if (key !== fitKey) {
+      fitKey = key;
+      fitCap = 0;
+      fitDone = false;
+      // a member who has left takes their nodes with them; one who is merely folded keeps theirs (and what they were asked for)
+      const alive = new Set(all);
+      for (const uid of [...nodes.keys()]) if (!alive.has(uid)) nodes.delete(uid);
+    }
+    let ids = all;
     let overflow = 0;
     const cap = Math.min(cfg.max > 0 ? cfg.max : Infinity, fitCap > 0 ? fitCap : Infinity);
     if (ids.length > cap) {
@@ -292,7 +320,6 @@
         if (!nodes.has(uid)) nodes.set(uid, buildMember(uid));
         roster.appendChild(nodes.get(uid).root);
       }
-      for (const uid of [...nodes.keys()]) if (!ids.includes(uid)) nodes.delete(uid);
       if (overflow > 0) {
         const chip = document.createElement('div');
         chip.className = 'overflow-chip';
@@ -318,38 +345,76 @@
       n.root.classList.toggle('muted', !!u.mute);
       n.root.classList.toggle('deafened', !!u.deaf);
     }
-    fit(ids.length);
+    if (!fitDone) fit();
   }
 
-  // Measure after layout: if the members (and the +N chip) do not fit the stage, lower the cap to what fits, fold the rest into "+N" (the
-  // streamer is first, so is never the one folded) and say so once (GRN-78). Row layout compares the width, grid layout the height.
-  function fit(shown) {
-    if (shown < 1) { return; }
+  // How many of the members now drawn fit the stage once the rest are folded into "+N" (the streamer is first, so is never the one folded):
+  // 0 = they all fit, or folding cannot help. Row layout compares widths, grid layout heights; both are worked out from one measurement.
+  function capacity(grid, room) {
     const kids = [...roster.children];
-    const grid = roster.classList.contains('layout-grid');
+    const members = kids.filter((k) => k.classList.contains('member'));
+    if (members.length < 2) return 0;
+    const chip = roster.querySelector('.overflow-chip');
+    const chipW = chip ? chip.offsetWidth : 64; // (before the chip is drawn: room kept for it)
+    const chipH = chip ? chip.offsetHeight : 36;
     const gap = parseFloat(getComputedStyle(roster).columnGap) || 0;
-    const room = grid ? stageEl.clientHeight : stageEl.clientWidth;
-    if (!room) return; // not laid out (hidden): nothing to measure
-    const over = grid
-      ? roster.offsetHeight > room + 1
-      : kids.reduce((w, k, i) => w + k.offsetWidth + (i ? gap : 0), 0) > room + 1;
-    if (!over) return;
-    let n = shown;
-    if (grid) n = Math.max(1, shown - 1);
-    else {
-      const chipW = 64; // room kept for the "+N" chip
-      let w = 0; n = 0;
-      for (let i = 0; i < shown && i < kids.length; i++) {
-        const next = w + kids[i].offsetWidth + (i ? gap : 0);
+    if (!grid) {
+      if (kids.reduce((w, k, i) => w + k.offsetWidth + (i ? gap : 0), 0) <= room + 1) return 0;
+      let w = 0, n = 0;
+      for (let i = 0; i < members.length; i++) {
+        const next = w + members[i].offsetWidth + (i ? gap : 0);
         if (next + gap + chipW > room && n >= 1) break;
         w = next; n = i + 1;
       }
-      n = Math.max(1, Math.min(n, shown - 1));
+      n = Math.max(1, Math.min(n, members.length - 1));
+      return n;
     }
-    if (n >= shown) return;
-    if (!warnedFit) { warnedFit = true; console.warn('[greenroom] the Discord roster does not fit this source: ' + (shown - n) + ' member(s) are folded into "+N". Make the browser source larger, or lower ?max=.'); }
-    fitCap = n;
-    render(true);
+    if (roster.offsetHeight <= room + 1) return 0;
+    // The rows the members fell into, and where each member's row ends; the "+N" chip joins the last row if it has room, else starts one.
+    const origin = roster.getBoundingClientRect();
+    const width = stageEl.clientWidth;
+    const rowOf = [], right = [], rowBottom = [];
+    let rowTop = -Infinity, row = -1;
+    members.forEach((m, i) => {
+      const r = m.getBoundingClientRect();
+      if (r.top - origin.top > rowTop + 1) { row++; rowTop = r.top - origin.top; rowBottom[row] = 0; }
+      rowOf[i] = row;
+      right[i] = r.right - origin.left;
+      rowBottom[row] = Math.max(rowBottom[row], r.bottom - origin.top);
+    });
+    for (let n = members.length - 1; n >= 1; n--) {
+      const bottom = rowBottom[rowOf[n - 1]];
+      const need = right[n - 1] + gap + chipW <= width + 0.5 ? bottom : bottom + gap + chipH;
+      if (need <= room + 1) return n;
+    }
+    // Not even one row fits the height (a source shorter than a chip): folding by height cannot help, so keep what fits the first row, with
+    // the chip at its end, and fold nothing if the first row holds everyone.
+    let first = rowOf.filter((r) => r === 0).length;
+    if (first >= members.length) return 0;
+    while (first > 1 && right[first - 1] + gap + chipW > width + 0.5) first--;
+    return first;
+  }
+
+  // Measure after layout: if the members (and the +N chip) do not fit the stage, lower the cap to what fits, fold the rest into "+N" and say
+  // so once (GRN-78). The cap is worked out from one measurement and checked against the redrawn roster; it is kept in fitCap until the
+  // roster changes or the stage is resized (see fitKey).
+  function fit() {
+    if (fitBusy) return;
+    const grid = roster.classList.contains('layout-grid');
+    const room = grid ? stageEl.clientHeight : stageEl.clientWidth;
+    if (!room) return; // not laid out (hidden): measure when it is
+    fitBusy = true;
+    try {
+      for (let pass = 0; pass < 8; pass++) {
+        const shown = roster.querySelectorAll('.member').length;
+        const n = capacity(grid, room);
+        if (n < 1 || n >= shown) break;
+        if (!warnedFit) { warnedFit = true; console.warn('[greenroom] the Discord roster does not fit this source: ' + (shown - n) + ' member(s) are folded into "+N". Make the browser source larger, or lower ?max=.'); }
+        fitCap = n;
+        render(); // (fitBusy: this redraw does not measure; the next pass does)
+      }
+      fitDone = true;
+    } finally { fitBusy = false; }
   }
 
   window.addEventListener('svc:message', (e) => {
@@ -371,8 +436,9 @@
     }
   });
 
-  // The stage was resized (OBS source resized): fit again from scratch. And once a second: a feed that just went stale redraws as absent.
-  if (typeof ResizeObserver === 'function') new ResizeObserver(() => render()).observe(stageEl);
+  // The stage was resized (OBS source resized, or it was shown after being hidden): fit again from scratch. And once a second: a feed that
+  // just went stale redraws as absent.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => { fitCap = 0; fitDone = false; render(); }).observe(stageEl);
   setInterval(() => { if (isStale() !== wasStale) render(); }, 1000);
 
   render(); // initial paint (absent state) so hideWhenAbsent applies before first push
