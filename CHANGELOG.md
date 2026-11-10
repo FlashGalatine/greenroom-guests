@@ -9,6 +9,27 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.95] — 2026-11-10
+
+Tests, tools and housekeeping, plus one small fix to the control page: the dock showed an empty amber bar under its header at all times since 1.0.81, and it does not any more. The tests now cover the gaps the 2026-11 test audit listed, and there is a harness that checks the tests themselves.
+
+### Fixed
+
+- **The control page no longer shows an empty amber bar at the top.** The action-error line (the one that appears when an action reports an error) was declared `display: flex`, which overrode its `hidden` attribute, so an empty bar with a × button was on screen from the first load (introduced in 1.0.81). The test that should have noticed (`R21i2`, "the line can be dismissed") asked only whether the attribute was set; it now asks whether the line is on screen, and a new check asserts there is no bar when there is no error. The documentation screenshot of the control page showed the bar, a note that the bridge reports no version, and a note that the room differs from what was typed: it is regenerated from a payload that carries the bridge version and a room name vdo.ninja does not rewrite.
+
+### Added
+
+- **A mutation harness (`npm run mutation`, `tools/mutation/`).** It injects one deliberate bug at a time into a copy of the repository (never this checkout, and the copy never holds the bot token, the saved voice config or backups), runs the test suites against the copy on ports of its own with an allowlisted environment, stops at the first failing check, and records whether the bug was *killed*, *survived*, *flaky*, an *error* (a crash is not a kill), *skipped* (no C# compiler) or timed out; a baseline run of the suites without a bug comes first. It carries the audit's 85 mutants re-expressed against the current code (87 that run). The first full run killed all but 4; because it ran 8 copies at once, kills by checks unrelated to the bug were re-run with confirmation. Result: 8 survivors are equivalent or redundant (a second gate stops the same thing), 8 were real and now have tests (the 100 ms coalesce floor; a flap that ends at the first countdown; the restore refusal message; the slot mirror flag; the default avatar number; a push that changes nothing not reloading the guest video; the Manage link's room encoding; a pasted `<@id>` in the streamer-id setting), and 5 are real and carried (director-min re-adopting its own echo, a nameplate that is set again restarting its rotator, an empty-socials plate keeping a blank row, the roster's overflow chip count missing from its signature, set-current not re-arming voice). The hydrate-timer mutant that survived the audit run (a first-ever run never leaves "VDO Sync has not answered") is killed by R7a, repeatably. The full run takes hours, so it is not part of `verify`; `npm run mutation -- --check` takes a second.
+- **Behavioural checks** (`verify`): the saved config after each command (a blank channel clears `current`, a nameless favorite is named from its ids, ids with letters or dashes are stored as digits, blank ids are not added, `favorite-remove`, an out-of-range `set-settings` with an unknown key and a pasted `<@id>`); the exit-when-Streamer.bot-closes cases with the real grace floor, the output of the bridge that must stay up and its reconnect when Streamer.bot returns, a flap (drop, return, drop again inside one grace window), Streamer.bot never reachable at start, and `quit` and Ctrl+C while in voice sending the leave first; a user who shares a name with an entry that already has a Discord id; a bot joining the voice channel. (`verify:render`): the roster with the streamer's name sorting last, mixed-case names and the `?max=` chip, ticking "leave call & quit" sends exactly `{"exitOnSbClose":true}`, the Manage link's encoding, and the slot-2 nameplate check waiting for its payload instead of a fixed second.
+- `verify` section [6c]: no source, test or document holds a real-looking Discord ID, the screenshot tool is offline, `package.json` is private, the mutation harness loads.
+
+### Changed
+
+- **The test fixtures hold made-up Discord IDs** (the earlier ones looked real; history is not rewritten). `docs/roster-row.png`, `docs/roster-grid-plain.png` and `docs/control-page.png` are regenerated with neutral avatars and nothing loaded from Discord. The examples use an invented handle.
+- `package.json` is `"private": true` (npm will not publish it); `.gitattributes` keeps `start-discord-bridge.bat` at CRLF in every checkout, including a ZIP download; `.gitignore` covers `.verify-*.json`, `/*-check.png` and `vdo-state-*.json`.
+- The mock bridge (`npm run mock:bridge`) takes its settings, id and favorite rules from `sidecar/settings.mjs`, the bridge's own, instead of a copy. The README says which of the C# actions are compiled by which suite and that the mock never launches the bridge.
+
+**Deploy:** copy the `control/` folder and reload the dock (and any control page you keep open); nothing to re-paste or restart. **Not changed:** the bridge, the overlays, the actions. `verify` 558/558, `verify:render` 472/472.
 ## [1.0.87] — 2026-11-10
 
 The optional `Discord Bridge Start` action checks what it is about to launch and says what is wrong, finds Node even when it was installed after Streamer.bot started, and reports a bridge that exits at once. `Discord Voice Command` no longer lets a command forge a log line. Only the two actions, the documents and the tests changed: the bridge, the pages and the other actions are untouched, so the sidecar version stays where it was (1.0.84).
@@ -591,6 +612,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.95]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.87...v1.0.95
 [1.0.87]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.84...v1.0.87
 [1.0.84]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.81...v1.0.84
 [1.0.81]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.78...v1.0.81
