@@ -326,6 +326,30 @@ async function main() {
     check('hideWhenAbsent: the bot leaves voice (hostInChannel false) → overlay hides (the streamer leaving is R20f)', hidden);
     prod.doAction('Discord Voice Push', { payload: ROSTER_STATE() });
 
+    // GRN-170: the streamer first although the name "Zed" sorts last, mixed-case names in case-insensitive order, and ?max= with its "+N" chip
+    {
+      const rx = await startExtra({});
+      const U = (name) => ({ speaking: false, username: name, avatarUrl: embed(1), mute: false, deaf: false });
+      const ID = { zed: STREAMER, bob: '200000000000000011', carol: '200000000000000012', alice: '200000000000000013' };
+      const pushUsers = (users) => rx.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE({ users }) });
+      const uids = (p) => p.evaluate(() => [...document.querySelectorAll('#roster .member')].map((m) => m.dataset.uid));
+      const rp = await newPage(browser, { width: 900, height: 240 });
+      await rp.goto(`${rx.api.base}/overlay/discord-roster.html?layout=row&sbport=${rx.ws}`, { waitUntil: 'load' });
+      const mp = await newPage(browser, { width: 900, height: 240 });
+      await mp.goto(`${rx.api.base}/overlay/discord-roster.html?layout=row&max=2&sbport=${rx.ws}`, { waitUntil: 'load' });
+      pushUsers({ [ID.zed]: U('Zed'), [ID.bob]: U('bob'), [ID.carol]: U('Carol') });
+      const capped = await wait(mp, () => document.querySelectorAll('#roster .member').length === 2 && (document.querySelector('#roster .overflow-chip')?.textContent || '') === '+1', null, 8000);
+      check('R3b: ?max=2 with three people shows two members and a "+1" chip', capped, JSON.stringify({ n: (await uids(mp)).length, chip: await mp.evaluate(() => document.querySelector('#roster .overflow-chip')?.textContent || null) }));
+      pushUsers({ [ID.zed]: U('Zed'), [ID.bob]: U('bob'), [ID.carol]: U('Carol'), [ID.alice]: U('alice') });
+      const capped2 = await wait(mp, () => document.querySelectorAll('#roster .member').length === 2 && (document.querySelector('#roster .overflow-chip')?.textContent || '') === '+2', null, 8000);
+      const mpIds = await uids(mp);
+      check('R3b: a fourth person makes the chip "+2" and the two shown are the streamer and the first by name (alice)', capped2 && mpIds.join() === [ID.zed, ID.alice].join(), JSON.stringify({ capped2, mpIds }));
+      await wait(rp, () => document.querySelectorAll('#roster .member').length === 4, null, 8000);
+      const ord = await uids(rp);
+      check('R3b: the streamer is first although "Zed" sorts last, and the others follow in case-insensitive name order (alice, bob, Carol)', ord.join() === [ID.zed, ID.alice, ID.bob, ID.carol].join(), ord.join());
+      await rp.close(); await mp.close();
+    }
+
     const gridPage = await newPage(browser, { width: 640, height: 480 });
     await gridPage.goto(`${BASE}/overlay/discord-roster.html?layout=grid&labels=0&sbport=${WS_PORT}`, { waitUntil: 'load' });
     const gridOk = await wait(gridPage, () => document.getElementById('roster')?.classList.contains('layout-grid')
@@ -545,11 +569,14 @@ async function main() {
     await npPage.close();
 
     const npPage2 = await newPage(browser, { width: 420, height: 120 });
+    // GRN-59: wait for the payload itself, not for a fixed time: the first vdoninja:update this page gets is recorded
+    await npPage2.addInitScript('window.addEventListener("svc:message", (e) => { const d = e.detail; if (d && d.type === "vdoninja:update" && !window.__vdoSeen) window.__vdoSeen = d.vdoninja || {}; });');
     await npPage2.goto(`${BASE}/overlay/nameplate.html?slot=2&sbport=${WS_PORT}`, { waitUntil: 'load' });
     await wait(npPage2, () => !!document.querySelector('.np-plate'), null, 4000);
-    await new Promise((r) => setTimeout(r, 1200)); // let the sync replay land
+    const gotSlot2 = await wait(npPage2, () => !!(window.__vdoSeen && Array.isArray(window.__vdoSeen.slots) && window.__vdoSeen.slots.some((s) => s && Number(s.slot) === 2 && s.streamID === 'bbb222')), null, 8000);
+    await npPage2.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
     const npHidden = await npPage2.evaluate(() => document.querySelector('.np-plate')?.hidden === true);
-    check('live but unmatched guest (BRAVO) → standalone nameplate stays hidden (no fallback)', npHidden);
+    check('live but unmatched guest (BRAVO) → standalone nameplate stays hidden (no fallback), once the page has received the payload with slot 2 live', gotSlot2 && npHidden, gotSlot2 ? '' : 'slot-2 nameplate page never received the vdoninja payload');
     await npPage2.close();
 
     const gp0 = await newPage(browser, { width: 640, height: 360 });
@@ -3616,6 +3643,22 @@ async function main() {
         push(x, { settings: S() });
         const enabled = await wait(p, (ids) => ids.every((i) => !document.getElementById(i).disabled), DVO_IDS, 5000);
         check('R21a: the Discord settings controls are disabled before the first Discord update that carries settings (a change event before it sends nothing), and enabled by it', dis0.every(Boolean) && early === 0 && dis1.every(Boolean) && enabled, JSON.stringify({ dis0, early, dis1, enabled }));
+        await p.close();
+      }
+      // (a2) GRN-213: ticking "exit when Streamer.bot closes" (after the bridge's update has been delivered: the controls stay disabled until then)
+      // sends exactly one set-settings holding exactly {exitOnSbClose: true}
+      {
+        const x = await startExtra({});
+        const p = await newPage(browser, { width: 920, height: 1300 });
+        await p.goto(ctlUrl(x), { waitUntil: 'load' });
+        const disabledBefore = await p.evaluate(() => document.getElementById('dvoExitOnSbClose').disabled);
+        push(x, { settings: S({ exitOnSbClose: false }) });
+        await wait(p, () => !document.getElementById('dvoExitOnSbClose').disabled, null, 6000);
+        await x.api.clear();
+        await flip(p, 'dvoExitOnSbClose');
+        await sleep(1200);
+        const exitCmds = await settingsCmds(x);
+        check('R21a2: the exit-on-close box is disabled until the bridge has sent its settings, and ticking it sends exactly one set-settings, {"exitOnSbClose":true}', disabledBefore === true && exitCmds.length === 1 && JSON.stringify(exitCmds[0].value) === '{"exitOnSbClose":true}', JSON.stringify({ disabledBefore, exitCmds }));
         await p.close();
       }
       // (b) GRN-33/112: only the keys the operator changed are sent, one partial set-settings per 400 ms window; hand-edited values survive

@@ -29,6 +29,9 @@
 
 import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
+// The rules for settings, ids and favorites are the real bridge's own (sidecar/settings.mjs is dependency-free and starts nothing when imported;
+// sidecar/discord-bridge.mjs itself runs main() on import and is never imported here).
+import { DEFAULT_SETTINGS, sanitizeSettings, normalizeFavorite, digitsOnly, parseJson } from './sidecar/settings.mjs';
 
 const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8084}/`; // the mock's WebSocket port
 const ALLOW_REAL_SB = process.argv.includes('--allow-real-sb');
@@ -39,15 +42,8 @@ const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
 
 const STREAMER_ID = '100000000000000001';
 
-const DEFAULT_SETTINGS = {
-  streamerUserId: STREAMER_ID,
-  avatarPx: 56,
-  streamerPx: 72,
-  accent: 'cyan',
-  scanlines: true,
-  neonBlink: true,
-  hideWhenAbsent: true,
-};
+// The fixtures of this mock use short ids ('111', '333'), so a favorite is held to "1 to 20 digits" here; the real bridge wants 17 to 20.
+const MOCK_ID_RE = /^\d{1,20}$/;
 
 // The three-user commentary channel every demo/test starts from on `connect`.
 const embed = (n) => `https://cdn.discordapp.com/embed/avatars/${n}.png`;
@@ -60,7 +56,7 @@ const SEED_USERS = () => ({
 const state = {
   favorites: [{ id: 'fav1', name: 'Main Hang', serverId: '111', channelId: '222' }],
   current: { serverId: '111', channelId: '222' },
-  settings: { ...DEFAULT_SETTINGS },
+  settings: sanitizeSettings({ streamerUserId: STREAMER_ID }),
   rpc: { enabled: true, hasToken: true, error: null, reconnecting: false, speakingStale: false },
   connected: false,
   hostInChannel: false,
@@ -146,7 +142,7 @@ function startBurst() {
 }
 
 function dispatch(command, value) {
-  const parsed = (() => { try { return value ? JSON.parse(value) : null; } catch { return null; } })();
+  const parsed = (() => { try { return value ? parseJson(value) : null; } catch { return null; } })();
   switch (command) {
     case 'connect':
       state.connected = true;
@@ -169,32 +165,30 @@ function dispatch(command, value) {
       state.channelId = null;
       state.users = {};
       break;
-    case 'set-current':
-      if (parsed && parsed.serverId && parsed.channelId) {
-        state.current = { serverId: String(parsed.serverId), channelId: String(parsed.channelId) };
-        if (state.connected && state.hostInChannel) state.channelId = state.current.channelId;
-      }
+    case 'set-current': {
+      if (!parsed) break;
+      const sId = digitsOnly(parsed.serverId), cId = digitsOnly(parsed.channelId);
+      state.current = sId && cId ? { serverId: sId, channelId: cId } : null; // a blank id clears it, as in the real bridge
+      if (state.current && state.connected && state.hostInChannel) state.channelId = state.current.channelId;
       break;
-    case 'favorite-add':
-      if (parsed && parsed.name) {
-        state.favorites.push({ id: 'fav' + (++favSeq), name: String(parsed.name), serverId: String(parsed.serverId || ''), channelId: String(parsed.channelId || '') });
-      }
+    }
+    case 'favorite-add': {
+      const fav = parsed && normalizeFavorite(parsed, MOCK_ID_RE);
+      if (fav && !state.favorites.some((f) => f.serverId === fav.serverId && f.channelId === fav.channelId)) state.favorites.push({ id: 'fav' + (++favSeq), ...fav });
       break;
+    }
     case 'favorite-update':
       if (parsed && parsed.id) {
-        const f = state.favorites.find((x) => x.id === parsed.id);
-        if (f) {
-          if (parsed.name != null) f.name = String(parsed.name);
-          if (parsed.serverId != null) f.serverId = String(parsed.serverId);
-          if (parsed.channelId != null) f.channelId = String(parsed.channelId);
-        }
+        const f = state.favorites.find((x) => x.id === String(parsed.id));
+        const cand = f && normalizeFavorite({ name: parsed.name != null ? parsed.name : f.name, serverId: parsed.serverId != null ? parsed.serverId : f.serverId, channelId: parsed.channelId != null ? parsed.channelId : f.channelId }, MOCK_ID_RE);
+        if (cand) Object.assign(f, cand);
       }
       break;
     case 'favorite-remove':
-      if (parsed && parsed.id) state.favorites = state.favorites.filter((x) => x.id !== parsed.id);
+      if (parsed && parsed.id) state.favorites = state.favorites.filter((x) => x.id !== String(parsed.id));
       break;
     case 'set-settings':
-      if (parsed && typeof parsed === 'object') state.settings = { ...state.settings, ...parsed };
+      if (parsed && typeof parsed === 'object') state.settings = sanitizeSettings(state.settings, parsed);
       break;
     case 'mock-burst':
       if (value === 'on') { startBurst(); return; } // startBurst pushes itself

@@ -183,6 +183,8 @@ npm run verify:cs      # compiles the three state actions as shipped (the C# com
                        # GREENROOM_NEWTONSOFT_DLL to Streamer.bot's Newtonsoft.Json.dll
                        # and it also re-parses each frame the way Streamer.bot does,
                        # which is what the date-shaped guest label checks need.
+npm run mutation    # tests the tests: injects one deliberate bug at a time into a COPY of the repository and runs the suites against it
+                       # (tools/mutation/README.md). Hours for the whole list, so it is not part of verify; `-- --check` takes a second.
 npm run mock         # mock Streamer.bot (:7478 HTTP, :8084 WebSocket: never Streamer.bot's own ports) for hands-on dev;
                      # it refuses to start if either port is taken, and never uses Streamer.bot's own 7474 / 8080
 npm run mock:bridge  # token-less fake Discord bridge (drives the roster live). It acts only on a server whose Hello says it is

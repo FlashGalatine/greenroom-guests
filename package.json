@@ -16,6 +16,7 @@
     "verify": "node verify.mjs",
     "verify:render": "node verify-render.mjs",
     "verify:cs": "node verify-cs.mjs",
+    "mutation": "node tools/mutation/run.mjs",
     "shots": "node tools/shots.mjs"
   },
   "dependencies": {

@@ -575,10 +575,13 @@ async function main() {
       'favorite-remove state');
     check('favorite-remove round-trips', rem.discordVoice.favorites[0].name === 'Main Hang');
 
-    producer.doAction('Discord Voice Command', { command: 'set-settings', value: JSON.stringify({ accent: 'magenta' }) });
-    check('set-settings round-trips (accent → magenta)', !!(await shimE.inbox.next(4000,
+    // the mock bridge holds settings to the real bridge's own rules (sidecar/settings.mjs): the accent whitelist, the size ranges, no unknown keys
+    producer.doAction('Discord Voice Command', { command: 'set-settings', value: JSON.stringify({ accent: 'magenta', avatarPx: 9999, streamerPx: 1, height: 'abc', bogus: 1 }) });
+    const sset = await shimE.inbox.next(4000,
       (d) => byType('discord:voice:update')(d) && d.discordVoice.settings.accent === 'magenta',
-      'set-settings state')));
+      'set-settings state');
+    check('set-settings round-trips through the shared rules (accent → magenta; avatarPx 9999 → 128, streamerPx 1 → 32; the old height and an unknown key are dropped)',
+      !!sset && sset.discordVoice.settings.avatarPx === 128 && sset.discordVoice.settings.streamerPx === 32 && !('height' in sset.discordVoice.settings) && !('bogus' in sset.discordVoice.settings), JSON.stringify(sset && sset.discordVoice.settings));
 
     producer.doAction('Discord Voice Command', { command: 'leave', value: '' });
     check('leave → users cleared + out of channel', !!(await shimE.inbox.next(4000,
@@ -1040,6 +1043,12 @@ async function main() {
       check('GRN-55/116: the output is the same for any order of the labels (ZULU/BRAVO/CHARLIE with no entry to anchor them) and of the 17-19 digit users; "Alpha"/"alpha" in either order',
         JSON.stringify(o1.directory) === JSON.stringify(o2.directory) && o1.directory.map((e) => e.vdoLabel || e.discordUserId).join() === 'BRAVO,CHARLIE,ZULU,300000000000000001,300000000000000009'
         && JSON.stringify(o3.directory) === JSON.stringify(o4.directory));
+      // an entry that already carries a Discord id is never taken over by a second user of the same name (GRN-170: the !e.discordUserId guard)
+      const samA = '300000000000000031', samB = '300000000000000032';
+      const samDir = [{ vdoLabel: '', discordUserId: samA, displayName: 'Sam', socials: [{ platform: 'twitch', handle: 'samtv' }], auto: false }];
+      const samRun = D.autoPopulate({ directory: JSON.parse(JSON.stringify(samDir)), ignored: [], labels: [], users: { [samA]: { username: 'Sam' }, [samB]: { username: 'Sam' } } });
+      check('GRN-170: an entry "Sam" bound to Discord id A stays exactly as it was when a NEW user B called "Sam" joins; B gets an entry of its own (nothing is re-linked or overwritten)',
+        samRun.directory.length === 2 && JSON.stringify(samRun.directory[0]) === JSON.stringify(samDir[0]) && samRun.directory[1].discordUserId === samB && samRun.directory[1].displayName === 'Sam' && samRun.linked.length === 0, JSON.stringify(samRun.directory));
       const lab = D.autoPopulate({ directory: df1.directory, ignored: [], labels: ['Guest_One'], users: { '300000000000000002': { username: 'Guest One' } } });
       check('GRN-114: the label a Discord-first auto entry takes is REPORTED (labeled: [{index, label}]) so a caller that applies only the reported changes (the dock) does it too',
         (lab.labeled || []).length === 1 && lab.labeled[0].index === 0 && lab.labeled[0].label === 'Guest_One' && lab.changed === true, JSON.stringify(lab.labeled));
@@ -1579,6 +1588,13 @@ async function main() {
       check('GRN-229: package.json is "private" (npm publish refuses), .gitignore holds the one .verify-*.json pattern, /*-check.png and vdo-state-*.json, and .gitattributes keeps *.bat at CRLF',
         pkgJson.private === true && gi.includes('.verify-*.json') && gi.includes('/*-check.png') && gi.includes('vdo-state-*.json') && !gi.includes('.verify-bridge-config.json') && ga.includes('*.bat text eol=crlf'),
         JSON.stringify({ private: pkgJson.private, gi: gi.filter((l) => /verify|check|vdo-state/.test(l)), ga }));
+      // the mutation harness (npm run mutation): its list loads, ids are unique, and every mutant names a file that exists, a bug that differs
+      // from the code, a note and a known suite. Whether each `from` still matches is `npm run mutation -- --check` (it rots with every edit).
+      const { MUTANTS } = await import(new URL('./tools/mutation/mutants.mjs', import.meta.url).href);
+      const mutIds = MUTANTS.map((m) => m.id);
+      const mutBad = MUTANTS.filter((m) => !m.skip && (!existsSync(resolve(__dirname, m.file)) || !m.from || m.from === m.to || !m.note || !['v', 'r', 'c'].includes(m.suite))).map((m) => m.id);
+      check('GRN-218: the mutation harness has its mutants (87 or more that run, unique ids), each with an existing file, a real change, a note and a suite, and package.json has the "mutation" script',
+        MUTANTS.filter((m) => !m.skip).length >= 80 && new Set(mutIds).size === mutIds.length && mutBad.length === 0 && /tools\/mutation\/run\.mjs/.test(pkgJson.scripts && pkgJson.scripts.mutation || ''), JSON.stringify({ n: MUTANTS.length, bad: mutBad, script: pkgJson.scripts && pkgJson.scripts.mutation }));
     }
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
@@ -1632,6 +1648,31 @@ async function main() {
       'sidecar no-token error');
     check('connect without a token → visible file-onboarding error (the token is only ever read from the file)', !!sErr);
 
+    // ── the saved config after each command (Sprint 19, GRN-234; the rules are those of Sprints 13a, 13b and 14) ──
+    {
+      const nap7 = (ms) => new Promise((r) => setTimeout(r, ms));
+      const cmd7 = async (command, value) => { producer.doAction('Discord Voice Command', { command, value: typeof value === 'string' ? value : JSON.stringify(value) }); await nap7(600); return JSON.parse(await readFile(scratchCfg, 'utf8')); };
+      const S7 = '333333333333333333', C7 = '444444444444444444';
+      let c = await cmd7('set-current', { serverId: S7, channelId: C7 });
+      check('GRN-234: set-current saves the pair as digits', JSON.stringify(c.current) === JSON.stringify({ serverId: S7, channelId: C7 }), JSON.stringify(c.current));
+      c = await cmd7('set-current', { serverId: S7, channelId: '' });
+      check('GRN-234: …and a blank channel afterwards clears it (current null) and keeps the favorites', c.current === null && c.favorites.some((f) => f.name === 'Verify Fav'), JSON.stringify({ cur: c.current, fav: c.favorites.length }));
+      const n0 = c.favorites.length;
+      c = await cmd7('favorite-add', { name: '', serverId: '123456789012345678', channelId: '234567890123456789' });
+      check('GRN-234: a favorite with no name is named after the last four digits of its two ids', c.favorites.length === n0 + 1 && c.favorites.some((f) => f.name === '5678/6789' && f.serverId === '123456789012345678' && f.channelId === '234567890123456789'), JSON.stringify(c.favorites.map((f) => f.name)));
+      c = await cmd7('favorite-add', { name: 'Blank', serverId: '', channelId: '234567890123456789' });
+      c = await cmd7('favorite-add', { name: 'Blank2', serverId: '123456789012345678', channelId: '   ' });
+      check('GRN-234: a favorite with a blank server or channel id is not added', c.favorites.length === n0 + 1 && !c.favorites.some((f) => /^Blank/.test(f.name)), JSON.stringify(c.favorites.map((f) => f.name)));
+      c = await cmd7('favorite-add', { name: 'Messy', serverId: '12345678901234a567', channelId: '23456789-0123456-78' });
+      const messy = c.favorites.find((f) => f.name === 'Messy');
+      check('GRN-234: ids with letters or dashes in them are stored as their digits', !!messy && messy.serverId === '12345678901234567' && messy.channelId === '23456789012345678', JSON.stringify(messy));
+      c = await cmd7('favorite-remove', { id: messy && messy.id });
+      check('GRN-234: favorite-remove takes exactly that favorite out of the file', !c.favorites.some((f) => f.name === 'Messy') && c.favorites.length === n0 + 1, JSON.stringify(c.favorites.map((f) => f.name)));
+      c = await cmd7('set-settings', { avatarPx: -5, streamerPx: 9999, height: 'abc', accent: '<script>', bogus: 1 });
+      check('GRN-234: set-settings clamps the sizes (24 and 160), leaves the accent alone for a value that is not one of the three, and saves neither "height" nor an unknown key',
+        c.settings.avatarPx === 24 && c.settings.streamerPx === 160 && c.settings.accent === 'neon-green' && !('height' in c.settings) && !('bogus' in c.settings), JSON.stringify(c.settings));
+    }
+
     // ── 8. exit-on-SB-close lifecycle: closing SB leaves voice + quits (opt-in) ──
     // Isolated on its own SB (separate ports) so killing it doesn't disturb the
     // shared mock the earlier sections use. Two token-less sidecars share that SB:
@@ -1648,7 +1689,8 @@ async function main() {
     try {
       await Promise.all([onCfg, onTok, offCfg, offTok].map((p) => rm(p, { force: true })));
       exitMock = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
-      const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: '500' };
+      const GRACE = 1000; // the bridge's floor for the grace: anything lower is raised to it (sidecar/discord-bridge.mjs SB_EXIT_GRACE_MS)
+      const common = { SB_WS_URL: `ws://127.0.0.1:${EXIT_WS}/`, GREENROOM_SB_EXIT_GRACE_MS: String(GRACE) };
       onSc = await startChild('sidecar/discord-bridge.mjs', 'Connected to Streamer.bot', {
         ...common, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_GUARD_PORT: String(GUARD_BASE + 1),
         DISCORD_BRIDGE_CONFIG: onCfg, DISCORD_BRIDGE_TOKENS: onTok,
@@ -1657,11 +1699,19 @@ async function main() {
         ...common, GREENROOM_GUARD_PORT: String(GUARD_BASE + 2), GREENROOM_EXIT_ON_SB_CLOSE: '0', // the feature is off, said explicitly
         DISCORD_BRIDGE_CONFIG: offCfg, DISCORD_BRIDGE_TOKENS: offTok,
       });
+      let offOut = ''; // what the OFF sidecar logs from here on (GRN-56)
+      for (const s of [offSc.stdout, offSc.stderr]) s.on('data', (d) => { offOut += d; });
       exitMock.kill(); exitMock = null; // "close Streamer.bot"
-      const onExited = await waitExit(onSc, 5000);
+      const onExited = await waitExit(onSc, GRACE + 4000);
       check('exitOnSbClose ON: SB closes → sidecar disconnects from voice and exits within grace', onExited);
-      await new Promise((r) => setTimeout(r, 500 + 300 + 700)); // the grace time, plus margin: the OFF sidecar must have had its full chance to leave
-      check('exitOnSbClose OFF: SB closes → sidecar stays up (reconnect-forever)', offSc.exitCode === null);
+      // The OFF sidecar had its full chance to leave: the grace, the 300 ms of the leave itself, one reconnect tick of 3 s (and its refusal) and a margin (GRN-213).
+      await new Promise((r) => setTimeout(r, GRACE + 300 + 3000 + 700));
+      check('exitOnSbClose OFF: SB closes → sidecar stays up (reconnect-forever) past the ON sidecar\'s exit, the 3 s reconnect tick and its refusal, and never announces a shutdown',
+        offSc.exitCode === null && !/will leave voice and exit/.test(offOut), JSON.stringify({ code: offSc.exitCode, out: offOut.slice(-300) }));
+      // …and it finds Streamer.bot again when that comes back on the same ports (a restart of Streamer.bot)
+      exitMock = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(EXIT_HTTP), SB_WS_PORT: String(EXIT_WS) });
+      for (let t = 0; t < 8000 && !/Connected to Streamer\.bot/.test(offOut); t += 100) await new Promise((r) => setTimeout(r, 100));
+      check('exitOnSbClose OFF: …and when Streamer.bot is back on the same port the sidecar connects to it again', /Connected to Streamer\.bot/.test(offOut) && offSc.exitCode === null, offOut.slice(-300));
     } finally {
       if (onSc) try { onSc.kill(); } catch {}
       if (offSc) try { offSc.kill(); } catch {}
@@ -1994,6 +2044,39 @@ async function main() {
           h.code === null && /cancelling shutdown/i.test(h.out) && !/last attempt/i.test(h.out) && (h.out.match(/will leave voice and exit/g) || []).length === 1, JSON.stringify({ code: h.code, out: h.out.slice(-350) }));
         h.close(); try { sbBack.kill(); } catch {}
 
+        // a flap: Streamer.bot drops, returns, and drops AGAIN inside the same grace window (GRN-171). The return cancelled the first countdown,
+        // so the second drop starts its own: the process must outlive the end of the FIRST countdown and leave only after the second one.
+        {
+          const GR = 4000;
+          const sbF = await startMockWith({});
+          const hf = await rig({ sb: sbF, env: { GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_SB_EXIT_GRACE_MS: String(GR) } });
+          const t0 = Date.now();
+          sbF.child.kill();
+          await nap(300);
+          const sbF2 = await startChild('mock-sb-server.mjs', '[mock] READY', { SB_HTTP_PORT: String(sbF.httpPort), SB_WS_PORT: String(sbF.wsPort) });
+          const returned = await until(() => /cancelling shutdown/i.test(hf.out), 2500);
+          sbF2.kill(); // the second drop, well inside the first window
+          const t1 = Date.now();
+          await nap(Math.max(0, t0 + GR + 500 - Date.now())); // just past where the first countdown would have ended
+          const alive = hf.code === null;
+          const gone = await hf.exited(GR + 3500);
+          check('GRN-171: Streamer.bot drops, returns and drops again inside one grace window: the return cancels the first countdown (logged), the process is still up when that countdown would have ended, a second countdown is started, and it leaves only when that one ends',
+            returned && alive && gone && hf.code === 0 && (hf.out.match(/will leave voice and exit/g) || []).length === 2 && Date.now() - t1 >= GR - 400,
+            JSON.stringify({ returned, alive, gone, code: hf.code, countdowns: (hf.out.match(/will leave voice and exit/g) || []).length, afterSecondDrop: Date.now() - t1 }));
+          hf.close(); try { sbF2.kill(); } catch {}
+        }
+        // Streamer.bot unreachable from the start with exit-on-close on: the bridge never reached it, so there is nothing to leave "because it
+        // closed": it stays up, keeps trying, and announces no shutdown (GRN-171)
+        {
+          const watcherSb = await startMockWith({}); // only for the rig's watcher; the bridge itself is pointed at a port nothing listens on
+          const dead = await freePort();
+          const u = await rig({ sb: watcherSb, noWait: true, env: { SB_WS_URL: `ws://127.0.0.1:${dead}/`, GREENROOM_EXIT_ON_SB_CLOSE: '1', GREENROOM_SB_EXIT_GRACE_MS: '1000' } });
+          await nap(1000 + 300 + 3000 + 1200); // the grace, a reconnect tick and a margin
+          check('GRN-171: exit-on-close on and Streamer.bot never reachable: the bridge is still running after the grace time and a reconnect tick, and has not announced a shutdown',
+            u.code === null && !/will leave voice and exit/.test(u.out), JSON.stringify({ code: u.code, out: u.out.slice(-250) }));
+          u.close();
+        }
+
         // Connect, Reset auth and Stop during a gateway dial (GRN-76, GRN-130) against a mock Discord
         const gwConns = [];
         const gwHello = { ms: 0 }; // how long the mock gateway waits before it greets a connection
@@ -2292,6 +2375,18 @@ async function main() {
           const err = (p) => (p && p.rpc && p.rpc.error) || '';
           const mkSock = () => md.ops4.length;
           try {
+            // ── an exit while in voice leaves the channel first (GRN-171, mutant M41: the exit-on-close path is this same shutdown) ──
+            for (const how of ['quit', 'SIGINT']) {
+              const t = await mk();
+              await ready(t);
+              const o0 = mkSock();
+              if (how === 'quit') t.cmd('quit'); else t.cmd('test-signal', 'SIGINT');
+              const gone = await t.exited(6000);
+              const leaves = md.ops4.slice(o0).filter((d) => d.channel_id === null);
+              check(`GRN-171/129: ${how} while in a voice channel: the bot tells Discord to leave it (op 4 with the channel null) before the process ends with code 0`,
+                gone && t.code === 0 && leaves.length >= 1, JSON.stringify({ gone, code: t.code, ops4: md.ops4.slice(o0), out: t.out.slice(-200) }));
+              t.close();
+            }
             // ── a stall, the loss, the backoff and the rejoin (GRN-141, GRN-49, GRN-53) ──
             {
               const t = await mk({ stallWarnMs: 400, stallLostMs: 1100, backoffMs: [300, 700] });
