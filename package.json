@@ -1,6 +1,6 @@
 {
   "name": "greenroom",
-  "version": "1.0.75",
+  "version": "1.0.78",
   "description": "VDO.ninja guest dock + Discord voice roster overlays for OBS, driven by Streamer.bot — control page, five SB actions, optional Discord bot sidecar",
   "type": "module",
   "license": "MIT",

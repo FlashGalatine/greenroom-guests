@@ -9,6 +9,29 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.78] — 2026-11-09
+
+The Discord roster and the guest slot notice when the bridge has died, the roster folds members that do not fit into a "+N" chip, and the overlays stop trusting odd payloads. Only the overlay pages and the documents changed; the bridge and the actions are not touched, so the sidecar version stays where it was.
+
+### Fixed
+
+- **A dead bridge no longer leaves the roster on air.** The bridge pushes at least every `hb` milliseconds (5 s). When three of those go by with no message, the roster and the guest slot call the feed stale: the roster counts as nobody there (so `hideWhenAbsent` hides it) and the guest slot's speaking glow goes out; the next push brings both back. A payload without `hb` (a bridge older than Sprint 12, or one replayed push) is never stale. `hb` counts only as a number between 1 s and 60 s, and an optional `age` only between 0 and three periods. Time is measured on the page's monotonic clock, so a step of the system clock neither hides a live feed nor keeps a dead one on air.
+- **A crowded roster folds instead of running off the source.** Members that do not fit the browser source become one "+N" chip, the streamer always first, with one console warning. The fit is measured once and kept: the speaking glow keeps pulsing, nothing is redrawn on each Discord update, and a failing avatar is not asked for again. A grid lower than one chip keeps the first row. The source also clips only its trailing end if anything ever overflows.
+- **`hideWhenAbsent` follows the streamer.** With a streamer id set, the roster hides when only the streamer is not in the call. The payload is no longer trusted: a `streamerUserId` that is not a string of digits is ignored, entries of `users` that are not objects are skipped, a username that is a number is shown, and `avatarPx` and `streamerPx` are held to 24–128 and 32–160.
+- **Long names stay inside the source.** The nameplate (and the guest slot's) now ellipsises a long display name and a long handle inside the source; a right-to-left name is cut at its end. The guest slot's own positioning rule no longer loses to the plate's width rule.
+- **The guest slot's glow follows the blink setting** (`neonBlink`), like the roster's. A picture that fails to load shows the default avatar and is tried again a minute later, not on every update.
+- **A wrong `?slot` shows nothing** in the nameplate and the guest slot (it used to quietly show slot 1) and warns in the console; `?sbdebug=1` also shows a hint on the page. Only `1` to `4`, written exactly, count; the control page's Copy buttons are now the documented way to get a slot's address.
+
+### Changed
+
+- **Documents.** `THIRD_PARTY_NOTICES.md` (new, at the repository root): the Boxicons 2.1.4 MIT notice for the TikTok and Twitch glyphs, and the Google Material Icons Apache-2.0 notice for the Discord glyph; a provenance comment above the glyph table says which glyphs have an unconfirmed source. README has a trademark and non-affiliation line. `docs/STREAMERBOT-SETUP.md` gives the roster's source size (a member takes up to about 120 px in a row with names showing, about 86 px with `?labels=0`; 1450 × 140 holds 12 people), points to the per-slot Copy buttons, and says what a stopped feed does. `docs/THEMING.md` describes the automatic fold, and `docs/PROTOCOL.md` the liveness rules.
+- The mock bridge's 20-person burst now includes the streamer, as a real call does, so `hideWhenAbsent` does not hide it.
+
+### Added
+
+- Tests: `verify:render` section R20 (`RENDER_ONLY=liveness`, 30 checks): a killed bridge goes stale and a push brings it back; a payload without `hb` stays live a minute later; a step of the system clock changes nothing; bad `hb` and `age` values; a crowded row and grid fold into "+N" in one measurement, stay still on further pushes (no node added, the glow's animation keeps running, no avatar asked for twice) and keep the first row of a short strip; hardened payload shapes and the streamer's own size clamp; the streamer leaving; a long Latin and a long Arabic plate; a bad `?slot`; a steady glow with `neonBlink` off; the documented source size. The older R3, R4 and R18 checks now assert that the roster they read is on air.
+
+**Deploy:** copy the `overlay/` folder (the roster, guest-slot and nameplate pages changed; `THIRD_PARTY_NOTICES.md` is new at the repository root) and refresh the roster, guest-slot and nameplate browser sources. The stale-feed check needs the bridge from Sprint 12 or later. Nothing to re-paste; the bridge keeps running. **Known limit:** the actions do not stamp the age of a replayed push yet, so a dead bridge's last roster comes back for up to 15 seconds whenever another source or the dock connects (VDO Sync replays it); it hides again by itself. `verify` 503/503, `verify:render` 387/387.
 ## [1.0.75] — 2026-11-09
 
 The Discord bridge reads and writes its files safely, holds its settings to one set of rules, and its dependencies are refreshed. The sidecar version is now 1.0.75.
@@ -506,6 +529,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.78]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.75...v1.0.78
 [1.0.75]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.72...v1.0.75
 [1.0.72]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.69...v1.0.72
 [1.0.69]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.66...v1.0.69
