@@ -9,6 +9,30 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.81] — 2026-11-10
+
+The control page's Discord panel sends only what you changed, waits for the bridge before it lets you edit, and shows what the bridge reports. Only the control page and the documents changed; the bridge and the actions are not touched, so the sidecar version stays where it was (1.0.75).
+
+### Fixed
+
+- **A setting edit no longer overwrites the others, or gets overwritten.** The size, colour and tick-box controls stay greyed out until the bridge has reported its settings, and each edit sends only the key you changed (one `set-settings` per 400 ms): a value you set by hand in the config file (an accent colour as `R,G,B`, `exitOnSbClose` as `1`) is no longer written back as something else. A value you just sent is not flipped back by the 120 ms voice feed; the bridge's echo, or 3 seconds, ends that. A size is held to its range (24–128 and 32–160) before it is sent, a blank size or a name typed into the streamer id box sends nothing and the box shows the bridge's value again (a name says why). An edit made while Streamer.bot is unreachable is kept, the SB pill says it will be sent on reconnect, and it goes out when the connection is back.
+- **The status pill says what is going on.** It shows the channel the bot watches (`in voice · 3 present · Main Hang`), `moved in Discord · 3 present — USE returns the bot` in amber when someone dragged the bot elsewhere, `reconnecting to Discord…`, that the saved channel is not joined, `bridge stopped`, and `bridge: feed stale — is the sidecar running?` when three heartbeats pass with no message (a Streamer.bot that is itself down is not blamed on the sidecar). With no feed at all it asks whether the sidecar is running and pointed at this SB port. Long texts wrap instead of being cut, and at a 460 px dock nothing runs off the side.
+- **Lines under the pill.** The sticky config warning (a config that could not be used or saved), `speaking detection may have stopped: run npm update in sidecar/`, and a note when the bridge is older than the sidecar this page shipped with or reports no version.
+- **Favorites.** The list repaints after USE, LOAD and remove, and ACTIVE shows only while the bot is really in that channel. **Save favorite** takes a `discord.com/channels/…` link (also ptb, canary and discordapp.com) or two ids of 17–20 digits, and says so when they are wrong; after **LOAD** the button reads `Update "<name>"` (with **New instead** to leave that mode) so a Save cannot overwrite the loaded favorite by surprise; the name is cleared only when the list shows the favorite, and a hint says so if it never does; a channel that is already saved keeps its first name and the page says so.
+- **Error messages have a line of their own.** An error an action reports shows under the header, dismissible, with the whole text on hover; the SB pill keeps saying `SB: connected` while the socket is up. A VDO error stays until a VDO update arrives (the bridge's heartbeat does not wipe it); a Discord error until the next Discord update; both after 20 seconds.
+- **Overlay addresses.** The Copy and Open buttons compare the `-control` / `-overlay` prefixes without regard to case (and keep your case), accept `?overlay=<prefix>` to name the overlay mapping, build `127.0.0.1` addresses when the page was opened under a LAN name, and a note under the guest slots appears when the page had to assume `greenroom-overlay`.
+- **Accessibility.** Slot controls, the three status pills, the directory's captions, the expand and remove buttons and the live dots have names, the expand button keeps the focus when its row is rebuilt, and placeholders are readable.
+
+### Added
+
+- **Stop bridge** (asks first; sends `quit`), **Clear channel** (the bot leaves and watches nothing until you press USE) and **Disable bot** (the old **Reset auth**, relabelled: it stops the bot and keeps the token file).
+- Tests: `verify:render` section R21 (`RENDER_ONLY=discordctl`, 65 checks) against the real control page and the mock Streamer.bot: hydration, changed keys only, an edit racing the feed, the hold and its echo, an edit while offline, every pill state, favorites, Save favorite, the error line, labels, overlay addresses, and the 460 px dock.
+
+### Changed
+
+- Documents: `docs/STREAMERBOT-SETUP.md` (the overlay prefix rule and `?overlay=`, the Discord panel), `docs/PROTOCOL.md` (how the control page reads the payload; where errors show), `CHANGELOG.md` (an early line that claimed the Copy buttons follow any prefix).
+
+**Deploy:** copy the `control/` folder and reload the dock (and the control browser source, if you use one). Nothing to re-paste; the bridge keeps running. The version note compares the bridge with sidecar 1.0.75, the version this page shipped with. **Known limit:** VDO Sync replays the last Discord push to every page that connects, so after the bridge has died the pill can read "in voice" for up to 15 seconds each time the dock reconnects; it turns to "feed stale" by itself. `verify` 503/503, `verify:render` 452/452.
 ## [1.0.78] — 2026-11-09
 
 The Discord roster and the guest slot notice when the bridge has died, the roster folds members that do not fit into a "+N" chip, and the overlays stop trusting odd payloads. Only the overlay pages and the documents changed; the bridge and the actions are not touched, so the sidecar version stays where it was.
@@ -531,6 +555,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.81]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.78...v1.0.81
 [1.0.78]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.75...v1.0.78
 [1.0.75]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.72...v1.0.75
 [1.0.72]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.69...v1.0.72
