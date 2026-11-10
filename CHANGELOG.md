@@ -9,6 +9,22 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.84] — 2026-11-10
+
+Every Greenroom piece that talks to Streamer.bot can now authenticate to it, so Streamer.bot's WebSocket **Authentication plus Enforce** can be turned on, and the bridge checks who it is talking to. Authentication stays optional: with it off nothing changes. The sidecar version is now 1.0.84.
+
+### Added
+
+- **The password handshake in all five clients** (the overlay pages, the control page, director-min, the Discord bridge and `backup.mjs`). Each waits about a second for Streamer.bot's Hello. If the Hello asks for authentication and the client has a password, it answers the challenge and subscribes (and syncs) only after Streamer.bot says yes, again after every reconnect. A refused password is reported where you look: the control page's pill ("SB password refused"), director-min's line, the overlay's console and grey state, the bridge's log, `backup.mjs`'s message. With no password, or with Authentication off, nothing is different (a Streamer.bot that sends no Hello is served after the wait, as before).
+- **Where the password goes.** Pages: add `&sbpass=<password>` to the address of the dock, the director-min source and the roster source by hand; the control page's **Copy** and **Open** buttons for the guest-slot and nameplate sources carry it once the control page itself was opened with it (OBS stores these addresses in the scene collection, so the password is in the scene collection; it is in no other address, log line or bus message). The bridge: `"sbPassword"` in `sidecar/discord-tokens.json`, the only place it keeps one (Connect and Disable bot leave the field alone). `backup.mjs`: `GREENROOM_SB_PASSWORD`, else that same field.
+- **The bridge checks the peer.** It acts only after a genuine Streamer.bot Hello: a program that says it is the Greenroom mock (the development mock) is refused, and so is silence ("no Streamer.bot Hello"), unless `GREENROOM_ALLOW_MOCK=1` (for tests). A request Streamer.bot refuses is now logged. The control page shows a permanent **MOCK Streamer.bot** banner beside the SB pill when the peer is the mock, and `backup.mjs` prints the peer it reached.
+- Tests: `verify` section [8f] (the bridge against a mock peer, a genuine Hello, no Hello, a password accepted, wrong, missing and with Enforce off; the password canary in no frame, action, state, payload or log, still in the token file after Connect and Disable bot; the handshake repeated after a dropped connection; `backup.mjs` with and without the password; the shared helpers) and `verify:render` section R22 (the pages with Enforce on, with no password and a wrong one, after a dropped connection, with Enforce off, with no Hello, the Copy addresses, the MOCK banner, nothing printed to a console). The mock Streamer.bot gained `SB_PASSWORD` and `SB_HELLO=real`.
+
+### Changed
+
+- **Documents.** README (Security posture), `docs/PROTOCOL.md` (the handshake and where each password lives) and `docs/STREAMERBOT-SETUP.md` (a new "Optional: Streamer.bot Authentication" section) now recommend Authentication plus Enforce once everything is updated, say that Enforce (not Authentication alone) is what refuses an un-updated piece, and name the OBS sources and docks as the route that carries the password.
+
+**Deploy:** copy the `control/`, `overlay/` and `sidecar/` folders and `backup.mjs`; **restart the bridge** (Discord Bridge Start or `start-discord-bridge.bat`: the running bridge is asked to quit and the new one takes over); reload the dock and the director-min source and refresh every OBS source. Nothing to re-paste. **Only after everything is updated, optionally turn Authentication on:** set the Streamer.bot WebSocket password; add `&sbpass=<password>` to the dock URL, the director-min source and the roster source; re-copy the guest-slot and nameplate addresses from the control page (opened with `?sbpass=`); add `"sbPassword"` to `sidecar/discord-tokens.json` and restart the bridge; set `GREENROOM_SB_PASSWORD` for `backup.mjs` (or rely on the same field); then turn on Authentication and Enforce. **Not yet checked live** (they need a real Streamer.bot with Authentication and Enforce on, and a real bot token): the real Hello's exact shape against the mock's, and the whole chain on a real install. `verify` 520/520, `verify:render` 463/463.
 ## [1.0.81] — 2026-11-10
 
 The control page's Discord panel sends only what you changed, waits for the bridge before it lets you edit, and shows what the bridge reports. Only the control page and the documents changed; the bridge and the actions are not touched, so the sidecar version stays where it was (1.0.75).
@@ -555,6 +571,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.84]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.81...v1.0.84
 [1.0.81]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.78...v1.0.81
 [1.0.78]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.75...v1.0.78
 [1.0.75]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.72...v1.0.75
