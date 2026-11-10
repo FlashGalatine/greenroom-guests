@@ -291,7 +291,7 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
            "speakingStale": false },// speaking detection looks dead (additive)
   "favorites": [ { "id": "…", "name": "Commentary", "serverId": "…", "channelId": "…" } ],
   "current": { "serverId": "…", "channelId": "…" } | null,
-  "currentRefused": false,        // the saved `current` failed its check at login and is not joined (additive)
+  "currentRefused": false,        // the saved `current` failed its check (at login or a rejoin) for a configuration reason and is not joined (additive)
   "hb": 5000,                     // the bridge pushes at least every hb ms while it runs; 0 once it is stopping
   "stopped": false,               // true on the last frame a bridge sends before it exits
   "bridgeVersion": "1.0.63"       // the sidecar build that sent it
@@ -330,8 +330,10 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   bridge ("Removed from voice (…), press USE to rejoin"): it waits for USE or
   Connect. The exception is a 4014 within 15 s of a gateway reconnect, which is a
   dropped session and is rejoined. Dragging the bot to another channel in Discord
-  makes the roster follow it (`channelId` changes, `current` does not); USE brings
-  it back. A login that fails is retried with a capped backoff (5 s, doubling, up to
+  makes the roster follow it while the connection lasts (`channelId` changes, `current`
+  does not; a Stage is not read, its roster is empty); USE brings it back, and so
+  does any rebuild of the connection (a loss, a gateway resume that finds it
+  waiting): the bridge always goes back to `current`. A login that fails is retried with a capped backoff (5 s, doubling, up to
   5 minutes) unless the token is rejected.
 - `hb`, `stopped` and `bridgeVersion` are additive (a consumer that does not know
   them ignores them). The bridge pushes at least every `hb` ms (5000) even when
@@ -357,7 +359,7 @@ absent, is dropped (only the types are logged): anyone on the bus can send any J
 | `connect` | — | (re)start the bot with the FILE token; visible error if none |
 | `leave` | — | leave voice gracefully, stay logged in, clear the rejoin intent and cancel a pending rejoin (the intent is kept in memory only: a bridge restart wants voice again). With no connection to close, a bot that Discord still shows in the call is told to leave (a gateway voice-state update with no channel) |
 | `reset-auth` | — | forget the saved token (file keeps `enabled`) |
-| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live; empty ids leave). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join (View Channel + Connect, room under the user limit; guests count). A target that fails is refused with a message in `rpc.error` (it clears itself after about a minute) and **changes nothing**: the current channel, the saved file, the voice connection and the roster stay. A pick that cannot be saved to the config file is not applied either (`rpc.error` says so). When USEs overlap, the newest decides. Offline, the pick is saved (the reason the bot is offline stays in `rpc.error`) and the same check runs when the bot logs in: a saved channel that fails it is not joined, stays `current`, and the payload says `currentRefused: true` until the pick changes |
+| `set-current` | `{"serverId","channelId"}` | watch this channel (joins/moves if live; empty ids leave). While the bot is online the target is checked first: a server the bot is in, a channel that exists, a **regular voice channel (not a Stage)** the bot can join (View Channel + Connect, room under the user limit; guests count). A target that fails is refused with a message in `rpc.error` (it clears itself after about a minute) and **changes nothing**: the current channel, the saved file, the voice connection and the roster stay. A pick that cannot be saved to the config file is not applied either (`rpc.error` says so). When USEs overlap, the newest decides. Offline, the pick is saved (the reason the bot is offline stays in `rpc.error`) and the same check runs when the bot logs in and at every rejoin: a saved channel that fails it for a configuration reason (no such server or channel, a Stage, no View Channel + Connect) is not joined, stays `current`, and the payload says `currentRefused: true` until the pick changes; a full channel or a network problem is retried instead |
 | `favorite-add` | `{"name","serverId","channelId"}` | add favorite |
 | `favorite-update` | `{"id", …fields}` | edit favorite |
 | `favorite-remove` | `{"id"}` | remove favorite; removing the one that is the current channel clears the current channel and leaves voice (unless another favorite names the same channel) |

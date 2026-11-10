@@ -259,7 +259,10 @@ Webcam-only users skip this whole section — nothing else depends on it.
    server members) appear in the roster by their nickname or Discord name, with
    their mute and deafen state, and members show their per-server avatar.
    If someone drags the bot to another voice channel in Discord, the roster follows
-   it; **USE** (or ACTIVE) brings it back to your chosen channel. If the bot's
+   it for as long as that connection lasts (a Stage is not read: the roster is
+   empty there); **USE** (or ACTIVE) brings it back to your chosen channel, and
+   so does any rebuild of the connection (after a drop, or when the gateway resumes
+   while it was waiting). If the bot's
    connection drops, the bridge rejoins by itself (after 2, 5, 15, then every 30
    seconds); if Discord removes the bot from the call, or the call ends, it stays
    out until you press **USE** or **Connect**. A login that fails because Discord or
@@ -374,9 +377,11 @@ exercised on a live rig. Outcomes, faithfully:
   Connect on that channel and that the channel has room under its user limit, or
   that Discord is not having an outage.
 - **"Bot login failed … retrying"** → Discord or your network is unreachable; the
-  bridge retries on its own with a growing delay. A rejected token ("Discord
-  rejected the bot token") is not retried: reset it in the Developer Portal, put the
-  new one in `sidecar/discord-tokens.json` and press **Connect**.
+  bridge retries on its own with a growing delay. A rejected token is not retried
+  ("Bot login failed: An invalid token was provided. — fix the token, then press
+  Connect." at login, or "Discord rejected the bot token (4004)" when Discord closes
+  the session): reset it in the Developer Portal, put the new one in
+  `sidecar/discord-tokens.json` and press **Connect**.
 - **An unwanted name appeared on stream** → auto-add invented a placeholder from a
   guest's VDO label or Discord name. Rename that row (the `auto` badge clears), `×`
   it, or untick **auto-add guests** in the directory bar; **Clear auto-added**

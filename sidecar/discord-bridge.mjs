@@ -60,7 +60,7 @@ import WebSocket from 'ws';
     process.exit(1);
   }
 }
-const { Client, GatewayIntentBits, ChannelType } = await import('discord.js');
+const { Client, GatewayIntentBits, ChannelType, Status } = await import('discord.js');
 const { joinVoiceChannel, VoiceConnectionStatus, VoiceConnectionDisconnectReason, entersState } = await import('@discordjs/voice');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -107,7 +107,10 @@ const TIMING = (() => {
   }
   return t;
 })();
-const PARK_CODES = new Set([4014, 4021, 4022]); // Discord's voice close codes that mean "do not reconnect": removed, call ended, rate limited
+// Discord's voice close codes that mean "do not reconnect": 4014 disconnected (removed from the call, or the channel deleted), 4021 rate
+// limited, 4022 call terminated. @discordjs/voice makes a Disconnected state out of 4014 only; the bridge catches 4021 and 4022 where
+// the library sees them (see joinCurrentChannel).
+const PARK_CODES = new Set([4014, 4021, 4022]);
 // Numeric, part by part: 1.0.9 is older than 1.0.10.
 const cmpVersion = (a, b) => {
   const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0), pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
@@ -165,7 +168,7 @@ let wantVoice = true;        // operator intent: should the bot be in voice? (a 
                              // rejoin; USE and Connect set it again. In memory only: a bridge restart wants voice.)
 let useSeq = 0;              // the newest USE: a check that finishes for an older one is dropped (GRN-204)
 let joinGen = 0;             // the newest join, leave or stop: an older join that is still waiting does nothing more
-let currentRefused = false;  // the saved current channel failed its check at login: not joined (payload `currentRefused`)
+let currentRefused = false;  // the saved current channel failed its check (at login or at a rejoin) for a configuration reason: not joined (payload `currentRefused`)
 let refusalText = '';        // the text of the refusal of the last USE while it is on the status line
 let refusalTimer = null;
 // Names and avatars seen on VOICE_STATE_UPDATE frames, by user id (GRN-210): a guest invited into the call has no cached GuildMember
@@ -183,6 +186,9 @@ const voiceWatch = new WeakMap(); // connection -> its stall clocks
 const armed = new WeakSet();      // connections that have their Ready listener (GRN-53)
 const wired = new WeakSet();      // connections that have their speaking listeners
 let wiredAt = 0, lastSpeakStartAt = 0; // GRN-174
+const joinedGuilds = new Set(); // servers the bridge has put the bot in a call in (this run): a leave that was lost is looked for there (GRN-150)
+let readyGuildIds = null;    // the servers the last READY listed: a current server that is missing from a new session was left or deleted (GRN-141)
+let currentUnreadable = false; // the bot was dragged into a channel whose roster the bridge cannot read (a Stage)
 const speakingSince = new Map();  // user id -> when the glow came on
 let testKeptConn = null;     // (test hook) a connection kept to prove that its events are ignored later
 
@@ -204,7 +210,7 @@ let stopping = false;        // shutdown(code) has begun: nothing else is pushed
 let guardServer = null;      // the single-instance guard (acquireGuard)
 const guardSockets = new Set();
 const logins = new WeakMap(); // Client -> { settled, destroyWanted }: a client is destroyed only after its login settles (GRN-130)
-let loginRetryTimer = null;   // the relaunch after an invalidated session
+let loginRetryTimer = null;   // the backoff before the next login attempt after a failed one (GRN-52)
 
 async function init() {
   let loaded = false;
@@ -320,9 +326,12 @@ async function checkTarget(serverId, channelId) {
     if (!channel) return { error: 'Channel not found — check the Channel ID.', permanent: true };
     if (channel.type === ChannelType.GuildStageVoice) return { error: 'That is a Stage channel — pick a regular voice channel instead.', permanent: true };
     if (!channel.isVoiceBased()) return { error: 'That channel is not a voice channel.', permanent: true };
-    if (!channel.joinable) return { error: 'The bot cannot join that channel — give it View Channel + Connect there (or the channel is full).', permanent: true };
-    // discord.js counts only the members it has cached against the user limit, and a guest invited into the call is none: count the voice
-    // states. Someone with Move Members can join a full channel (like discord.js decides).
+    // Permissions first (a configuration problem: the operator fixes it). discord.js folds the user limit into `joinable`; it is checked on its
+    // own below, because a full channel is not permanent.
+    if (!canConnect(channel, b)) return { error: 'The bot cannot join that channel — give it View Channel + Connect there.', permanent: true };
+    // discord.js counts only the members it has cached against the user limit, and that includes the bot's own (possibly stale) seat while a
+    // guest invited into the call is none: count the voice states other than the bot's. Someone with Move Members can join a full channel
+    // (like discord.js decides). A full channel is retried: a seat frees up.
     if (channel.userLimit > 0 && channel.id !== currentChannelId) {
       let inside = 0;
       for (const vs of guild.voiceStates.cache.values()) if (vs.channelId === channel.id && vs.id !== b.user.id) inside++;
@@ -330,6 +339,18 @@ async function checkTarget(serverId, channelId) {
     }
     return { guild, channel };
   } catch (e) { return { error: joinErrorText(e), permanent: permanentError(e) }; }
+}
+// Can the bot connect to this channel at all (it can see it, has Connect, is not timed out), leaving the user limit out? This is what
+// discord.js's own `joinable` decides before it adds the "full" rule (GuildChannel.viewable and BaseGuildVoiceChannel.joinable).
+function canConnect(channel, b) {
+  try {
+    if (!channel.viewable) return false;
+    const perms = channel.permissionsFor(b.user);
+    if (!perms) return false;
+    if (perms.has('Administrator', false)) return true; // (allows joining even when timed out)
+    const me = channel.guild.members.me;
+    return !!me && (me.communicationDisabledUntilTimestamp || 0) < Date.now() && perms.has('Connect', false);
+  } catch { return false; }
 }
 // A configuration problem (the server, the channel or the permission is wrong) waits for the operator; anything else (the network,
 // Discord) is retried.
@@ -503,6 +524,9 @@ function leaveGateway(guildId) {
     const g = bot && bot.guilds.cache.get(guildId);
     const inCall = g && g.members.me && g.members.me.voice && g.members.me.voice.channelId;
     if (!inCall) return;
+    // Only through a gateway that is up: @discordjs/ws holds a send until the shard is READY (not merely resumed), so one sent during an outage
+    // would be released at some later re-identify. The resume and the re-identify both come back through reconcileVoice.
+    if (!g.shard || g.shard.status !== Status.Ready) return;
     log(`voice: Discord has the bot in ${inCall} though it should be out: leaving`);
     g.shard.send({ op: 4, d: { guild_id: g.id, channel_id: null, self_mute: true, self_deaf: false } });
   } catch (e) { log(`voice: could not send the leave: ${e && e.message}`); }
@@ -516,7 +540,7 @@ async function resetAuth() {
   schedulePush();
 }
 
-// ── Bot lifecycle (unchanged from the toolkit implementation) ────────────────
+// ── Bot lifecycle ────────────────────────────────────────────────────────────
 
 // A test hook: Discord's REST base, loopback only (the token goes with every request, so it can never be pointed elsewhere).
 function restOptions() {
@@ -546,8 +570,16 @@ function startBot() {
   // Resumed: Discord replays what was missed, so only the voice link needs a look (no re-seed).
   client.on('shardResume', live(() => { rpc.connected = true; rpc.reconnecting = false; lastGatewayAt = Date.now(); reconcileVoice(false); schedulePush(); }));
   // Re-identified (a new session, nothing replayed): discord.js has rebuilt its cache from GUILD_CREATE, so rebuild the roster from it.
-  client.on('shardReady', live(() => { lastGatewayAt = Date.now(); if (!everReady) return; rpc.connected = true; rpc.reconnecting = false; reconcileVoice(true); schedulePush(); }));
-  client.on('guildAvailable', live(onGuildAvailable));
+  client.on('shardReady', live(() => {
+    if (!everReady) return; // the first login is not a recovery (and no earlier kick is a dropped session)
+    lastGatewayAt = Date.now(); rpc.connected = true; rpc.reconnecting = false;
+    // discord.js keeps a guild it had in its cache when a new session no longer lists it (the bot was removed during the outage; Discord sends
+    // no delete for it): READY's list is the truth.
+    const cur = state.current && state.current.serverId;
+    if (cur && readyGuildIds && !readyGuildIds.has(cur) && bot.guilds.cache.has(cur)) { onGuildDelete(bot.guilds.cache.get(cur)); schedulePush(); return; }
+    reconcileVoice(true); schedulePush();
+  }));
+  client.on('guildAvailable', live((g) => { if (everReady) onGuildAvailable(g); })); // (during the first login the join belongs to clientReady)
   client.on('guildDelete', live(onGuildDelete));
   // Fires only for the close codes discord.js will not reconnect after (4004 the token was rejected, intents, sharding): stop, say why.
   client.on('shardDisconnect', live((ev) => {
@@ -618,6 +650,7 @@ function destroyClient(b) {
 
 function stopBot() {
   joinGen++;
+  readyGuildIds = null;
   currentRefused = false; // nothing is checked while the bot is out; the next login checks the saved pick again
   cancelVoiceRejoin();    // the exit path (S12) comes through here: no rejoin or login timer outlives the bot
   clearLoginRetry();
@@ -656,6 +689,7 @@ function destroyVoice() {
     if (c.state.status !== VoiceConnectionStatus.Destroyed) { try { c.destroy(); } catch { /* already gone */ } }
   }
   currentChannelId = null;
+  currentUnreadable = false;
   rpc.hostInChannel = false;
   voiceUsers = {}; // membership is only meaningful while the bot is in the channel
   speakingSince.clear();
@@ -741,15 +775,23 @@ function reconcileVoice(reidentified) {
   try {
     if (!bot || stopping) return;
     if (reidentified && currentChannelId) reseedCurrent();
-    const guildId = state.current && state.current.serverId;
-    if (!(wantVoice && state.current && state.current.channelId)) { if (guildId) leaveGateway(guildId); return; }
+    const intended = !!(wantVoice && state.current && state.current.channelId);
+    const targetGuild = state.current && state.current.serverId;
+    // A call the bridge put the bot in that it should not be in any more (Leave, a cleared channel, another server): a leave that was
+    // refused during an outage is repeated here, for every server the bridge joined (not only the saved one).
+    const out = new Set();
+    for (const gid of joinedGuilds) if (!intended || gid !== targetGuild) out.add(gid);
+    if (!intended && targetGuild) out.add(targetGuild);
+    for (const gid of out) leaveGateway(gid);
+    if (!intended) return;
     if (voiceParked || currentRefused) return;
     const status = voiceConn && voiceConn.state.status;
     if (!voiceConn || status === VoiceConnectionStatus.Destroyed) {
       cancelVoiceRejoin();
       joinCurrentChannel().catch((e) => log(`voice rejoin failed: ${e.message}`));
     } else if (status === VoiceConnectionStatus.Disconnected || status === VoiceConnectionStatus.Signalling) {
-      try { voiceConn.rejoin(); } catch (e) { log(`voice rejoin failed: ${e.message}`); }
+      // (to the CHOSEN channel: a bot that was dragged elsewhere goes back, like every other rebuilt connection)
+      try { voiceConn.rejoin({ channelId: state.current.channelId }); } catch (e) { log(`voice rejoin failed: ${e.message}`); }
     }
   } catch (e) { log(`voice reconcile: ${e.message}`); }
 }
@@ -818,12 +860,24 @@ async function joinCurrentChannel(checked) {
     });
     voiceConn = conn;
     currentChannelId = channel.id;
+    currentUnreadable = false;
+    joinedGuilds.add(guild.id);
 
     conn.on('error', (e) => log(`voice error: ${e.message}`));
     watchVoice(conn);
+    // The library hands 4014 on as a Disconnected state, but answers every other close code (4021 rate limited, 4022 call terminated
+    // included) by signalling a rejoin at once. Discord says those two mean "do not reconnect": the library's entry point for a closed voice
+    // socket is wrapped to catch them (the library registers `conn.onNetworkingClose` on each networking it creates) and park.
+    const libraryClose = conn.onNetworkingClose;
+    if (typeof libraryClose === 'function') {
+      conn.onNetworkingClose = (code) => {
+        if (code === 4021 || code === 4022) { setImmediate(() => onVoiceLost(conn, true, `voice close ${code}`, false)); return; }
+        return libraryClose(code);
+      };
+    }
     // Disconnected: @discordjs/voice reconnects by itself within a few seconds when the bot was moved or the networking dropped; if it does
-    // not, the reason decides. Discord's "do not reconnect" voice close codes (4014 removed from the call, 4021 call ended, 4022 rate
-    // limited) park the bridge, except a 4014 right after a gateway reconnect, which is a dropped session (GRN-49).
+    // not, the reason decides. Discord's "do not reconnect" voice close codes (4014 removed from the call, 4021 rate limited, 4022 call
+    // terminated) park the bridge, except a 4014 right after a gateway reconnect, which is a dropped session (GRN-49).
     const onDisconnected = async () => {
       const { reason, closeCode } = conn.state; // (a destroy() erases them)
       try {
@@ -849,7 +903,7 @@ async function joinCurrentChannel(checked) {
     conn.on(VoiceConnectionStatus.Destroyed, () => {
       if (voiceConn !== conn) return;
       voiceConn = null; clearVoiceWatch(conn);
-      currentChannelId = null; rpc.hostInChannel = false; voiceUsers = {}; speakingSince.clear();
+      currentChannelId = null; currentUnreadable = false; rpc.hostInChannel = false; voiceUsers = {}; speakingSince.clear();
       schedulePush();
     });
 
@@ -918,6 +972,7 @@ function seedFromChannel(channel, keep = false) {
     else lookupGuest(vs.id, channel.guild.id); // nobody has said who this is: ask Discord; the row is added when it answers
   }
   if (keep) for (const id of Object.keys(voiceUsers)) if (prev[id] && prev[id].speaking) voiceUsers[id].speaking = true;
+  for (const id of [...speakingSince.keys()]) if (!voiceUsers[id]) speakingSince.delete(id);
 }
 
 // Who is this user? (a guest who was already in the call when the bridge joined: no frame has told us). The row is added when Discord
@@ -950,12 +1005,16 @@ function onVoiceStateUpdate(oldState, newState) {
       if (voiceConn && newState.channelId && oldState.channelId === currentChannelId && newState.channelId !== currentChannelId) {
         currentChannelId = newState.channelId;
         const ch = newState.channel;
-        if (ch && ch.isVoiceBased()) seedFromChannel(ch, true); else voiceUsers = {};
+        // A Stage has speakers and an audience that this bridge cannot read (GRN-80): the roster is empty there, and nobody in it is listed.
+        currentUnreadable = !ch || !ch.isVoiceBased() || ch.type === ChannelType.GuildStageVoice;
+        if (!currentUnreadable) seedFromChannel(ch, true); else { voiceUsers = {}; speakingSince.clear(); }
         schedulePush();
       }
       return;
     }
+    if (currentUnreadable) return; // the bot was dragged into a channel the bridge cannot read (a Stage): nothing in it is listed
     if (newState.channelId !== currentChannelId) {
+      if (id) speakingSince.delete(id);
       if (id && voiceUsers[id]) { delete voiceUsers[id]; schedulePush(); }
       return;
     }
@@ -980,6 +1039,11 @@ function onVoiceStateUpdate(oldState, newState) {
 // adds, updates and removes the row in the order the frames arrive) and seedFromChannel (a join, a move, a login) need it.
 function onRawPacket(packet) {
   try {
+    if (packet && packet.t === 'READY') { // the servers this session lists (GRN-141)
+      const gs = packet.d && packet.d.guilds;
+      readyGuildIds = Array.isArray(gs) ? new Set(gs.map((x) => String(x && x.id))) : null;
+      return;
+    }
     if (!packet || packet.t !== 'VOICE_STATE_UPDATE') return;
     const d = packet.d;
     const u = d && d.member && d.member.user;
@@ -1015,6 +1079,7 @@ function upsertMember(member) {
 
 function setSpeaking(userId, val) {
   const id = String(userId ?? '');
+  if (!val) speakingSince.delete(id); // (even when the row is gone: a speaker who left mid-sentence must not look stuck when they come back)
   if (!id || !voiceUsers[id]) return; // only a member of the working channel has a speaking flag (GRN-12)
   voiceUsers[id].speaking = !!val;
   if (val) { lastSpeakStartAt = Date.now(); if (!speakingSince.has(id)) speakingSince.set(id, lastSpeakStartAt); }
@@ -1041,7 +1106,7 @@ function testVoice(o) {
   switch (o && o.do) {
     case 'state': if (c) c.state = { ...c.state, status: String(o.status) }; break;
     case 'close': if (c) c.onNetworkingClose(Number(o.code)); break;
-    case 'disconnect': if (c) c.state = { ...c.state, status: 'disconnected', reason: Number(o.reason), closeCode: Number(o.code) }; break;
+    case 'close-kept': if (testKeptConn) { log('test-close-kept: closing the kept connection'); testKeptConn.onNetworkingClose(Number(o.code)); } break;
     case 'speak': if (c) c.receiver.speaking.emit(o.end ? 'end' : 'start', String(o.id)); break;
     case 'keep': testKeptConn = c; break;
     case 'speak-old': if (testKeptConn) { log('test-speak-old: emitting on the kept connection'); testKeptConn.receiver.speaking.emit(o.end ? 'end' : 'start', String(o.id)); } break;
@@ -1393,7 +1458,15 @@ async function acquireGuard() {
     await flushLog(300);
     process.exit(1);
   }
-  const holder = await readBanner(GUARD_PORT);
+  let holder = await readBanner(GUARD_PORT);
+  // A holder that is on its way out (a newer build asked it to quit, or the program ended) closes its sockets without a banner: before
+  // calling the port foreign, look again, and take the port if it has been freed meanwhile.
+  for (let i = 0; !holder && i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    got = await listenGuard();
+    if (got.server) { guardServer = got.server; return; }
+    holder = await readBanner(GUARD_PORT);
+  }
   if (!holder) {
     log(`guard port :${GUARD_PORT} is held by another program or by a Greenroom bridge older than this release (it sends no banner): stop it, or set --guard-port or GREENROOM_GUARD_PORT`);
     await flushLog(300);
