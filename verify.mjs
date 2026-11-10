@@ -28,7 +28,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer, connect as netConnect } from 'node:net';
 import { createServer as createHttp } from 'node:http';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { readFile, rm, mkdtemp, writeFile, readdir, mkdir, stat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, basename } from 'node:path';
@@ -66,12 +66,18 @@ function waitExit(child, ms) {
 // DISCORD_BRIDGE_* must not be able to steer a harness child at a live Streamer.bot or a live sidecar. Everything a child
 // needs beyond this list is passed explicitly.
 const ENV_KEEP = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'LANG', 'LC_ALL', 'TZ'];
+// Nothing a harness child starts may read or write the real per-install files (sidecar/discord-tokens.json, sidecar/discord-voice-config.json):
+// the bridge and backup.mjs fall back to them when DISCORD_BRIDGE_TOKENS / DISCORD_BRIDGE_CONFIG are not set, so every child gets paths of a scratch
+// folder by default (a test that needs its own passes its own).
+const NO_INSTALL = resolve(tmpdir(), 'greenroom-verify-noinstall-' + process.pid);
+mkdirSync(NO_INSTALL, { recursive: true });
+process.on('exit', () => { try { rmSync(NO_INSTALL, { recursive: true, force: true }); } catch { /* best effort */ } });
 function cleanEnv(extra = {}) {
   const env = {};
   for (const k of ENV_KEEP) if (process.env[k] !== undefined) env[k] = process.env[k];
   // The tests run the real bridge against the MOCK Streamer.bot, which the bridge refuses unless told (GRN-195: it acts only after a
   // genuine Hello); the cases that test that refusal pass GREENROOM_ALLOW_MOCK: '0'.
-  return { GREENROOM_ALLOW_MOCK: '1', ...env, ...extra };
+  return { GREENROOM_ALLOW_MOCK: '1', DISCORD_BRIDGE_TOKENS: resolve(NO_INSTALL, 'tokens.json'), DISCORD_BRIDGE_CONFIG: resolve(NO_INSTALL, 'config.json'), ...env, ...extra };
 }
 
 function startChild(script, readyText, extraEnv = {}) {
@@ -1559,26 +1565,42 @@ async function main() {
       // digit, or a run that counts up (…234567890123…). The one bare-number favourite fixture is named on purpose.
       const synthetic = (d) => /0{9,}/.test(d) || /^(\d)\1+$/.test(d) || [...d.slice(1)].every((c, i, a) => i === 0 || Number(c) === (Number(a[i - 1]) + 1) % 10) || d === '223456789012345679';
       const textExt = /\.(mjs|cjs|js|html|md|json|cs|bat|txt|yml|yaml)$/i;
-      const walk = async (dir, acc) => {
-        for (const e of await readdir(dir, { withFileTypes: true })) {
-          if (e.name === 'node_modules' || e.name === '.git' || e.name === 'backups' || e.name.startsWith('.verify-') || e.name === 'package-lock.json') continue;
-          const p = resolve(dir, e.name);
-          if (e.isDirectory()) await walk(p, acc); else if (textExt.test(e.name)) acc.push(p);
+      // The files a set-up kit holds that are NOT part of the project (gitignored, per install): the bot token file, the saved voice config
+      // (a streamer's real server and channel IDs), backups, atomic-write leftovers, the tests' own scratch files. They are neither read nor named.
+      const perInstall = (rel, name) => /^sidecar\/discord-(tokens|voice-config)\.json$/.test(rel) || /\.(tmp)$/.test(name) || /\.corrupt-/.test(name) || /^vdo-state-.*\.json$/.test(name) || name.startsWith('.verify-');
+      const scanForIds = async (root) => {
+        const files = [], odd = [];
+        const walk = async (dir) => {
+          for (const e of await readdir(dir, { withFileTypes: true })) {
+            if (e.name === 'node_modules' || e.name === '.git' || e.name === 'backups' || e.name === 'package-lock.json') continue;
+            const p = resolve(dir, e.name);
+            const rel = p.slice(root.length + 1).replace(/\\/g, '/');
+            if (e.isDirectory()) await walk(p); else if (textExt.test(e.name) && !perInstall(rel, e.name)) files.push({ p, rel });
+          }
+        };
+        await walk(root);
+        for (const f of files) {
+          const t = await readFile(f.p, 'utf8');
+          if ([...t.matchAll(/(?<![\d.])\d{17,20}(?!\d)/g)].some((m) => !synthetic(m[0]))) odd.push(f.rel); // the file is named, the number never is
         }
-        return acc;
+        return { files, odd };
       };
-      const idFiles = await walk(__dirname, []);
-      const odd = [];
-      for (const f of idFiles) {
-        const t = await readFile(f, 'utf8');
-        for (const m of t.matchAll(/(?<![\d.])\d{17,20}(?!\d)/g)) if (!synthetic(m[0])) odd.push(f.slice(__dirname.length + 1) + ': ' + m[0]);
-      }
-      check('GRN-47: no source, test or doc file holds a real-looking Discord ID (every 17-20 digit number is a made-up one)', idFiles.length > 30 && odd.length === 0, odd.slice(0, 5).join('; '));
-      // the three IDs the earlier fixtures held, written in pieces so this file does not carry them
-      const old = ['1104576' + '99291906048', '2595015' + '35484968970', '11975964' + '70245871696'];
-      const withOld = [];
-      for (const f of idFiles) { const t = await readFile(f, 'utf8'); if (old.some((o) => t.includes(o))) withOld.push(f.slice(__dirname.length + 1)); }
-      check('GRN-47: the three IDs the old fixtures held are gone from every file', withOld.length === 0, withOld.join(', '));
+      // the scanner itself, on a scratch tree: a real-looking ID in a source file is found, the same in a per-install file is neither read nor named
+      const idTree = await mkdtemp(resolve(tmpdir(), 'greenroom-idscan-'));
+      scratchDirs.push(idTree);
+      await mkdir(resolve(idTree, 'sidecar'), { recursive: true });
+      await mkdir(resolve(idTree, 'backups'), { recursive: true });
+      const REAL = '1' + '2345678' + '90987654' + '3'; // (made up, but not patterned: 17 digits)
+      await writeFile(resolve(idTree, 'src.js'), `const id = '${REAL}';\n`);
+      await writeFile(resolve(idTree, 'ok.md'), 'an id like 200000000000000001 and 123456789012345678 is fine\n');
+      await writeFile(resolve(idTree, 'sidecar', 'discord-voice-config.json'), `{ "current": { "serverId": "${REAL}" } }`);
+      await writeFile(resolve(idTree, 'sidecar', 'discord-tokens.json'), `{ "botToken": "x", "note": "${REAL}" }`);
+      await writeFile(resolve(idTree, 'backups', 'b.json'), `{ "id": "${REAL}" }`);
+      const probe = await scanForIds(idTree);
+      check('GRN-47 (scanner): a real-looking ID in a source file is found; the same in the token file, the saved voice config or backups/ is neither read nor named; made-up IDs pass',
+        probe.odd.join() === 'src.js' && probe.files.some((f) => f.rel === 'ok.md') && !probe.files.some((f) => /discord-(tokens|voice-config)|^backups/.test(f.rel)), JSON.stringify({ odd: probe.odd, files: probe.files.map((f) => f.rel) }));
+      const scan = await scanForIds(__dirname);
+      check('GRN-47: no source, test or doc file holds a real-looking Discord ID (every 17-20 digit number is a made-up one); the per-install files (token file, voice config, backups) are not read', scan.files.length > 30 && scan.odd.length === 0, scan.odd.slice(0, 8).join(', '));
       const shots = await readFile(resolve(__dirname, 'tools', 'shots.mjs'), 'utf8');
       check('GRN-45/46: tools/shots.mjs shows neutral local avatars, aborts any request to Discord\'s CDN, and says its room and password are throwaway',
         !/https:\/\/cdn\.discordapp\.com/.test(shots) && /page\.route\(\/discordapp\\\.com\//.test(shots) && /data:image\/svg\+xml/.test(shots) && /throwaway/.test(shots) && /never use them for a real session/.test(shots));
@@ -1594,7 +1616,7 @@ async function main() {
       const mutIds = MUTANTS.map((m) => m.id);
       const mutBad = MUTANTS.filter((m) => !m.skip && (!existsSync(resolve(__dirname, m.file)) || !m.from || m.from === m.to || !m.note || !['v', 'r', 'c'].includes(m.suite))).map((m) => m.id);
       check('GRN-218: the mutation harness has its mutants (87 or more that run, unique ids), each with an existing file, a real change, a note and a suite, and package.json has the "mutation" script',
-        MUTANTS.filter((m) => !m.skip).length >= 80 && new Set(mutIds).size === mutIds.length && mutBad.length === 0 && /tools\/mutation\/run\.mjs/.test(pkgJson.scripts && pkgJson.scripts.mutation || ''), JSON.stringify({ n: MUTANTS.length, bad: mutBad, script: pkgJson.scripts && pkgJson.scripts.mutation }));
+        MUTANTS.filter((m) => !m.skip).length >= 87 && new Set(mutIds).size === mutIds.length && mutBad.length === 0 && /tools\/mutation\/run\.mjs/.test(pkgJson.scripts && pkgJson.scripts.mutation || ''), JSON.stringify({ n: MUTANTS.length, bad: mutBad, script: pkgJson.scripts && pkgJson.scripts.mutation }));
     }
 
     // ── 7. The REAL sidecar, token-less, over the real bus ──────────────────────
@@ -1653,8 +1675,8 @@ async function main() {
       const nap7 = (ms) => new Promise((r) => setTimeout(r, ms));
       const cmd7 = async (command, value) => { producer.doAction('Discord Voice Command', { command, value: typeof value === 'string' ? value : JSON.stringify(value) }); await nap7(600); return JSON.parse(await readFile(scratchCfg, 'utf8')); };
       const S7 = '333333333333333333', C7 = '444444444444444444';
-      let c = await cmd7('set-current', { serverId: S7, channelId: C7 });
-      check('GRN-234: set-current saves the pair as digits', JSON.stringify(c.current) === JSON.stringify({ serverId: S7, channelId: C7 }), JSON.stringify(c.current));
+      let c = await cmd7('set-current', { serverId: '<#' + S7 + '>', channelId: C7.slice(0, 9) + ' ' + C7.slice(9) });
+      check('GRN-234: set-current saves the pair as digits (a pasted <#id> and an id with a space are cleaned)', JSON.stringify(c.current) === JSON.stringify({ serverId: S7, channelId: C7 }), JSON.stringify(c.current));
       c = await cmd7('set-current', { serverId: S7, channelId: '' });
       check('GRN-234: …and a blank channel afterwards clears it (current null) and keeps the favorites', c.current === null && c.favorites.some((f) => f.name === 'Verify Fav'), JSON.stringify({ cur: c.current, fav: c.favorites.length }));
       const n0 = c.favorites.length;
@@ -1743,6 +1765,7 @@ async function main() {
         if (opts.cfgDir) await mkdir(env.DISCORD_BRIDGE_CONFIG); // the config path is a folder (it can be neither read nor copied)
         if (opts.stale) { await writeFile(env.DISCORD_BRIDGE_CONFIG + '.tmp', 'x'); await writeFile(env.DISCORD_BRIDGE_TOKENS + '.tmp', 'x'); } // temp files a crash left behind
         const got = []; // every discordVoice payload, in order
+        const gotAt = []; // when each one arrived (Date.now())
         const frames = []; // every raw frame the watcher received
         const watcher = new WebSocket(sb.url);
         await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
@@ -1750,7 +1773,7 @@ async function main() {
           frames.push(raw.toString());
           try {
             const m = JSON.parse(raw.toString());
-            if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') got.push(JSON.parse(d.discordVoiceJson)); }
+            if (m.event && m.event.type === 'Custom') { const d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; if (d && d.type === 'discord:voice:update') { got.push(JSON.parse(d.discordVoiceJson)); gotAt.push(Date.now()); } }
           } catch { /* not a payload */ }
         });
         const subscribeWatcher = () => watcher.send(JSON.stringify({ request: 'Subscribe', id: 's', events: { general: ['Custom'] } }));
@@ -1772,7 +1795,7 @@ async function main() {
         child.stderr.setEncoding('utf8'); child.stderr.on('data', (d) => { out += d; });
         child.on('exit', (c) => { code = c; });
         const r = {
-          sb, child, got, frames, guardPort, env,
+          sb, child, got, gotAt, frames, guardPort, env,
           get out() { return out; }, get code() { return code; }, get last() { return got[got.length - 1]; },
           cmd: (command, value = '') => watcher.send(JSON.stringify({ request: 'DoAction', id: 'c' + (++seq), action: { name: 'Discord Voice Command' }, args: { command, value } })),
           raw: (data) => fetch(`${sb.base}/mock/broadcast`, { method: 'POST', body: JSON.stringify(data) }).then((x) => x.arrayBuffer()),
@@ -1858,6 +1881,20 @@ async function main() {
         check('GRN-129: every payload carries hb 5000, stopped false and the bridge version (additive fields)', first.hb === 5000 && first.stopped === false && first.bridgeVersion === SIDECAR_VERSION, JSON.stringify({ hb: first.hb, stopped: first.stopped, v: first.bridgeVersion }));
         await nap(300);
         check('GRN-02: the pushes at connect are one burst, not one per cause (at most 2 frames in the first 300 ms)', a.got.length <= 2, String(a.got.length));
+        // the 100 ms coalesce floor (GRN-218, mutant M36): twelve changes inside a few milliseconds are pushed in at most a few frames, no two closer than about
+        // 100 ms (a little less is allowed for timer jitter), and the last change is the last state pushed
+        {
+          const cf = await rig();
+          await nap(400);
+          const n0 = cf.got.length;
+          for (let i = 0; i < 12; i++) cf.cmd('set-settings', JSON.stringify({ neonBlink: i % 2 !== 0 })); // the twelfth (i = 11) sets true
+          await nap(1200);
+          const times = cf.gotAt.slice(n0);
+          const gaps = times.slice(1).map((t, i) => t - times[i]);
+          check('GRN-218 (M36): a burst of twelve changes is coalesced: a few pushes (not twelve), none closer than about 100 ms to the one before, and the last state is the one the last change set',
+            times.length >= 2 && times.length <= 6 && Math.min(...gaps) >= 80 && cf.last.settings.neonBlink === true, JSON.stringify({ pushes: times.length, gaps, neonBlink: cf.last.settings.neonBlink }));
+          cf.close();
+        }
         const n0 = a.got.length;
         await nap(5800);
         check('GRN-129: with nothing else going on a heartbeat push arrives about every 5 s', a.got.length > n0, String(a.got.length - n0));
@@ -2060,9 +2097,14 @@ async function main() {
           await nap(Math.max(0, t0 + GR + 500 - Date.now())); // just past where the first countdown would have ended
           const alive = hf.code === null;
           const gone = await hf.exited(GR + 3500);
-          check('GRN-171: Streamer.bot drops, returns and drops again inside one grace window: the return cancels the first countdown (logged), the process is still up when that countdown would have ended, a second countdown is started, and it leaves only when that one ends',
-            returned && alive && gone && hf.code === 0 && (hf.out.match(/will leave voice and exit/g) || []).length === 2 && Date.now() - t1 >= GR - 400,
-            JSON.stringify({ returned, alive, gone, code: hf.code, countdowns: (hf.out.match(/will leave voice and exit/g) || []).length, afterSecondDrop: Date.now() - t1 }));
+          const exitAt = Date.now();
+          // A countdown that runs out does not end the process at once: the bridge makes one last attempt (1 s) and the shutdown takes at least 300 ms. So a first
+          // countdown that was NOT cancelled would end the process at about t0 + GR + 1.3 s, i.e. only GR + 0.5 s after the second drop; the real one leaves
+          // GR + 1.3 s after the second drop, and has made ONE last attempt (the second countdown's).
+          const lastAttempts = (hf.out.match(/last attempt/gi) || []).length;
+          check('GRN-171: Streamer.bot drops, returns and drops again inside one grace window: the return cancels the first countdown (logged), the process leaves only GR + the last attempt + the shutdown floor after the SECOND drop (not at the end of the first countdown), with two countdowns and one last attempt',
+            returned && alive && gone && hf.code === 0 && (hf.out.match(/will leave voice and exit/g) || []).length === 2 && lastAttempts === 1 && exitAt - t1 >= GR + 900,
+            JSON.stringify({ returned, alive, gone, code: hf.code, countdowns: (hf.out.match(/will leave voice and exit/g) || []).length, lastAttempts, afterSecondDrop: exitAt - t1 }));
           hf.close(); try { sbF2.kill(); } catch {}
         }
         // Streamer.bot unreachable from the start with exit-on-close on: the bridge never reached it, so there is nothing to leave "because it

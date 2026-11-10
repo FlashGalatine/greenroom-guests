@@ -3623,7 +3623,8 @@ async function main() {
       const waitPill = (p, re, ms) => wait(p, (src) => new RegExp(src).test(document.getElementById('dvoStatus').textContent), re.source, ms || 6000);
       const edit = (p, id, v) => p.evaluate(([i, val]) => { const el = document.getElementById(i); el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, [id, v]);
       const flip = async (p, id) => { await p.click('#' + id); await p.evaluate(() => document.activeElement && document.activeElement.blur()); };
-      const visible = (p, sel) => p.evaluate((s) => { const e = document.querySelector(s); return !!e && !e.hidden && getComputedStyle(e).display !== 'none'; }, sel);
+      // on screen: rendered (a `hidden` attribute does not count: a CSS rule can override it, which is exactly what this must notice), not invisible, and it has a height
+      const visible = (p, sel) => p.evaluate((s) => { const e = document.querySelector(s); if (!e) return false; const st = getComputedStyle(e); return st.display !== 'none' && st.visibility !== 'hidden' && e.getBoundingClientRect().height > 0; }, sel);
       const SKEW = '(() => { window.__skew = 0; const p = performance.now.bind(performance); performance.now = () => p() + window.__skew; })();';
       const DVO_IDS = ['dvoAccent', 'dvoAvatarPx', 'dvoStreamerPx', 'dvoStreamerId', 'dvoHideWhenAbsent', 'dvoScanlines', 'dvoNeonBlink', 'dvoExitOnSbClose'];
       const ID1 = '111111111111111111', CH1 = '222222222222222222', ID2 = '333333333333333333', CH2 = '444444444444444444';
@@ -3897,6 +3898,7 @@ async function main() {
         await p.addInitScript('window.__ACTION_ERR_MS = 1500;');
         await p.goto(ctlUrl(x), { waitUntil: 'load' });
         await wait(p, () => /SB: connected/.test(document.getElementById('sbStatus').textContent), null, 8000);
+        check('R21i0: with no error there is no error line on screen (the dock does not start with an empty amber bar)', await visible(p, '#actionError') === false, JSON.stringify(await p.evaluate(() => { const e = document.getElementById('actionError'); return { hidden: e.hidden, display: getComputedStyle(e).display, h: e.getBoundingClientRect().height }; })));
         await x.api.broadcast({ type: 'vdo:error', message: 'payload rejected, NOT cached: not valid JSON' });
         await wait(p, () => !document.getElementById('actionError').hidden, null, 4000);
         const st = await p.evaluate(() => ({ pill: document.getElementById('sbStatus').textContent, cls: document.getElementById('sbStatus').className, line: document.getElementById('actionErrorText').textContent, title: document.getElementById('actionError').title }));

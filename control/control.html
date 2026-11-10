@@ -76,6 +76,7 @@
   .pill.error, .pill.warn, #dvoStatus { white-space: normal; max-width: min(100%, 90ch); border-radius: 12px; }
   input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
   .action-error { display: flex; gap: 8px; align-items: flex-start; padding: 6px 10px; margin: 0 0 12px; border: 1px solid var(--amber); border-radius: 8px; background: var(--panel); }
+  .action-error[hidden] { display: none; } /* (display: flex above would otherwise override the hidden attribute: an empty bar on screen at all times) */
   .action-error span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .action-error button { padding: 0 8px; }
   .warn { color: var(--amber); font-size: 12px; }
