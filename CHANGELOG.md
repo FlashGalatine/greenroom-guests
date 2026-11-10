@@ -9,6 +9,32 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.72] — 2026-11-09
+
+The Discord bridge keeps itself in its voice channel, and follows Discord when the connection drops, resumes or restarts. The sidecar version is now 1.0.72.
+
+### Added
+
+- **The bridge rejoins by itself.** When the bot's voice connection drops, the bridge rejoins after 2, 5, 15 and then every 30 seconds. After about 10 seconds outside "Ready" the feed says "Voice connection lost, reconnecting…" (`hostInChannel` false, the roster kept); after about 30 seconds the connection is dropped and rebuilt (no channel and an empty roster until it is back). A connection that is slow to start only warns ("not ready after 20 s, still retrying") and is never given up on for that alone.
+- **Discord removing the bot is respected.** A removal from the call (voice close 4014), a rate limit (4021) or a call that ends (4022) stops the retries: the status says "Removed from voice (…), press USE to rejoin" and the bridge waits for **USE** or **Connect**. A 4014 within 15 seconds of a gateway reconnect is a dropped session, not a removal, and is rejoined. "Bot was removed from that server" does the same.
+- **Dragging the bot to another voice channel in Discord** makes the roster follow it while that connection lasts (`current` stays your chosen channel; a Stage is not read). **USE** brings the bot back, and so does any rebuild of the connection: the bridge always returns to the channel you chose.
+- **`rpc.reconnecting`** (the gateway is resuming or re-identifying; `connected` stays true, so the roster overlay no longer hides during a hiccup) and **`rpc.speakingStale`** (someone is unmuted in the call, but no speaking start has arrived for minutes, or a glow stayed on for minutes: speaking detection may need `npm update` in `sidecar/`). Both are additive and documented in docs/PROTOCOL.md; the control page shows them in Sprint 16.
+- **The login is retried** when Discord or your network is down (5 seconds, doubling, up to 5 minutes), and stops for good on a rejected token ("Discord rejected the bot token", "fix the token, then press Connect").
+- Tests: `verify` section [8d] runs the real bridge and real voice connections on the mock Discord: a stall and the loss, the rejoin and its backoff steps, a park after a removal and the ways back, a dropped session, a move, a resume, a re-identify, a rejected token, a server that comes back, a server that removes the bot, a late "Ready", a stale connection's speaking events, Leave while Discord still shows the bot in the call, a replaced login, the login retry and speaking staleness. The test hooks `test-voice` and `GREENROOM_TIMING` exist only with `GREENROOM_TEST_HOOKS=1`.
+
+### Fixed
+
+- **A gateway resume or re-identify no longer leaves a stale roster or a dead voice link.** After a resume, a voice connection that is waiting is asked to rejoin; after a re-identify (a new session, nothing replayed) the roster is rebuilt from what Discord says now, keeping who was speaking. The intended channel is authoritative: a bot that should be out but that Discord still shows in the call (a lost leave) is told to leave, and one that should be in with no working connection joins at once. A server that becomes available again re-seeds or joins.
+- **Leave while the connection is down** cancels the pending rejoin and tells Discord to take the bot out of the call.
+- **A rejected token (Discord's close code 4004)** and the other closes Discord will not reconnect after stop the bot with the reason on the status line and no endless retry; the dead "session invalidated" relaunch is gone.
+- **A voice connection that was waiting 20 seconds no longer leaves the bot out for good** ("Voice connection not ready"): that was an error with no retry; it is now a warning, then a watchdog and a rejoin.
+- **A channel with a user limit is no longer given up on.** A rejoin into a full channel is retried (a seat frees up), and the bot's own stale seat no longer counts against the limit; only a missing channel, a Stage or a missing permission waits for you.
+- **A bot removed from the server while the connection to Discord was down** (an outage that ended in a new session) now says "Bot was removed from that server" instead of retrying for the rest of the stream.
+- **A leave that Discord never received** (Leave, a cleared channel, another server, pressed during a gateway hiccup) is repeated when the gateway is back, once, for every server the bridge joined.
+- A kick soon after the bridge logged in is a kick (it used to be rejoined as a "dropped session"), and a speaker who leaves mid-sentence no longer makes their next glow look stuck.
+- A login or gateway event from a client that was replaced meanwhile can no longer touch the bot that replaced it.
+
+**Deploy:** **stop the running bridge first** (close its window, or send `quit`), copy the `sidecar/` folder (and `mock-discord-bridge.mjs` if you use it) and start the bridge again with Discord Bridge Start or `start-discord-bridge.bat`; the guard asks an older bridge that is still running to quit and takes over. If the new bridge exits saying the guard port is held, end `node.exe` and start it again. Nothing to re-paste; no page reload. The control page and the overlays are unchanged. `verify` 456/456, `verify:render` 357/357.
 ## [1.0.69] — 2026-11-09
 
 The Discord bridge now checks the channel you pick before it leaves the one it is in, and keeps guests invited into the call on the roster. The sidecar version is now 1.0.69.
@@ -457,6 +483,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.72]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.69...v1.0.72
 [1.0.69]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.66...v1.0.69
 [1.0.66]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.63...v1.0.66
 [1.0.63]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.59...v1.0.63
