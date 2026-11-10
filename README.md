@@ -124,6 +124,8 @@ control/    control.html (director + slot editor + invite builder + Discord sect
             vdo-url.js (the vdo.ninja URL rules: password encoding, view flags; an identical
               copy lives in overlay/)
             vdo-rev.js (rev / writer stamps and echo tracking for vdo.state, shared by both pages)
+            sb-socket.js (opens both pages' Streamer.bot socket from a file, so a failed
+              connect is logged with this file's address, not the page's ?sbpass)
 overlay/    vdoninja-guest.html (?slot=N) · discord-roster.html (?layout=row|grid)
             nameplate.html (?slot=N standalone nameplate) · nameplate-shared.js
             panel-client-sb.js (SB transport shim) · vdo-url.js (copy of control/vdo-url.js)

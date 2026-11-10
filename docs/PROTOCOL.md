@@ -29,8 +29,13 @@ Streamer.bot is the entire bus — there is no other server.
 // hangs up before accepting one, the clients name the likely cause: "SB auth enforced — turn Enforce off, or add ?sbpass=…".
 // Where the password comes from: pages read `?sbpass=<password>` from their own address, as URL-encoded text (an OBS source or dock URL: OBS
 // keeps a source's in the scene collection and a dock's in its own settings; the control page's Copy and Open buttons carry it into the guest-slot and nameplate addresses, and it goes into
-// no other address, log line or bus message); the bridge reads `sbPassword` from `sidecar/discord-tokens.json` (the bridge's only
+// no other address, bus message or console line a page prints); the bridge reads `sbPassword` from `sidecar/discord-tokens.json` (the bridge's only
 // password store; `persistTokens` keeps every field of that file); `backup.mjs` reads `GREENROOM_SB_PASSWORD`, else the same field.
+// The OBS log needs care: obs-browser writes a page's error-level console messages there with their source, and an error raised from a
+// page's inline script has the page's address, `?sbpass` included, as its source. So every page opens its socket in a script file
+// (`control/sb-socket.js`, `overlay/panel-client-sb.js`), and Chromium's own "WebSocket connection to … failed" errors name that file
+// (tested in Chromium, not yet in a live OBS). Any other error raised from a page's inline script (an uncaught exception, say) would
+// still name the address: remove `sbpass` from an OBS log before you share it.
 // The Hello's `info.source` is "mock" for the development mock: the bridge refuses a peer that says so (unless GREENROOM_ALLOW_MOCK=1,
 // for the tests) and acts on nothing before it has seen a genuine Hello; the control page shows a "MOCK Streamer.bot" banner; `backup.mjs`
 // names the peer it reached.
@@ -186,8 +191,12 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   with the stream IDs the adopted state holds as its baseline, and when its roster
   differs from that in `slots[].streamID` alone for two polls in a row it sends
   ONE correction (at most one per 30 s per page, so two pages whose directors
-  disagree cannot flip the slots every few seconds). A page that is not
-  designated takes its own re-assembly as the baseline, so adopting alone never
+  disagree cannot flip the slots every few seconds). A correction that only fills
+  in stream IDs that were blank waits the two polls but not the 30 s: a guest just
+  bound to a slot in the dock (which sends that slot with no stream ID beside a
+  designated director-min) and the IDs a restore blanked. Going back and forth
+  between two views always replaces or blanks an ID, so this is no flip. A page
+  that is not designated takes its own re-assembly as the baseline, so adopting alone never
   makes it push; the exceptions are a write by `backup.mjs restore` (writer
   `"backup"`: every director that follows the guests puts the live IDs back) and a `director-min` that
   had something it could not send. The fields travel inside `vdo.state`, so no
@@ -283,8 +292,15 @@ NOT replay after an SB restart; the sidecar re-pushes on reconnect.
   label that draws nothing (zero-width characters, U+2800) is not added. A page appends a given label or voice
   user at most once per page session (so a label that Streamer.bot rewrites on the
   way back cannot make the pages push at each other); **Un-ignore removed**,
-  **Clear auto-added** and an Import reset that, and adopting another page's state
-  runs no auto-add of its own (the next poll or voice update does).
+  **Clear auto-added** and an Import reset that in the dock, which adds whoever is
+  live right away and sends them with the action's own push. `director-min.html`
+  resets it for the guests an adopted state lacks when that state holds fewer
+  auto entries or a shorter ignore list than its own book (what Clear auto-added,
+  Un-ignore removed, `×`, an edit of an auto entry and an Import of a smaller book
+  send; auto-add never lowers either, and a rewritten label changes neither), so
+  with director-min designated a guest who comes back later is added again too.
+  Adopting another page's state runs no auto-add of its own (the next poll or
+  voice update does).
   `directoryAutoAdd: false` disables the whole pass (absent → **on**, so
   pre-upgrade `vdo.state` blobs opt in). `directoryIgnored` is the
   anti-resurrection list — sorted, deduped keys `vdo:<label key>` (the comparison
@@ -449,8 +465,10 @@ guest slots and overlays show, and `Discord Voice Command` can make the bot leav
 the call or quit. Keep both servers on 127.0.0.1 and load only pages you trust.
 **Enforce**, not Authentication alone, is
 what breaks a client that was not updated. The bridge's only password store is
-`sidecar/discord-tokens.json` (`sbPassword`); the password is in no log line, bus
-message or payload, and a Hello that arrives later than about a second after the
-connection is not waited for. The Authenticate itself is answered within five
+`sidecar/discord-tokens.json` (`sbPassword`); the password is in no line Greenroom
+prints or logs, no bus message and no payload (the OBS log is the exception to watch:
+an uncaught error in a page's inline script would show the page's address there,
+`?sbpass` included; see the handshake notes above), and a Hello that arrives
+later than about a second after the connection is not waited for. The Authenticate itself is answered within five
 seconds or the client reports it and retries; a refused password is retried only
 every 30 seconds by a page (it cannot become right without a new address).

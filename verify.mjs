@@ -1166,6 +1166,14 @@ async function main() {
       check('GRRev.diffKind: same, only the stream IDs differ, or anything else',
         RV.diffKind(sA, RV.sigOf(Object.assign({ rev: 3 }, st))) === 'same' && RV.diffKind(sA, RV.sigOf(withIds(st, 'a2'))) === 'ids'
         && RV.diffKind(sA, RV.sigOf(Object.assign({}, st, { room: 'q' }))) === 'other' && RV.diffKind(sA, RV.sigOf(Object.assign({}, st, { slots: [] }))) === 'other' && RV.diffKind(sA, '') === 'other');
+      // A correction that only fills in blank stream IDs (a guest just bound in the dock, a restore) is no flip between two views, so the
+      // gap between corrections does not hold it back (C55); one that replaces or blanks an ID is, and does.
+      const fills = typeof RV.fillsOnly === 'function' ? RV.fillsOnly : () => null;
+      const two = (a, b, o) => RV.sigOf(Object.assign({ enabled: true, room: 'r', slots: [{ slot: 1, label: 'A', streamID: a }, { slot: 2, label: 'B', streamID: b }], directory: [] }, o || {}));
+      check('GRRev.fillsOnly: true only when every stream ID that differs was blank and now holds one; a replaced, blanked or mixed ID, a difference outside the IDs, or none at all is not a fill-in',
+        fills(two('a1', ''), two('', '')) === true && fills(two('a1', 'b1'), two('', '')) === true && fills(two('a1', 'b1'), two('a1', '')) === true
+        && fills(two('a2', ''), two('a1', '')) === false && fills(two('', ''), two('a1', '')) === false && fills(two('a1', 'b2'), two('', 'b1')) === false
+        && fills(two('a1', ''), two('a1', '')) === false && fills(two('a1', '', { room: 'q' }), two('', '')) === false && fills(two('a1', ''), '') === false);
 
       let clock = 1000;
       const mk = (w) => RV.create({ now: () => clock, writer: w });
@@ -1381,6 +1389,11 @@ async function main() {
     check('/control/vdo-rev.js 200 javascript + exports GRRev', revRes.status === 200 && (revRes.headers.get('content-type') || '').includes('javascript') && (await revRes.text()).includes('globalThis.GRRev'));
     check('both control pages load vdo-rev.js and stamp every push and judge every vdo.state through it (GRN-64, 04, 149)',
       [ctrlBody, minBody].every((b) => b.includes('vdo-rev.js') && b.includes('GRRev.create') && b.includes('.stamp(') && b.includes('.receive(') && b.includes('GRRev.SCHEMA_VERSION')));
+    const sockRes = await fetch(`${BASE}/control/sb-socket.js`);
+    const sockBody = await sockRes.text();
+    check('/control/sb-socket.js 200 javascript + constructs the WebSocket, and both control pages load it and open their Streamer.bot socket through it (GRN-67: a failed connect names this file, not the page address with ?sbpass)',
+      sockRes.status === 200 && (sockRes.headers.get('content-type') || '').includes('javascript') && /new WebSocket\(/.test(sockBody) && sockBody.includes('globalThis.sbOpenSocket')
+      && [ctrlBody, minBody].every((b) => b.includes('<script src="sb-socket.js"></script>') && /sock = sbOpenSocket\(WS_URL\)/.test(b)), `status ${sockRes.status}`);
     // (The director-min strip guard is a behaviour test now: verify-render R9, GRN-202.)
     check('director-min auto-populates too (shared core + the Discord-feed source)',
       minBody.includes('directory-core.js') && minBody.includes('GRDir.autoPopulate')
@@ -3570,6 +3583,15 @@ async function main() {
             const errs = [];
             for (const rel of ['control/control.html', 'control/director-min.html']) if (/console\.error\s*\(/.test(await inline(rel))) errs.push(rel);
             check('[8f] GRN-67: control.html and director-min.html (which can carry ?sbpass in their address) print no error-level console message from their inline scripts (OBS logs those with the page address as the source)', errs.length === 0, errs.join(', '));
+            // Chromium logs a failed connect itself, at error level, with the place the socket was constructed as the source: a socket
+            // built in an inline script names the page address, ?sbpass included. Every page that can carry ?sbpass builds its socket
+            // in an external file (control/sb-socket.js, overlay/panel-client-sb.js), whose address has no query. verify-render R22l
+            // watches the real message.
+            const built = [];
+            for (const rel of ['control/control.html', 'control/director-min.html', 'overlay/nameplate.html', 'overlay/discord-roster.html', 'overlay/vdoninja-guest.html']) {
+              if (/\bnew\s+(?:(?:window|self|globalThis)\s*\.\s*)?WebSocket\b/.test(await inline(rel))) built.push(rel);
+            }
+            check('[8f] GRN-67: no page that can carry ?sbpass constructs a WebSocket in an inline script (a failed connect would be logged with the page address as its source)', built.length === 0, built.join(', '));
           }
           // (F) the helpers all three pages share
           {

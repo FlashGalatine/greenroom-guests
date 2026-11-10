@@ -55,6 +55,7 @@
 <script src="vdo-rev.js"></script>
 <script src="directory-core.js"></script>
 <script src="vdo-url.js"></script>
+<script src="sb-socket.js"></script>
 <script>
 (function () {
   'use strict';
@@ -313,8 +314,8 @@
   // Per-session record of what this page has auto-added (GRN-65): a label or user is appended once, so a label that Streamer.bot
   // rewrites on the way back cannot look new on every poll and loop.
   const autoAdded = new Set();
-  // After adopting another writer's state while something was unsent: the keys this page auto-added that the adopted directory
-  // does not hold are forgotten, or the entries would never be added again.
+  // After adopting another writer's state while something was unsent, or one that carries a reset from the dock: the keys this page
+  // auto-added that the adopted directory does not hold are forgotten, or the entries would never be added again.
   function forgetMissingAuto() {
     const have = new Set();
     for (const e of cfg.directory) {
@@ -416,8 +417,10 @@
       corrPolls = corrSig === sig ? corrPolls + 1 : 1;
       corrSig = sig;
       if (corrPolls < 2) return;
-      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds.
-      if (Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return;
+      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds. Filling in
+      // IDs that were blank (a guest just bound in the dock, which sends the slot without one; a restore) is no such flip: it waits only
+      // for its two polls (C55).
+      if (!GRRev.fillsOnly(sig, lastPushedSig) && Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return;
       isCorrection = true;
     }
     // Record it as pushed only if it was sent: with the socket down the next poll must retry. This page has no flush of its own
@@ -474,7 +477,9 @@
   function connect() {
     reconnectTimer = null;
     let sock;
-    try { sock = new WebSocket(WS_URL); }
+    // Built in sb-socket.js, not here: Chromium logs a failed connect with the place the socket was built as the source, and
+    // from this inline script that would be this page's address, ?sbpass included (OBS writes it to its log).
+    try { sock = sbOpenSocket(WS_URL); }
     catch (err) { connProblem = 'cannot open the WebSocket — retrying'; show(''); scheduleReconnect(); return; }
     ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
@@ -629,6 +634,7 @@
         // Something this page could not send (Streamer.bot was down), or a push that may have been lost with the socket: it has no
         // flush of its own, so after adopting the replay it takes the held IDs as its baseline and its next polls re-push what differs.
         const hadUnsent = synced && (unsent || revs.inflight.length > 0);
+        const autosBefore = cfg.directory.filter((e) => e.auto).length, ignoredBefore = cfg.directoryIgnored;
         if (!adoptCfg(v)) return; // not config-shaped: drop it
         markSynced();
         // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
@@ -639,7 +645,12 @@
         adoptedForeign = isDesignated() || GRRev.writerOf(v) === 'backup' || hadUnsent;
         lastPushedSig = adoptionBaseline(v, adoptedForeign);
         corrSig = ''; corrPolls = 0;
-        if (hadUnsent) forgetMissingAuto(); // what auto-add added meanwhile and the adopted state lacks is added again
+        // The dock's resets (Clear auto-added, ×, Un-ignore removed, an Import of a smaller book) reach this page only as a state with fewer
+        // auto entries or a shorter ignore list, and beside a designated director-min the dock sends no auto-add push of its own: the
+        // guests this page auto-added that the state lacks are forgotten, so they are added again while live (C56). Auto-add never lowers
+        // either count, and a label Streamer.bot rewrote on the way back changes neither, so this cannot answer a rewrite and loop (GRN-65).
+        const reset = cfg.directory.filter((e) => e.auto).length < autosBefore || ignoredBefore.some((k) => !cfg.directoryIgnored.includes(k));
+        if (hadUnsent || reset) forgetMissingAuto(); // what auto-add added meanwhile and the adopted state lacks is added again
         revs.clearThrough(cls.rev);
         unsent = false;
         if (heal) lastPushedSig = GRRev.sigOf(v); // the adopted state, IDs and all: the blank copy differs from it, so it goes out (once)

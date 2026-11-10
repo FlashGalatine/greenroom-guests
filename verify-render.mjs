@@ -2424,7 +2424,7 @@ async function main() {
     // ── R15: directory edits commit from cfg, never from half-edited rows (GRN-72, 63, 71, 28, 96, 111, 134, 182) ──
     if (!ONLY || ONLY === 'directory') {
       console.log('\n[R15] directory: a half-edited row never reaches cfg or a push, an edit patches only its own field');
-      const R15_SECTIONS = 'abcdefghijkl'.split('');
+      const R15_SECTIONS = 'abcdefghijklm'.split('');
       for (const k of (process.env.R15_ONLY || '').split(',').filter(Boolean)) if (!R15_SECTIONS.includes(k)) throw new Error('R15_ONLY=' + k + ': the sections are ' + R15_SECTIONS.join(', '));
       const want = (k) => !process.env.R15_ONLY || process.env.R15_ONLY.split(',').includes(k);
       const DIR_D = [
@@ -2743,6 +2743,112 @@ async function main() {
         const ps = await pushPayloads(x);
         check('R15l: after an Import whose book lacks the live guests, the next poll adds them again', ps.some((q) => q.directory.some((e) => e.vdoLabel === 'ALPHA')), JSON.stringify(ps.map((q) => q.directory.length)));
         await p.close();
+      }
+      // (m) With director-min designated the dock sends no auto-add push of its own, and director-min appends a guest once per session:
+      // the dock's resets (Clear auto-added, Import, Un-ignore removed) must still reach the SAVED state, not only the dock (C56).
+      if (want('m')) {
+        const QUIET_D = '?fixed=1&delay=600000'; // a dock whose own director never answers: whatever comes back is director-min's doing
+        const SEED_M = Object.assign({}, SEED_D, { directory: [], alwaysOnDirector: 'director-min' });
+        const ROSTER3 = { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'ccc333', label: 'CHARLIE' } };
+        const ROSTER2 = { 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' } };
+        const MIRROR_1 = '#vdoSlots .vdo-slot-row[data-slot="1"] .vdo-mirror-cb';
+        const untilM = async (fn, ms) => { for (let t = 0; t < ms; t += 250) { if (await fn()) return true; await sleep(250); } return false; };
+        const autoLabels = async (x) => (await dirOf(x)).filter((e) => e.auto).map((e) => e.vdoLabel).sort().join(',');
+        const openMinM = async (x) => {
+          const m = await newPage(browser, { width: 480, height: 120 }, mockDir(x, LIVE));
+          await m.goto(x.api.base + '/control/director-min.html?sbport=' + x.ws, { waitUntil: 'load' });
+          return m;
+        };
+        const openDockM = async (x, q) => {
+          const p = await newPage(browser, { width: 920, height: 1300 }, mockDir(x, q));
+          p.on('dialog', (d) => d.accept());
+          await p.goto(x.api.base + '/control/control.html?sbport=' + x.ws, { waitUntil: 'load' });
+          await wait(p, () => document.querySelectorAll('#vdoDirectory .vdo-dir-row').length > 0, null, 9000);
+          if (q === LIVE) await wait(p, () => /director: connected/.test(document.getElementById('vdoStatus')?.textContent || ''), null, 9000);
+          await sleep(600);
+          return p;
+        };
+        const pushedOnce = (x) => untilM(async () => (await pushPayloads(x)).length >= 1, 6000); // the dock's own push has landed
+        // Clear auto-added: with a dock whose director is quiet (only director-min can bring them back), and with one that sees the guests.
+        // XRAY is an auto entry for a guest who is not in the room: Clear removes it for good, so the clear always changes the book.
+        for (const dock of ['quiet', 'live']) {
+          const x = await seededMock(Object.assign({}, SEED_M, { directory: [{ vdoLabel: 'XRAY', discordUserId: '', displayName: 'XRAY', socials: [], auto: true }] }));
+          const m = await openMinM(x);
+          const added = await untilM(async () => (await autoLabels(x)) === 'ALPHA,BRAVO,XRAY', 12000); // director-min auto-added the live guests
+          const p = await openDockM(x, dock === 'live' ? LIVE : QUIET_D);
+          await x.api.clear();
+          await p.click('#btnDirClearAuto');
+          const sent = await pushedOnce(x);
+          const back = await untilM(async () => (await autoLabels(x)) === 'ALPHA,BRAVO', 9000);
+          await x.api.clear();
+          await sleep(7500); // three more polls
+          const kept = (await autoLabels(x)) === 'ALPHA,BRAVO';
+          const more = (await pushPayloads(x)).length;
+          check('R15m1' + (dock === 'live' ? 'b' : 'a') + ': with director-min designated and running, "Clear auto-added" in a dock ' + (dock === 'live' ? 'whose own director sees the guests' : 'whose own director is quiet') + ' puts the live guests back in the SAVED state (vdo.state), and they stay there with nothing more pushed',
+            added && sent && back && kept && more === 0, JSON.stringify({ added, sent, back, kept, more, now: await autoLabels(x) }));
+          await p.close(); await m.close();
+        }
+        // Import of a book that lacks the live guests and holds more auto entries than the saved one
+        {
+          const x = await seededMock(SEED_M);
+          const m = await openMinM(x);
+          const added = await untilM(async () => (await autoLabels(x)) === 'ALPHA,BRAVO', 12000);
+          const p = await openDockM(x, LIVE);
+          await x.api.clear();
+          const book = ['XRAY', 'YANKEE', 'ZULU'].map((l) => ({ vdoLabel: l, discordUserId: '', displayName: l, socials: [], auto: true })); // guests who are not in the room
+          await p.setInputFiles('#cfgImportFile', { name: 'm.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ kind: 'greenroom-vdo-backup', vdoninja: Object.assign({}, SEED_M, { directory: book }) })) });
+          const sent = await pushedOnce(x);
+          const back = await untilM(async () => (await autoLabels(x)) === 'ALPHA,BRAVO,XRAY,YANKEE,ZULU', 9000);
+          check('R15m2: with director-min designated and running, an Import whose book lacks the live guests (and holds more auto entries than the saved one) leaves them in the SAVED state beside the imported entries',
+            added && sent && back, JSON.stringify({ added, sent, back, now: await autoLabels(x) }));
+          await p.close(); await m.close();
+        }
+        // Un-ignore removed: a guest removed (×), then un-ignored while away, is added again when they rejoin
+        {
+          const x = await seededMock(SEED_M);
+          const m = await openMinM(x);
+          await wait(m, () => /guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+          await frameOf(m).evaluate((r) => window.__setRoster(r), ROSTER3);
+          const added = await untilM(async () => (await autoLabels(x)) === 'ALPHA,BRAVO,CHARLIE', 12000);
+          const p = await openDockM(x, QUIET_D); // the dock's own director never sees CHARLIE: only director-min can add him again
+          await p.evaluate(() => { const r = [...document.querySelectorAll('#vdoDirectory .vdo-dir-row')].find((q) => q.querySelector('input.vdo-dir-display')?.value === 'CHARLIE'); r.querySelector('.vdo-dir-remove').click(); });
+          const removed = await untilM(async () => { const st = await x.api.state(); return !!st.vdo && !st.vdo.directory.some((e) => e.vdoLabel === 'CHARLIE') && st.vdo.directoryIgnored.includes('vdo:charlie'); }, 6000);
+          await frameOf(m).evaluate((r) => window.__setRoster(r), ROSTER2); // CHARLIE leaves
+          await sleep(3000);
+          await p.click('#btnDirResetIgnored');
+          const unignored = await untilM(async () => { const st = await x.api.state(); return !!st.vdo && st.vdo.directoryIgnored.length === 0; }, 6000);
+          await sleep(3000);
+          await frameOf(m).evaluate((r) => window.__setRoster(r), ROSTER3); // CHARLIE comes back
+          const back = await untilM(async () => (await dirOf(x)).some((e) => e.vdoLabel === 'CHARLIE' && e.auto), 9000);
+          check('R15m3: with director-min designated and running, a guest removed in the dock (×) and un-ignored while away is auto-added into the SAVED state again when they rejoin',
+            added && removed && unignored && back, JSON.stringify({ added, removed, unignored, back, now: await autoLabels(x) }));
+          await p.close(); await m.close();
+        }
+        // The loop guard still holds: a live label that Streamer.bot rewrites on the way back (a lone surrogate becomes U+FFFD) is added once
+        {
+          const x = await startExtra({ SB_REWRITE: 'fffd' });
+          x.prod.doAction('VDO Push', { payload: JSON.stringify(SEED_M) });
+          await sleep(300);
+          await x.api.clear();
+          const m = await openMinM(x);
+          await wait(m, () => /guest/.test(document.getElementById('status')?.textContent || ''), null, 9000);
+          await frameOf(m).evaluate(() => window.__setRoster({ 0: { streamID: 'dIrEcToR00', label: '' }, 1: { streamID: 'aaa111', label: 'ALPHA' }, 2: { streamID: 'bbb222', label: 'BRAVO' }, 3: { streamID: 'sss333', label: 'S\uD800M' } }));
+          const sEntries = async () => (await dirOf(x)).filter((e) => /^S.M$/.test(e.vdoLabel));
+          const added = await untilM(async () => (await sEntries()).length === 1, 12000);
+          const stored = ((await sEntries())[0] || {}).vdoLabel === 'S�M';
+          const p = await openDockM(x, QUIET_D);
+          await p.setChecked(MIRROR_1, true); // an unrelated edit: the dock sends the book as Streamer.bot holds it (the rewritten label)
+          await sleep(7500);
+          const afterEdit = (await sEntries()).length;
+          await p.click('#btnDirClearAuto');
+          await sleep(7500);
+          await p.setChecked(MIRROR_1, false);
+          await sleep(7500);
+          const afterClear = (await sEntries()).length;
+          check('R15m4: a live label that Streamer.bot rewrites on the way back (a lone surrogate becomes U+FFFD) is still added only once: after an unrelated dock edit, and after Clear auto-added and another edit, the saved book holds exactly one entry for that guest',
+            added && stored && afterEdit === 1 && afterClear === 1, JSON.stringify({ added, stored, afterEdit, afterClear }));
+          await p.close(); await m.close();
+        }
       }
     }
 
@@ -3625,6 +3731,30 @@ async function main() {
           offBad && /password refused/i.test(pillBad) && /password refused/i.test(dminBad) && logs.some((t) => /password refused/i.test(t)), JSON.stringify({ offBad, pillBad, dminBad }));
         for (const p of [rBad, cBad, dBad]) await p.close();
         check('R22f: the password is in no console line any of these pages printed', !logs.some((t) => t.includes(PW) || t.includes('wrong-password')), JSON.stringify(logs.filter((t) => t.includes(PW) || t.includes('wrong-password')).slice(0, 3)));
+      }
+      // (b2) nothing listens on ?sbport: Chromium itself logs each failed connect at error level, with the place the socket was built
+      // as the message's source, and obs-browser writes error-level messages to the OBS log with that source. A socket built in a page's
+      // inline script would name the page address, ?sbpass included (GRN-67). Warnings are not checked: obs-browser does not log them.
+      {
+        const closed = await freePort(); // (an explicit sbport on every address: a page without one would dial 8080)
+        const seen = [];
+        const pages = [];
+        for (const rel of ['/control/control.html', '/control/director-min.html', '/overlay/discord-roster.html', '/overlay/vdoninja-guest.html', '/overlay/nameplate.html']) {
+          const p = await newPage(browser, { width: 640, height: 360 });
+          p.on('console', (m) => { if (m.type() === 'error') seen.push({ rel, text: m.text(), at: m.location().url || '' }); });
+          p.on('pageerror', (e) => seen.push({ rel, text: String(e && e.message), at: String(e && e.stack) }));
+          await p.goto(`${BASE}${rel}?${/guest|nameplate/.test(rel) ? 'slot=1&' : ''}sbport=${closed}&sbpass=${enc}`, { waitUntil: 'load' });
+          pages.push(p);
+        }
+        await sleep(2500);
+        const failed = (rel) => seen.filter((s) => s.rel === rel && /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/' failed/.test(s.text));
+        const dialled = ['/control/control.html', '/control/director-min.html', '/overlay/discord-roster.html', '/overlay/vdoninja-guest.html', '/overlay/nameplate.html'].every((rel) => failed(rel).length > 0);
+        const leaked = seen.filter((s) => s.at.includes(PW) || s.at.includes(enc) || s.at.includes('sbpass'));
+        const ctlAt = [...failed('/control/control.html'), ...failed('/control/director-min.html')].map((s) => s.at);
+        check('R22l: with nothing listening on ?sbport, every page that carries ?sbpass logs its failed connects (Chromium\'s own error) with a script file as the source, never the page address: no error-level message or uncaught error names ?sbpass, and the control pages\' failures name control/sb-socket.js',
+          dialled && leaked.length === 0 && ctlAt.length > 0 && ctlAt.every((u) => u === `${BASE}/control/sb-socket.js`),
+          JSON.stringify({ dialled, leaked: leaked.slice(0, 3).map((s) => ({ rel: s.rel, text: s.text.slice(0, 90), at: s.at.replace(PW, '<PW>').slice(0, 160) })), ctlAt: [...new Set(ctlAt)].map((u) => u.replace(PW, '<PW>')) }));
+        for (const p of pages) await p.close();
       }
       // (c2) Streamer.bot refuses the password and hangs up: the pages keep saying "refused" (not "add ?sbpass") and do not hammer it with the same wrong password
       {
@@ -4626,7 +4756,7 @@ async function main() {
     // ── R19: revisions, echoes and one director (GRN-64, 04, 149, 11, 169, 94, 39) ──
     if (!ONLY || ONLY === 'revision') {
       console.log('\n[R19] revision: rev/writer/schemaVersion 2 on every push, echoes by rev, the newer state wins, offline edits kept, one designated director');
-      const R19_SECTIONS = 'abcdefghijklmnoqrstuvwxyz'.split('');
+      const R19_SECTIONS = 'abcdefghijklmnopqrstuvwxyz'.split('');
       for (const k of (process.env.R19_ONLY || '').split(',').filter(Boolean)) if (!R19_SECTIONS.includes(k)) throw new Error('R19_ONLY=' + k + ': the sections are ' + R19_SECTIONS.join(', '));
       const want = (k) => !process.env.R19_ONLY || process.env.R19_ONLY.split(',').includes(k);
       const OLD = () => ({ schemaVersion: 2, rev: Date.now() - 100000, writer: 'wOld' }); // a state some page saved a while ago
@@ -4955,6 +5085,38 @@ async function main() {
           await p.close();
         }
       }
+      // (p) With director-min designated, a guest the operator binds in the dock arrives in the saved state with a blank stream ID (the
+      // dock does not resolve it), and director-min fills it in after its two polls. A second bind soon after is a fill-in too and is not
+      // held back by the gap between corrections, which is there for two directors that disagree (C55); a write that replaces the live
+      // IDs with others still is.
+      if (want('p')) {
+        const seed = mkSeed({ alwaysOnDirector: 'director-min', slots: [slot(1), slot(2), slot(3), slot(4)] });
+        const x = await seededMock(seed);
+        const m = await openMin(x, FIXED, 'window.__CORRECTION_GAP_MS = 60000;'); // a gap far longer than the test: a held-back fill-in cannot pass
+        const d = await openDock(x, FIXED, seed);
+        const pick = '#vdoSlots .vdo-slot-row[data-slot="2"] .vdo-label-sel option';
+        await wait(d, (s) => [...document.querySelectorAll(s)].some((o) => o.value === 'BRAVO'), pick, 9000); // the dock's own director has answered
+        const live = async (n, id) => { const st = await x.api.state(); return !!st.vdo && st.vdo.slots[n - 1].streamID === id; };
+        const bind = async (n, label, id) => {
+          const t = Date.now();
+          await d.selectOption('#vdoSlots .vdo-slot-row[data-slot="' + n + '"] .vdo-label-sel', label);
+          const ok = await until(() => live(n, id), 9000);
+          return { ok, ms: Date.now() - t };
+        };
+        const one = await bind(1, 'ALPHA', 'aaa111');
+        await sleep(2000);
+        const two = await bind(2, 'BRAVO', 'bbb222');
+        const wm = await m.evaluate(() => window.__GR_WRITER);
+        check('R19p: with director-min designated and running, a guest bound to slot 1 in the dock and another bound to slot 2 a few seconds later each carry their live stream ID in the saved state within about two polls (filling in a blank ID is not held back by the gap between corrections)',
+          one.ok && two.ok, JSON.stringify({ one, two }));
+        await x.api.clear();
+        await send(x, Object.assign(mkSeed({ alwaysOnDirector: 'director-min', slots: [slot(1, { label: 'ALPHA', streamID: 'old111' }), slot(2, { label: 'BRAVO', streamID: 'old222' }), slot(3), slot(4)] }), { schemaVersion: 2, rev: Date.now() + 5000, writer: 'wOther' }));
+        await sleep(7500); // three polls
+        const ps = await payloads(x);
+        check('R19p2: …but a write by another page that puts other (non-empty) IDs in those slots, inside the gap, is not corrected by director-min until the gap has passed',
+          ps.length === 0, JSON.stringify(ps.map((q) => [q.writer === wm ? 'director-min' : q.writer, q.slots.slice(0, 2).map((s) => s.streamID).join('/')])));
+        await d.close(); await m.close();
+      }
       // (q) A frame older than this page's push, landing between the push and its echo, is not adopted.
       if (want('q')) {
         const seed = mkSeed();
@@ -4985,21 +5147,34 @@ async function main() {
           ids[0] !== 'aaa111' && ids[1] !== 'bbb222' && /not correcting/.test(note) && ps.length === 1 && ps[0].slots[0].streamID === '' && ps[0].slots[1].streamID === '', JSON.stringify({ ids, note, pushes: ps.map((q) => q.slots.slice(0, 2).map((s) => s.streamID)) }));
         await p.close();
       }
-      // (s) Two corrections are at least the gap apart.
+      // (s) Two corrections are at least the gap apart when the second would replace live IDs (two directors that disagree); filling in
+      // IDs a restore blanked is no such flip and waits only for its two polls (C55).
       if (want('s')) {
         const seed = mkSeed({ slots: BLANK });
         const x = await seededMock(seed);
         const p = await openDock(x, FIXED, seed, 'window.__CORRECTION_GAP_MS = 9000;');
         await until(async () => (await payloads(x)).length >= 1, 14000);
         const t1 = Date.now();
-        await send(x, restoreLike({ rev: Date.now() + 500 })); // a second restore right after
+        // right after: another director's view, with other stream IDs in the slots
+        await send(x, Object.assign(mkSeed({ slots: [slot(1, { label: 'ALPHA', streamID: 'old111' }), slot(2, { label: 'BRAVO', streamID: 'old222' }), slot(3), slot(4)] }), { schemaVersion: 2, rev: Date.now() + 500, writer: 'wOther' }));
         await x.api.clear();
         await sleep(4000);
         const early = await payloads(x);
         await until(async () => (await payloads(x)).length >= 1, 14000);
         const elapsed = Date.now() - t1;
-        check('R19s: a second restore within the gap is corrected only once the gap since the last correction has passed (two directors that disagree cannot flip the slots every few seconds)', early.length === 0 && elapsed >= 8000, JSON.stringify({ early: early.length, elapsed }));
+        check('R19s: a write by another page that puts other (non-empty) stream IDs in the slots, within the gap, is corrected only once the gap since the last correction has passed (two directors that disagree cannot flip the slots every few seconds)', early.length === 0 && elapsed >= 8000, JSON.stringify({ early: early.length, elapsed }));
         await p.close();
+        // a second restore right after a correction: every ID blank again, filled in within about two polls, not after the gap
+        const y = await seededMock(seed);
+        const q = await openDock(y, FIXED, seed, 'window.__CORRECTION_GAP_MS = 60000;');
+        await until(async () => (await payloads(y)).length >= 1, 14000);
+        const restore = restoreLike({ rev: Date.now() + 500 });
+        const t2 = Date.now();
+        y.prod.doAction('VDO Push', { payload: JSON.stringify(restore) }); // what backup.mjs restore pushes
+        const refilled = await until(async () => { const st = await y.api.state(); return !!st.vdo && st.vdo.rev > restore.rev && st.vdo.slots[0].streamID === 'aaa111' && st.vdo.slots[1].streamID === 'bbb222'; }, 14000);
+        const took = Date.now() - t2;
+        check('R19s2: a restore right after a correction (every stream ID blanked) is filled in by the designated director within about two polls, not only after the gap (filling in blank IDs is no flip)', refilled && took < 9000, JSON.stringify({ refilled, took }));
+        await q.close();
       }
       // (t) A push that may be lost is sent again only when the replay does not show a newer write.
       if (want('t')) {

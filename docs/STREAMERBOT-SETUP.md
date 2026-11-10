@@ -507,6 +507,9 @@ exercised on a live rig. Outcomes, faithfully:
       dock. Confirm the standalone 1×1 source (in a scene that is always shown) with the dock closed.
 - [ ] **Guest audio** — *not yet checked live.* Each live guest moves its own meter in the OBS mixer
       (**Control audio via OBS** ticked on the four slot sources, §3), and a test recording has the guests' audio.
+- [ ] **`?sbpass` and the OBS log** — *not yet checked live* (tested in Chromium only). With `&sbpass=` on the
+      director-min source, start OBS while Streamer.bot is closed, then search the current OBS log for the password:
+      the failed connections should name `sb-socket.js`, never the page's address.
 
 ## Optional: Streamer.bot Authentication
 
@@ -533,7 +536,11 @@ load only pages you trust (README → Security posture).
    address in the scene collection and a dock's in its own settings (the custom
    browser docks list), so the password is in both, and the **Open** buttons (and a control page opened in a
    browser tab) put the address in that browser's history too; that is the accepted cost (and
-   the reason the password is never on the bus or in a log). A page that gets no
+   the reason the password is never on the bus or in a line Greenroom prints or logs). OBS's
+   own log can still show a page's address: the pages are built so that a failed connection
+   to Streamer.bot names a script file instead, but an unexpected script error on a page
+   would name the address, `sbpass` included, so remove it from an OBS log before you post
+   the log anywhere. A page that gets no
    greeting from Streamer.bot within about a second carries on without a password.
 3. Put `"sbPassword": "<password>"` into `sidecar/discord-tokens.json` (next to
    `botToken`; it is the only place the bridge reads it from, since `Discord Bridge Start`

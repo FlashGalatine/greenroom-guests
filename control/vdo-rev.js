@@ -67,6 +67,15 @@
     const blank = (o) => Object.assign({}, o, { slots: Array.isArray(o.slots) ? o.slots.map((s) => (isObj(s) ? Object.assign({}, s, { streamID: '' }) : s)) : o.slots });
     return canonical(blank(a)) === canonical(blank(b)) ? 'ids' : 'other';
   }
+  // Whether sigA differs from sigB in slots[].streamID alone, and only by filling in: every slot whose ID differs has none in sigB and
+  // one in sigA (a guest just bound to a slot in the dock, or the IDs a restore blanked). Two directors that see different streams cannot
+  // flip the slots with fill-ins alone: going from one view back to the other replaces or blanks an ID, and that is never a fill-in.
+  function fillsOnly(sigA, sigB) {
+    if (diffKind(sigA, sigB) !== 'ids') return false;
+    const a = parse(sigA).slots, b = parse(sigB).slots; // 'ids': the same slots in the same order, the stream IDs aside
+    const id = (s) => (isObj(s) ? String(s.streamID ?? '') : '');
+    return Array.isArray(a) && Array.isArray(b) && a.every((s, i) => id(s) === id(b[i]) || (id(b[i]) === '' && id(s) !== ''));
+  }
   function newWriterId() {
     try {
       const a = new Uint32Array(2);
@@ -140,5 +149,5 @@
     };
   }
 
-  globalThis.GRRev = { create, sigOf, revOf, writerOf, diffKind, canonical, META, SCHEMA_VERSION };
+  globalThis.GRRev = { create, sigOf, revOf, writerOf, diffKind, fillsOnly, canonical, META, SCHEMA_VERSION };
 })();

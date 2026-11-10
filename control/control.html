@@ -358,6 +358,7 @@
 <script src="vdo-rev.js"></script>
 <script src="directory-core.js"></script>
 <script src="vdo-url.js"></script>
+<script src="sb-socket.js"></script>
 <script>
 (function () {
   'use strict';
@@ -774,7 +775,9 @@
   function connect() {
     reconnectTimer = null;
     let sock;
-    try { sock = new WebSocket(WS_URL); }
+    // Built in sb-socket.js, not here: Chromium logs a failed connect with the place the socket was built as the source, and
+    // from this inline script that would be this page's address, ?sbpass included (OBS writes it to its log).
+    try { sock = sbOpenSocket(WS_URL); }
     catch (err) { setPill(els.sbStatus, 'SB: cannot connect — retrying', 'error'); scheduleReconnect(); return; }
     ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
@@ -1154,8 +1157,10 @@
       corrPolls = corrSig === sig ? corrPolls + 1 : 1;
       corrSig = sig;
       if (corrPolls < 2) return false;
-      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds.
-      if (Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return false;
+      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds. Filling in
+      // IDs that were blank (a guest just bound in the dock, which sends the slot without one; a restore) is no such flip: it waits only
+      // for its two polls (C55).
+      if (!GRRev.fillsOnly(sig, lastPushedSig) && Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return false;
       isCorrection = true;
     }
     // Stamp it (rev, writer, schemaVersion) and record it as pushed only if it was sent: with the socket down the next poll must
@@ -2181,6 +2186,9 @@
     dirOpen.clear();
     dirSig = '';
     renderDirectory(true);
+    // Whoever is live is added again now, from the rows just drawn (the cleared ones would still count as present), and goes out with
+    // this push, as Un-ignore does: beside a designated director-min this page sends no auto-add push of its own (C56).
+    if (runAutoAdd()) renderDirectory(true);
     operatorAction(() => assembleAndPush(false));
   });
 
@@ -3013,11 +3021,15 @@
       hydrated = true;
       gotConfig = true; syncedByMarker = false; // this page now holds a real config
       dirOpen.clear(); // a different directory → the open-row ids are meaningless
-      autoAdded.clear(); // a new book: live guests it lacks are added again by the next poll
+      autoAdded.clear(); // a new book: live guests it lacks are added again (below)
       flagsNote = ''; // a note about the previous Save says nothing about the imported flags
       blankIfOffOrMoved(prev); // a disabled backup, or one that moves to another room, carries no live streams
       const sentBefore = pushSeq;
       renderAll(); // (switching a running director off pushes the blank state itself)
+      // Live guests the file lacks are added now, from the rows just drawn, and go out with the import: beside a designated director-min
+      // this page sends no auto-add push of its own (C56). Not when the import switched a running director off: that push was the
+      // import's, and the roster went with the director.
+      if (pushSeq === sentBefore && runAutoAdd()) renderDirectory(true);
       // Persist to SB (VDO Push → vdo.state). Forced: an import of this page's own export
       // is identical to what it last pushed, and must still reach a wiped vdo.state.
       reportPush(pushSeq !== sentBefore || assembleAndPush(false, true));
