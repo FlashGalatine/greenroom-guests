@@ -9,6 +9,19 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.106] — 2026-11-10
+
+Documents only: the results of a partial live run of 1.0.104, and two warnings that run turned up. Nothing a streamer runs changed, so the sidecar version stays 1.0.104.
+
+### Changed
+
+- **A partial live run is recorded** (setup guide §6, README): Greenroom 1.0.104 on Streamer.bot 1.0.7 and OBS 33.0.1, on a spare install with a real vdo.ninja room and a real bot. Confirmed: guest video with `director-min` designated; two binds a few seconds apart on screen within about 5 seconds each; Clear auto-added and Un-ignore removed reaching the saved state; the bridge saving twice after it started on a bad config; the bridge joining voice. It is **not** a re-run of the checklist, which still stands as run on 1.0.4.
+- **The HTTP `DoAction` statement is confirmed on Streamer.bot 1.0.7.** With Authentication and Enforce on, `POST /DoAction` naming `VDO Sync`, sent with no password, returned 204 and ran the action. README, the protocol document and the setup guide say so next to the statement from Streamer.bot's documentation.
+- **`?sbpass` and the OBS log is still open.** The OBS 33.0.1 logs held no password, but no failed-connection line from a browser source either, so the check did not show what such a line names.
+- **Updating, a warning for overlays of your own** (README → Updating, step 5): an overlay outside Greenroom that reads `vdoninja:update` or `discord:voice:update` straight from Streamer.bot must read the string fields `vdoninjaJson` / `discordVoiceJson` before the three state actions are re-pasted. The actions have not sent the nested object since 1.0.34, and an overlay that reads only that shows nothing afterwards. The live run found this in a kit that showed guest names and socials.
+- **`Discord Bridge Start`: change only the `BUNDLE` line** (setup guide §2, README → Updating, step 6). `BUNDLE_PLACEHOLDER`, two lines below, must keep its original text: with the same path on both lines the action logs "BUNDLE is still the placeholder" and starts nothing, although the path is right.
+
+**Deploy:** nothing to copy, re-paste, restart or refresh. **Not done:** the full §6 checklist on 1.0.7; old auto-added rows that hold socials, the 50-entry limit and guest audio were not run live. `verify` 575/575; `verify:render` not re-run (no page or script changed; 487/487 on 1.0.104).
 ## [1.0.104] — 2026-11-10
 
 Six defects found by the review of the whole 1.0.14 to 1.0.98 stack before it is merged, fixed. Four are in code (the bridge's config guard, the auto-add limit, the director's correction gap, the dock's auto-add buttons beside an always-on director-min), one is where the control pages open their socket, and one is a claim in the documents that said more than is true.
@@ -656,6 +669,7 @@ persistence semantics, command bus, token-less real sidecar, malformed
 a scripted fake director, PFP glow, roster badges, 20-user 100 ms burst,
 control page).
 
+[1.0.106]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.104...v1.0.106
 [1.0.104]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.98...v1.0.104
 [1.0.98]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.95...v1.0.98
 [1.0.95]: https://github.com/FlashGalatine/greenroom-guests/compare/v1.0.87...v1.0.95
