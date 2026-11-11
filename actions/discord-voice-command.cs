@@ -37,15 +37,34 @@ public class CPHInline
             CPH.WebsocketBroadcastJson(
                 "{\"type\":\"discord:voice:command\",\"command\":" + JsonStr(command) +
                 ",\"value\":" + JsonStr(value) + "}");
-            CPH.LogInfo("[Discord Voice Command] " + command);
+            CPH.LogInfo("[Discord Voice Command] " + Safe(command, 40));
             return true;
         }
         catch (Exception ex)
         {
-            CPH.LogWarn("[Discord Voice Command] ERROR: " + ex);
+            CPH.LogWarn("[Discord Voice Command] ERROR: " + ex.GetType().Name + ": " + Safe(ex.Message, 200));
             CPH.WebsocketBroadcastJson("{\"type\":\"discord:voice:error\",\"message\":" + JsonStr(ex.Message) + "}");
             return false;
         }
+    }
+
+    // For the LOG only (the broadcast keeps the text exactly): any frame can reach this action, so a command with a line break in it must
+    // not forge a log line, and a very long one must not fill the log. Control characters (CR and LF included, and the C1 range that
+    // holds NEL and the 8-bit CSI), the Unicode line and paragraph separators and the bidi controls become spaces, and the text is cut at
+    // `max` characters without splitting a surrogate pair.
+    static string Safe(string s, int max)
+    {
+        if (s == null) return "";
+        var sb = new StringBuilder();
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (sb.Length >= max || (char.IsHighSurrogate(c) && sb.Length + 1 >= max)) { sb.Append("..."); break; }
+            bool blank = c < ' ' || (c >= '\u007f' && c <= '\u009f') || c == '\u2028' || c == '\u2029'
+                || (c >= '\u200e' && c <= '\u200f') || (c >= '\u202a' && c <= '\u202e') || (c >= '\u2066' && c <= '\u2069');
+            sb.Append(blank ? ' ' : c);
+        }
+        return sb.ToString();
     }
 
     // Minimal, correct JSON string encoder (escapes quotes, backslashes, controls).

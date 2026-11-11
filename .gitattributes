@@ -1,0 +1,2 @@
+# the Windows batch launcher keeps CRLF in every checkout, including a Download ZIP copy
+*.bat text eol=crlf

@@ -21,11 +21,21 @@
   scene collection you stream with):
       http://127.0.0.1:7474/greenroom-control/director-min.html
   That keeps auto-follow-on-rejoin alive with zero operator attention; open
-  control.html only when you want to edit slots. Prefer ONE long-lived director
-  page (this one). While control.html is open it also hosts a director iframe, so
-  expect a brief two-director overlap — their rosters converge within a poll, and
-  the signature gates prevent push ping-pong; real vdo.ninja multi-director
-  behavior stays on the live-validation checklist (docs/STREAMERBOT-SETUP.md).
+  control.html only when you want to edit slots.
+
+  THE ONE-DIRECTOR RULE: run ONE long-lived director — this page when you use it,
+  otherwise the dock's own hidden director — and tick "director-min.html is my
+  always-on director" in the dock (saved as vdo.state's alwaysOnDirector). This
+  page is then the designated director: the dock sends only the operator's edits,
+  and after adopting someone else's state (a restore, say) THIS page sends the one
+  correction of the stream IDs, once the same difference has held for two polls.
+  A second director page — the invite builder's Manage link included — does not
+  own the room and has limited control. Pushes carry a rev and a writer id
+  (control/vdo-rev.js): an older state is dropped, equal revs are broken by the
+  writer id, and a page's own echo is never adopted, so two pages converge on the
+  newer state; that protects convergence, not an edit (an edit made just as a guest
+  joins may need redoing). Real vdo.ninja multi-director behavior stays on the
+  live-validation checklist (docs/STREAMERBOT-SETUP.md).
 
   Config: ?sbport=<n> · window.__SB_WS_URL · window.__VDO_DIRECTOR_URL (test hook).
 -->
@@ -41,241 +51,693 @@
 <span id="status">greenroom director: boot…</span>
 <iframe id="vdoDirector" title="VDO director (enumeration)" allow="autoplay" referrerpolicy="no-referrer" src="about:blank"></iframe>
 <script src="vdo-parse.js"></script>
+<script src="director-loop.js"></script>
+<script src="vdo-rev.js"></script>
 <script src="directory-core.js"></script>
+<script src="vdo-url.js"></script>
+<script src="sb-socket.js"></script>
 <script>
 (function () {
   'use strict';
 
   const P = new URLSearchParams(location.search);
-  const WS_URL = window.__SB_WS_URL
-    || (P.get('sbport') ? `ws://127.0.0.1:${P.get('sbport')}/` : 'ws://127.0.0.1:8080/');
+  // <sb-conn> — the connection helpers. The SAME text is in overlay/panel-client-sb.js,
+  // control/control.html and control/director-min.html (they sit behind different Streamer.bot
+  // folder maps and cannot share a file); verify.mjs fails if the three copies differ.
+  const SB_DEFAULT_PORT = 8080;
+  // ?sbport -> the WebSocket URL. Only a port can come from the page URL: the host is always
+  // 127.0.0.1. Returns null when ?sbport is present but is not a whole number from 1 to 65535.
+  function sbWsUrl(search) {
+    const raw = new URLSearchParams(search).get('sbport');
+    const u = new URL('ws://127.0.0.1:' + SB_DEFAULT_PORT + '/');
+    if (raw === null) return u.href;
+    if (!/^\d{1,5}$/.test(raw)) return null;
+    const port = Number(raw);
+    if (port < 1 || port > 65535) return null;
+    u.port = String(port);
+    return u.href;
+  }
+  // The ?sbport to copy into an OBS source URL: the validated port, or '' when absent or invalid.
+  function sbPortParam(search) {
+    const raw = new URLSearchParams(search).get('sbport');
+    return raw !== null && sbWsUrl(search) !== null ? String(Number(raw)) : '';
+  }
+  // Reconnect delay: 1 s, then x1.5 up to 4 s. Call reset() only after a healthy session (a valid
+  // Subscribe ack or a General.Custom message), not on open, so a server that accepts and then
+  // drops still reaches the cap.
+  function sbBackoff() {
+    const BASE_MS = 1000, MAX_MS = 4000, FACTOR = 1.5;
+    let delay = BASE_MS;
+    return {
+      next() { const d = delay; delay = Math.min(delay * FACTOR, MAX_MS); return d; },
+      reset() { delay = BASE_MS; },
+    };
+  }
+  // ?sbpass -> the Streamer.bot WebSocket password for Authentication ('' when absent). It lives in the page URL (OBS keeps a source's address in
+  // the scene collection and a dock's in its own settings) and nowhere else: it is never logged, sent on the bus, or copied into any address
+  // except an OBS source or dock URL. The value is read as URL-encoded text: '+' is a space, '%2B' is '+'.
+  function sbPassParam(search) {
+    const raw = new URLSearchParams(search).get('sbpass');
+    return raw === null ? '' : raw;
+  }
+  // base64(sha256(text)) with subtle crypto (a page served from 127.0.0.1 is a secure context). Rejects where subtle crypto is missing.
+  async function sbB64Sha256(text) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    let bin = '';
+    for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+  // The value of an Authenticate request: b64(sha256(b64(sha256(password + salt)) + challenge)).
+  async function sbAuthValue(password, salt, challenge) {
+    return sbB64Sha256((await sbB64Sha256(password + salt)) + challenge);
+  }
+  // The authentication block of a Hello (salt and challenge), or null when there is none.
+  function sbHelloAuth(m) {
+    const a = m && m.authentication;
+    return a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' ? a : null;
+  }
+  const SB_HELLO_WAIT_MS = 1000; // how long a page waits for Streamer.bot's Hello before it carries on as it always has
+  // </sb-conn>
+  const WS_URL = window.__SB_WS_URL || sbWsUrl(location.search); // null: an invalid ?sbport
   const PUSH_ACTION = 'VDO Push';
   const SYNC_ACTION = 'VDO Sync';
   const SLOT_COUNT = 4;
   const POLL_MS = 2500;
   const FIRST_PROBE_MS = 1500;
   const DIRECTOR_BASE = window.__VDO_DIRECTOR_URL || 'https://vdo.ninja/';
-  const DIRECTOR_ORIGIN = new URL(DIRECTOR_BASE, location.href).origin;
+
+  // Wire compatibility (same rules as control.html). Fields this page does not know pass through every push; `rev` and `writer` are the
+  // per-push stamp (control/vdo-rev.js) and are never copied into the config. A saved config with a higher schemaVersion makes this
+  // page stop pushing.
+  const SCHEMA_VERSION = GRRev.SCHEMA_VERSION;
+  const TOP_KEYS = new Set(['enabled', 'room', 'password', 'viewFlags', 'slots', 'invite', 'directory',
+    'directoryAutoAdd', 'directoryIgnored', 'alwaysOnDirector', 'schemaVersion', 'rev', 'writer']);
+  const revs = GRRev.create(); // stamps every push and judges every incoming vdo.state (own echo, older, newer)
+  window.__GR_WRITER = revs.writer; // (a test hook: which page wrote a push)
+  const SLOT_KEYS = new Set(['slot', 'label', 'streamID', 'mirror', 'mode', 'discordUserId', 'pushID']);
+  const MSG_RELOAD = 'the saved config comes from a newer Greenroom: reload this page; it pushes nothing until you do';
+  let schemaTooNew = false;
 
   const statusEl = document.getElementById('status');
   const director = document.getElementById('vdoDirector');
-  const show = (t) => { statusEl.textContent = 'greenroom director: ' + t; };
+  // connProblem is a connection fault that stays on screen until a healthy session replaces it
+  // (a refused Subscribe or DoAction, an authentication-enforcing Streamer.bot, an invalid ?sbport).
+  let connProblem = '';
+  // A refused DoAction is a current fault, not a permanent one: it shows until a request succeeds
+  // again or the socket closes.
+  let transientProblem = '';
+  const show = (t) => { statusEl.textContent = 'greenroom director: ' + (connProblem || (schemaTooNew ? MSG_RELOAD : (transientProblem || t))); };
 
+  // The same defaults as the dock, so a config the dock never saw (or a backup without these) reads the same on both pages (GRN-131).
+  const DEFAULT_VIEWFLAGS = '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish';
+  function defaultInvite() {
+    return { passwordMode: 'hash', askName: true, label: '', push: '', videoBitrate: '', quality: '', fps: '', audioBitrate: '',
+      noVideo: false, noAudio: false, capture: '', broadcast: false, meshcast: false, autostart: false, extraFlags: '' };
+  }
+  let flagsNote = ''; // flags in the saved config that the overlay ignores (script, style, room identity)
   function defaultSlots() {
     const out = [];
     for (let i = 0; i < SLOT_COUNT; i++) out.push({ label: '', streamID: '', mirror: false, mode: 'webcam', discordUserId: '' });
     return out;
   }
   let cfg = { enabled: false, room: '', password: '', viewFlags: '', slots: defaultSlots(), invite: {},
-    directory: [], directoryAutoAdd: true, directoryIgnored: [] };
+    directory: [], directoryAutoAdd: true, directoryIgnored: [], alwaysOnDirector: '', extra: {} };
+  // This page is the designated director when the dock's "director-min.html is my always-on director" box is ticked (decision 14 A).
+  // Then it alone corrects stream IDs after adopting someone else's state; otherwise it keeps its earlier behaviour.
+  const isDesignated = () => cfg.alwaysOnDirector === 'director-min';
+  // The director iframe's loop (control/director-loop.js), shared with control.html: a Worker tick, replies only from the
+  // frame and the allowed origins, silence named, reload with backoff, and the settle session for stream IDs.
+  const directorLoop = GRDirector.create({
+    iframe: director, base: DIRECTOR_BASE, cib: 'sb-vdo-min', pollMs: POLL_MS, firstProbeMs: FIRST_PROBE_MS,
+    extraOrigins: window.__VDO_DIRECTOR_EXTRA_ORIGINS || [], timing: window.__VDO_DIRECTOR_TIMING,
+    hooks: {
+      connecting: () => show(`room ${cfg.room} · director connecting…`),
+      hint: (silent) => { directorNote = silent ? 'director not responding · check the room, the password and that vdo.ninja is reachable' : `room ${cfg.room} · director still connecting… check the room, the password and that vdo.ninja is reachable`; show(directorNote); },
+      // Quiet for about 3 polls: keep the last resolved stream IDs (a push never blanks them), say so. The note stays on
+      // screen (other status updates keep it) until a recognised reply arrives.
+      silent: () => { hasRoster = false; unlabeled = 0; directorNote = 'director not responding'; show(directorNote); },
+      retrying: () => { directorNote = 'director not responding, retrying'; show(directorNote); },
+      unrecognised: () => { directorNote = 'reply unrecognised - check vdo.ninja version'; show(directorNote); },
+      reply: (r, raw) => {
+        roster = r;
+        hasRoster = true;
+        directorNote = '';
+        unlabeled = VdoParse.countUnlabeled(raw);
+        show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + ownerTail() + flagsTail());
+        runAutoAdd(); // new label in the room → placeholder nameplate entry
+        assembleAndPush(true); // auto-follow: re-resolve every poll
+      },
+      owner: (isOwner) => { notOwner = !isOwner; },
+    },
+  });
+  let unlabeled = 0; // guests in the room without a label (they cannot be bound to a slot)
+  const unlabeledTail = () => (unlabeled ? ' · ' + unlabeled + ' unlabeled' : '');
+  let notOwner = false; // vdo.ninja said another director holds the room (information only, GRN-94)
+  const ownerTail = () => (notOwner ? ' · not room owner, another director holds the room' : '');
+  let directorNote = ''; // a director problem (quiet, unrecognised reply) that status updates must not paint over
   let roster = [];
   let hasRoster = false;
-  let hydrated = false;
+  // synced: Streamer.bot has answered with the saved config (a vdoninja:update, adopted
+  // or our own echo) or said there is none (vdo:sync:empty). Until then this page pushes
+  // nothing: its defaults would overwrite the saved vdo.state.
+  let synced = false;
+  let syncTimer = null;
+  // The signature (GRRev.sigOf: the state without rev, writer and schemaVersion) of the newest state this page believes Streamer.bot
+  // holds or will hold: what it last pushed, or what it just adopted.
   let lastPushedSig = '';
+  let unsent = false;         // a push could not be sent (Streamer.bot unreachable); the next poll after the reconnect re-pushes (GRN-11)
+  let adoptedForeign = false; // another writer's state was just adopted: a difference in stream IDs alone is corrected after two polls (GRN-64)
+  let corrSig = '', corrPolls = 0, lastCorrectionAt = 0;
+  const MSG_UNSENT = 'SB offline, changes will be sent on reconnect';
   let frameUrl = '';
-  let pollTimer = null;
   let discordUsers = {};    // last discord:voice:update users map (auto-add input only)
 
   // The directory sanitizers + auto-populate live in directory-core.js, shared
   // verbatim with control.html so both pages produce identical payloads.
   const sanitizeDirectory = (raw) => GRDir.sanitizeDirectory(raw);
 
+  const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+  // The state in a vdoninja:update / discord:voice:update frame: the old object field,
+  // or an escaped string field beside it (vdoninjaJson / discordVoiceJson). A present
+  // string field is authoritative: one that does not parse to a plain object makes the
+  // frame unusable (null), so a malformed frame can never mark the page synced.
+  function frameState(d, objKey, jsonKey) {
+    if (jsonKey in d) {
+      if (typeof d[jsonKey] !== 'string') return null;
+      let v;
+      try { v = JSON.parse(d[jsonKey]); } catch { return null; }
+      return isPlainObject(v) ? v : null;
+    }
+    return isPlainObject(d[objKey]) ? d[objKey] : null;
+  }
+
+  // Returns true only when it adopted something config-shaped: a plain object with
+  // slots, directory or room.
   function adoptCfg(v) {
-    if (!v || typeof v !== 'object') return;
+    if (!isPlainObject(v)) return false;
+    if (!Array.isArray(v.slots) && !Array.isArray(v.directory) && !('room' in v)) return false;
     const slots = defaultSlots();
     if (Array.isArray(v.slots)) {
       for (const s of v.slots) {
         const i = Number(s && s.slot) - 1;
         if (!Number.isInteger(i) || i < 0 || i >= SLOT_COUNT) continue;
-        slots[i] = {
+        slots[i] = Object.assign({
           label: String(s.label ?? ''),
           streamID: String(s.streamID ?? ''),
           mirror: !!s.mirror,
           mode: s.mode === 'discord' ? 'discord' : 'webcam',
           discordUserId: String(s.discordUserId ?? '').replace(/\D/g, ''),
-        };
+          pushID: String(s.pushID ?? '').trim(), // the push ID this slot is pinned to ('' = follow the label)
+        }, GRDir.extraFields(s, SLOT_KEYS)); // unknown slot fields pass through
       }
     }
+    // A saved config from a newer Greenroom than this page: follow it, but never push over it.
+    const sv = Number(v.schemaVersion);
+    schemaTooNew = Number.isFinite(sv) && sv > SCHEMA_VERSION;
     cfg = {
       enabled: !!v.enabled,
       room: String(v.room ?? ''),
       password: String(v.password ?? ''),
-      viewFlags: String(v.viewFlags ?? ''),
+      viewFlags: GRVdoUrl.normalizeFlags(v.viewFlags ?? DEFAULT_VIEWFLAGS),
       slots,
-      invite: (v.invite && typeof v.invite === 'object') ? v.invite : {},
+      invite: Object.assign(defaultInvite(), (v.invite && typeof v.invite === 'object') ? v.invite : {}),
       directory: sanitizeDirectory(v.directory),
       directoryAutoAdd: v.directoryAutoAdd !== false, // absent (pre-upgrade state) → on
       directoryIgnored: GRDir.sanitizeIgnored(v.directoryIgnored),
+      alwaysOnDirector: v.alwaysOnDirector === 'director-min' ? 'director-min' : '',
+      extra: GRDir.extraFields(v, TOP_KEYS), // unknown top-level fields pass through (never rev/writer)
     };
+    const dropped = GRVdoUrl.sanitizeViewFlags(cfg.viewFlags).dropped;
+    flagsNote = dropped.length ? 'view flags ignored by the overlay: ' + dropped.join(', ') : '';
+    return true;
+  }
+
+  // ── Sync state (GRN-24) ────────────────────────────────────────────────────
+  const MSG_SYNC_SHORT = 'VDO Sync has not answered: nothing is pushed until it does';
+  const MSG_SYNC_LONG = 'no saved config from Streamer.bot: a fresh install, or VDO Sync is missing or not compiled';
+  let syncError = ''; // a saved config Streamer.bot reported as unreadable (VDO Sync said so), until a config arrives
+  const SYNC_RETRY_MS = [2000, 4000, 8000]; // then every SYNC_REPEAT_MS
+  const SYNC_REPEAT_MS = 15000;
+  const SYNC_SAY_MS = 1200;
+  const SYNC_NAME_CAUSES_MS = 5000;
+  function markSynced() {
+    if (synced) return;
+    synced = true;
+    syncError = '';
+    clearTimeout(syncTimer);
+    transientProblem = ''; // a refused request (VDO Sync, usually) is moot once the saved config has arrived
+  }
+  // The status for a page that holds its config: idle when there is no director to run, else
+  // the room and how many guests the last poll saw.
+  const flagsTail = () => (flagsNote ? ' · ' + flagsNote : ''); // a director or connection problem is never replaced by it
+  function showSteady() {
+    if (directorNote && frameUrl) show(directorNote + flagsTail());
+    else if (frameUrl) show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + ownerTail() + flagsTail());
+    else if (cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/' + flagsTail());
+    else show((cfg.enabled ? 'no room configured' : 'director disabled') + flagsTail());
+  }
+  // Re-ask for the saved config until it arrives: after 2, 4, 8 s, then every 15 s.
+  function scheduleResync(n) {
+    clearTimeout(syncTimer);
+    if (synced) return;
+    syncTimer = setTimeout(() => {
+      if (synced) return;
+      doAction(SYNC_ACTION, { reason: 'director-min-retry' });
+      scheduleResync(n + 1);
+    }, n < SYNC_RETRY_MS.length ? SYNC_RETRY_MS[n] : SYNC_REPEAT_MS);
   }
 
   // Auto-populate from whoever is live right now. Returns true if the directory
   // grew/changed — the caller pushes. Deterministic (directory-core sorts its
   // candidates), so control.html running the same inputs lands on the same array.
+  // Per-session record of what this page has auto-added (GRN-65): a label or user is appended once, so a label that Streamer.bot
+  // rewrites on the way back cannot look new on every poll and loop.
+  const autoAdded = new Set();
+  // After adopting another writer's state while something was unsent, or one that carries a reset from the dock: the keys this page
+  // auto-added that the adopted directory does not hold are forgotten, or the entries would never be added again.
+  function forgetMissingAuto() {
+    const have = new Set();
+    for (const e of cfg.directory) {
+      if (e.vdoLabel) have.add(GRDir.labelExactKey(e.vdoLabel));
+      if (e.discordUserId) have.add(GRDir.userKey(e.discordUserId));
+    }
+    for (const k of [...autoAdded]) if (!have.has(k)) autoAdded.delete(k);
+  }
   function runAutoAdd() {
-    if (!hydrated || !cfg.directoryAutoAdd) return false;
+    if (!synced || !cfg.directoryAutoAdd) return false;
     const res = GRDir.autoPopulate({
       directory: cfg.directory,
       ignored: cfg.directoryIgnored,
       labels: roster.map((g) => g.label),
       users: discordUsers,
+      skip: [...autoAdded],
+      boundLabels: cfg.slots.map((s) => s.label).filter(Boolean), // a guest in a slot is never evicted from the auto entries
+      boundUsers: cfg.slots.map((s) => s.discordUserId).filter(Boolean),
     });
-    if (!res.changed) return false;
+    if (!res.changed) return false; // (suggestions are for the dock: this page only follows what changes the book)
+    // An evicted guest's keys leave the record, so they are added again if they come back (the dock does the same).
+    for (const i of res.evicted) {
+      const gone = cfg.directory[i];
+      if (!gone) continue;
+      if (gone.vdoLabel) autoAdded.delete(GRDir.labelExactKey(gone.vdoLabel));
+      if (gone.discordUserId) autoAdded.delete(GRDir.userKey(gone.discordUserId));
+    }
+    for (const e of res.appended) {
+      if (e.vdoLabel) autoAdded.add(GRDir.labelExactKey(e.vdoLabel));
+      if (e.discordUserId) autoAdded.add(GRDir.userKey(e.discordUserId));
+    }
+    for (const lb of res.labeled) autoAdded.add(GRDir.labelExactKey(lb.label));
     cfg.directory = res.directory;
     return true;
   }
 
   function assemblePayload() {
-    const byLabel = new Map(roster.map((g) => [g.label, g.streamID]));
+    const nowMs = Date.now();
+    // The director-off rule (GRN-48): a disabled config, or one with no room, has no live streams, whatever this page's own
+    // director last saw. Without it, adopting another page's blank disable push would re-resolve the live IDs into cfg.slots
+    // (the director is still running at that moment), and the next push (an auto-add) would put the cams back on air.
+    const directorOff = !cfg.enabled || !cfg.room;
     const slots = cfg.slots.map((s, i) => {
-      const streamID = hasRoster
-        ? (s.label ? (byLabel.get(s.label) || '') : '')
-        : String(s.streamID || '');
+      // Same rule as control.html: an empty label never carries a stream; with a current roster the shared resolver decides
+      // (sticky for a shared label, held while the director settles, blank at once for a guest seen and lost); with none,
+      // the held resolution is kept.
+      let streamID;
+      if (!s.label || directorOff) streamID = '';
+      else if (hasRoster) streamID = VdoParse.resolveStream(roster, s.label, s.streamID, String(s.pushID || ''), directorLoop.sess, nowMs, window.__VDO_SETTLE_MS || VdoParse.SETTLE_MS);
+      else streamID = String(s.streamID || '');
       s.streamID = streamID;
-      return {
+      return Object.assign({
         slot: i + 1,
         label: s.label || '',
         streamID,
         mirror: !!s.mirror,
         mode: s.mode === 'discord' ? 'discord' : 'webcam',
         discordUserId: String(s.discordUserId || '').replace(/\D/g, ''),
-      };
+      }, s.pushID ? { pushID: String(s.pushID) } : {}, GRDir.extraFields(s, SLOT_KEYS));
     });
-    return { enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
+    return Object.assign({ enabled: !!cfg.enabled, room: cfg.room || '', password: cfg.password || '',
       viewFlags: cfg.viewFlags || '', slots, invite: cfg.invite || {},
       directory: sanitizeDirectory(cfg.directory),
       directoryAutoAdd: cfg.directoryAutoAdd !== false,
-      directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored) };
+      directoryIgnored: GRDir.sanitizeIgnored(cfg.directoryIgnored) },
+    cfg.alwaysOnDirector ? { alwaysOnDirector: cfg.alwaysOnDirector } : {}, { schemaVersion: SCHEMA_VERSION }, cfg.extra);
   }
 
-  // fromRoster: a resolution-driven push needs BOTH gates — hydrated (never
+  // What this page compares its own state with right after it adopted `v` (see control.html): its own re-assembly, and, when `held`,
+  // that with the stream IDs Streamer.bot holds, so a difference in IDs alone shows and gets corrected after two polls. `held` is
+  // asked for by the designated director, by a restore (the backup tool asks every director to put the live IDs back) and by a page
+  // that had something it could not send.
+  function adoptionBaseline(v, held) {
+    const mine = assemblePayload();
+    if (held) {
+      const held = Array.isArray(v.slots) ? v.slots : [];
+      mine.slots = mine.slots.map((s) => { const h = held.find((x) => x && Number(x.slot) === s.slot); return Object.assign({}, s, { streamID: String((h && h.streamID) ?? '') }); });
+    }
+    return GRRev.sigOf(mine);
+  }
+
+  // fromRoster: a resolution-driven push needs BOTH gates — synced (never
   // clobber persisted state with defaults) and hasRoster (never blank slots
   // before our own director has spoken). A directory-driven push (auto-add from
-  // the Discord feed, which needs no director at all) only needs hydrated;
-  // assemblePayload preserves the hydrated streamIDs while hasRoster is false.
+  // the Discord feed, which needs no director at all) only needs synced;
+  // assemblePayload preserves the adopted streamIDs while hasRoster is false.
   function assembleAndPush(fromRoster) {
-    if (!hydrated) return;
+    if (schemaTooNew) return;
+    if (!synced) return;
     if (fromRoster && !hasRoster) return;
-    const payload = JSON.stringify(assemblePayload());
-    if (payload === lastPushedSig) return;
-    lastPushedSig = payload;
-    doAction(PUSH_ACTION, { payload });
-    show(`room ${cfg.room} · ${roster.length} guest(s) · pushed`);
+    const state = assemblePayload();
+    const sig = GRRev.sigOf(state);
+    if (sig === lastPushedSig) { adoptedForeign = false; corrPolls = 0; return; }
+    if (sig === refusedSig && Date.now() - refusedAt < REFUSED_RETRY_MS) return;
+    // Right after another writer's state was adopted, a difference in stream IDs alone (the designated director sees other IDs than the
+    // saved ones) has to hold for two polls before it is corrected, and then once (GRN-64).
+    let isCorrection = false;
+    if (fromRoster && adoptedForeign && GRRev.diffKind(sig, lastPushedSig) === 'ids') {
+      corrPolls = corrSig === sig ? corrPolls + 1 : 1;
+      corrSig = sig;
+      if (corrPolls < 2) return;
+      // Two corrections are at least a gap apart, so two pages whose directors disagree cannot flip the slots every few seconds. Filling in
+      // IDs that were blank (a guest just bound in the dock, which sends the slot without one; a restore) is no such flip: it waits only
+      // for its two polls (C55).
+      if (!GRRev.fillsOnly(sig, lastPushedSig) && Date.now() - lastCorrectionAt < (window.__CORRECTION_GAP_MS || 30000)) return;
+      isCorrection = true;
+    }
+    // Record it as pushed only if it was sent: with the socket down the next poll must retry. This page has no flush of its own
+    // after a reconnect: it adopts the replay and its next poll re-pushes what differs.
+    const stamped = revs.stamp(state);
+    if (!doAction(PUSH_ACTION, { payload: stamped.text })) { unsent = true; show(MSG_UNSENT); return; }
+    revs.sent(stamped.rev);
+    lastPushedSig = sig;
+    unsent = false; adoptedForeign = false; corrPolls = 0;
+    if (isCorrection) lastCorrectionAt = Date.now();
+    show(`room ${cfg.room} · ${roster.length} guest(s)` + unlabeledTail() + ' · pushed');
   }
 
   // ── SB WS client ──────────────────────────────────────────────────────────
+  const SB_PASS = sbPassParam(location.search);
+  const MSG_AUTH = "SB auth enforced — turn Enforce off, or add ?sbpass=<password> to this source's address";
+  const MSG_BADPASS = "SB password refused — check ?sbpass in this source's address";
+  const MSG_NOCRYPTO = 'SB password cannot be used here: open this page via http://127.0.0.1 (subtle crypto is unavailable)';
+  const MSG_NOANSWER = 'SB did not answer the password: retrying';
+  const AUTH_ACK_MS = 5000;               // an Authenticate that is not answered within this long is reported and the socket retried
+  const PASSWORD_RETRY_MS = 30000;        // after a refused password a retry is no use until the address is changed: ask only now and then
+  let passwordRefused = false;
+  const SYNC_FALLBACK_MS = 400; // sync anyway if the Subscribe is never answered
   let ws = null;
   let msgId = 0;
   let subId = null;
-  let reconnectDelay = 2000;
+  let reconnectTimer = null;
+  let waitText = 'connecting to SB…'; // what to show while the saved config has not come back
+  // A push Streamer.bot refused is offered again, but not on every 2.5 s poll: refusedSig is that payload and
+  // refusedAt when it was refused. Any request that succeeds, or a new connection, lifts the hold at once.
+  let refusedSig = '';
+  let refusedAt = 0;
+  const REFUSED_RETRY_MS = 10000;
+  const backoff = sbBackoff();
+  const pendingActions = new Map(); // DoAction id -> { name, payload }, until its reply arrives
 
+  // Returns whether the request was actually sent (false while the socket is down).
   function doAction(name, args) {
-    if (!ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ request: 'DoAction', id: String(++msgId), action: { name }, args }));
+    if (!ws || ws.readyState !== 1) return false;
+    const id = String(++msgId);
+    ws.send(JSON.stringify({ request: 'DoAction', id, action: { name }, args }));
+    pendingActions.set(id, { name, payload: args && args.payload });
+    if (pendingActions.size > 200) pendingActions.delete(pendingActions.keys().next().value);
+    return true;
+  }
+  const isRefusal = (m) => typeof m.status === 'string' && m.status !== 'ok';
+  const refusalText = (m) => String(m.error || m.message || m.status);
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(connect, passwordRefused ? PASSWORD_RETRY_MS : backoff.next());
   }
 
   function connect() {
-    ws = new WebSocket(WS_URL);
+    reconnectTimer = null;
+    let sock;
+    // Built in sb-socket.js, not here: Chromium logs a failed connect with the place the socket was built as the source, and
+    // from this inline script that would be this page's address, ?sbpass included (OBS writes it to its log).
+    try { sock = sbOpenSocket(WS_URL); }
+    catch (err) { connProblem = 'cannot open the WebSocket — retrying'; show(''); scheduleReconnect(); return; }
+    ws = sock; // every handler below acts on its own socket, never on a later one
     let syncFired = false;
+    let fallbackTimer = null;
+    let healthy = false;
+    let authHello = false; // this socket's Hello carried an authentication block
+    let helloTimer = null; // waiting for Streamer.bot's Hello
+    let started = false;   // the Subscribe has gone out on this socket
+    let authId = null;     // the id of this socket's Authenticate request
+    let authRefused = false;
+    let authFailMsg = ''; // why this socket's handshake failed (what a hang-up after it should still say)
+    let authTimer = null; // the Authenticate has gone out and is not answered yet
     const fireSync = () => {
       if (syncFired) return;
       syncFired = true;
+      clearTimeout(fallbackTimer);
       doAction(SYNC_ACTION, { reason: 'director-min-connect' });
+      scheduleResync(0);
     };
-    ws.onopen = () => {
-      reconnectDelay = 2000;
-      show('connected to SB — waiting for state');
+    // A healthy session (a valid Subscribe ack, or an event) clears a connection problem and
+    // resets the backoff; merely opening does not.
+    const markHealthy = () => {
+      if (healthy) return;
+      healthy = true;
+      backoff.reset();
+      if (connProblem) { connProblem = ''; if (synced) showSteady(); else show(waitText); }
+    };
+    // The session proper: the Subscribe, then (once it is acknowledged) the sync. It starts when Hello says nothing about a password, when
+    // this page has no password to give, when Hello does not come within a second, or after an Authenticate was acknowledged ok.
+    const startSession = () => {
+      if (started || sock.readyState !== WebSocket.OPEN) return;
+      started = true;
+      clearTimeout(helloTimer); helloTimer = null;
       subId = String(++msgId);
-      ws.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
-      setTimeout(fireSync, 400);
+      sock.send(JSON.stringify({ request: 'Subscribe', id: subId, events: { general: ['Custom'] } }));
+      fallbackTimer = setTimeout(fireSync, SYNC_FALLBACK_MS);
     };
-    ws.onmessage = (evt) => {
+    // Authentication is on and this page has a password: answer the challenge (the password itself never leaves the page).
+    const authenticate = (block) => {
+      authId = String(++msgId);
+      const id = authId;
+      sbAuthValue(SB_PASS, block.salt, block.challenge).then((value) => {
+        if (ws !== sock || started || authRefused || sock.readyState !== WebSocket.OPEN) return;
+        sock.send(JSON.stringify({ request: 'Authenticate', id, authentication: value }));
+        authTimer = setTimeout(() => {
+          authTimer = null;
+          if (ws !== sock || authId !== id) return;
+          authId = null; authFailMsg = MSG_NOANSWER; connProblem = MSG_NOANSWER;
+          show('');
+          try { sock.close(); } catch { /* closing */ }
+        }, AUTH_ACK_MS);
+      }, () => {
+        if (ws !== sock) return;
+        authRefused = true;
+        connProblem = MSG_NOCRYPTO;
+        show('');
+      });
+    };
+    sock.onopen = () => {
+      waitText = 'connected to SB — waiting for state';
+      refusedSig = '';
+      if (!connProblem) {
+        if (!synced) show(waitText);
+        else showSteady(); // reconnected after SB went away: replace 'SB offline — retrying'
+      }
+      // Streamer.bot greets every connection with a Hello: wait a second for it, then carry on as always (a server that says nothing).
+      helloTimer = setTimeout(() => { helloTimer = null; startSession(); }, SB_HELLO_WAIT_MS);
+      // Say why nothing is happening while the saved config has not come back (a connection
+      // problem, if there is one, outranks these in show()).
+      setTimeout(() => { if (!synced) { waitText = syncError || MSG_SYNC_SHORT; show(waitText); } }, SYNC_SAY_MS);
+      setTimeout(() => { if (!synced) { waitText = syncError || MSG_SYNC_LONG; show(waitText); } }, SYNC_NAME_CAUSES_MS);
+    };
+    sock.onmessage = (evt) => {
+      if (ws !== sock) return;
       let m;
       try { m = JSON.parse(evt.data); } catch { return; }
-      if (m && m.id && m.id === subId && !m.event) { fireSync(); return; }
-      if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      if (!m || typeof m !== 'object') return;
+      // Streamer.bot's Hello. An authentication block only means Authentication is switched on; with
+      // Enforce off Streamer.bot still serves every request. It is the likely reason only if requests
+      // are then refused, or the socket is closed.
+      if (m.request === 'Hello') {
+        authHello = !!(m.authentication && typeof m.authentication === 'object');
+        if (started || authId) return;
+        clearTimeout(helloTimer); helloTimer = null;
+        const block = sbHelloAuth(m);
+        if (block && SB_PASS) authenticate(block); // the session starts when the Authenticate is acknowledged
+        else startSession(); // no password to give, or none asked for: as before (a refused Subscribe names authentication)
+        return;
+      }
+      if (m.id && !m.event) {
+        if (m.id === authId) {
+          authId = null;
+          if (authTimer) { clearTimeout(authTimer); authTimer = null; }
+          if (isRefusal(m)) { authRefused = true; passwordRefused = true; authFailMsg = MSG_BADPASS; connProblem = MSG_BADPASS; show(''); }
+          else startSession();
+          return;
+        }
+        if (m.id === subId) {
+          if (isRefusal(m)) { // no sync without an accepted Subscribe, and no retry loop on this socket
+            clearTimeout(fallbackTimer);
+            clearTimeout(syncTimer);
+            syncFired = true;
+            connProblem = authHello ? MSG_AUTH : 'SB: Subscribe refused (' + refusalText(m) + ')';
+            show('');
+          } else { markHealthy(); fireSync(); }
+          return;
+        }
+        if (pendingActions.has(m.id)) {
+          const req = pendingActions.get(m.id);
+          pendingActions.delete(m.id);
+          if (isRefusal(m) && req.name === SYNC_ACTION && synced) {
+            // moot: a sync request sent before the saved config arrived (by another route) was refused afterwards
+          } else if (isRefusal(m)) {
+            // Authentication is the likely cause only while this socket has not been served: an accepted
+            // Subscribe already shows Enforce is off, so a refusal after it is something else (say, an action
+            // that was never imported).
+            if (authHello && !healthy) connProblem = MSG_AUTH;
+            else transientProblem = 'SB: DoAction "' + req.name + '" refused (' + refusalText(m) + ')';
+            // Streamer.bot did not save it, so it is not "pushed": it is offered again after REFUSED_RETRY_MS.
+            if (req.name === PUSH_ACTION && req.payload) {
+              const refusedState = GRRev.sigOf(req.payload);
+              revs.refused(GRRev.revOf(req.payload));
+              if (refusedState === lastPushedSig) lastPushedSig = '';
+              refusedSig = refusedState;
+              refusedAt = Date.now();
+            }
+            show('');
+          } else {
+            refusedSig = ''; // requests work again
+            if (transientProblem) {
+              transientProblem = '';
+              if (synced) showSteady(); else show(waitText);
+            }
+          }
+          return;
+        }
+      }
+      if (!(m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
+      markHealthy();
       let d = m.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
       if (!d || typeof d !== 'object') return;
       if (d.type === 'vdoninja:update') {
-        const sig = JSON.stringify(d.vdoninja);
-        if (sig === lastPushedSig) return; // our own echo
-        adoptCfg(d.vdoninja);
-        hydrated = true;
-        lastPushedSig = JSON.stringify(assemblePayload());
+        const v = frameState(d, 'vdoninja', 'vdoninjaJson');
+        if (!v) return; // no usable state in the frame: drop it, never mark the page synced
+        // Its rev and writer say what it is (control/vdo-rev.js): this page's own push coming back (never adopted; matched by rev, not by
+        // the text), something older than a state this page already holds (dropped), or a newer or legacy write to adopt.
+        const cls = revs.receive(v);
+        if (cls.kind === 'echo') { markSynced(); showSteady(); return; }
+        if (cls.kind === 'stale') return;
+        const firstSync = !synced;
+        // Something this page could not send (Streamer.bot was down), or a push that may have been lost with the socket: it has no
+        // flush of its own, so after adopting the replay it takes the held IDs as its baseline and its next polls re-push what differs.
+        const hadUnsent = synced && (unsent || revs.inflight.length > 0);
+        const autosBefore = cfg.directory.filter((e) => e.auto).length, ignoredBefore = cfg.directoryIgnored;
+        if (!adoptCfg(v)) return; // not config-shaped: drop it
+        markSynced();
+        // A saved state that is switched off (or has no room) but still holds stream IDs is a leftover of a push that raced a
+        // disable. The first page to read it blanks it, once (GRN-48).
+        const heal = firstSync && !(cfg.enabled && cfg.room) && cfg.slots.some((s) => s.streamID);
+        // The IDs are put back by the designated director, after a restore (the backup tool asks every director to), and by a page
+        // that had something it could not send.
+        adoptedForeign = isDesignated() || GRRev.writerOf(v) === 'backup' || hadUnsent;
+        lastPushedSig = adoptionBaseline(v, adoptedForeign);
+        corrSig = ''; corrPolls = 0;
+        // The dock's resets (Clear auto-added, ×, Un-ignore removed, an Import of a smaller book) reach this page only as a state with fewer
+        // auto entries or a shorter ignore list, and beside a designated director-min the dock sends no auto-add push of its own: the
+        // guests this page auto-added that the state lacks are forgotten, so they are added again while live (C56). Auto-add never lowers
+        // either count, and a label Streamer.bot rewrote on the way back changes neither, so this cannot answer a rewrite and loop (GRN-65).
+        const reset = cfg.directory.filter((e) => e.auto).length < autosBefore || ignoredBefore.some((k) => !cfg.directoryIgnored.includes(k));
+        if (hadUnsent || reset) forgetMissingAuto(); // what auto-add added meanwhile and the adopted state lacks is added again
+        revs.clearThrough(cls.rev);
+        unsent = false;
+        if (heal) lastPushedSig = GRRev.sigOf(v); // the adopted state, IDs and all: the blank copy differs from it, so it goes out (once)
         syncDirectorFrame();
-        if (runAutoAdd()) assembleAndPush(false); // late arrivals in a replayed room
+        // syncDirectorFrame says nothing when the frame URL did not change, so a late
+        // reply for a disabled config would leave 'has not answered' on screen.
+        showSteady();
+        // Guests not yet named are added by the next poll or voice update, not here: this is another writer's state, and adding
+        // here could answer a rewrite of it with a push of our own (GRN-65).
+        if (heal) assembleAndPush(false);
+      } else if (d.type === 'vdo:sync:empty') {
+        // VDO Sync found no saved vdo.state: nothing to adopt, nothing to overwrite.
+        markSynced();
+        show('no saved config yet');
+      } else if (d.type === 'vdo:error') {
+        // VDO Sync found a saved config it cannot read: say so, instead of 'a fresh install'.
+        if (!synced && /not valid JSON/i.test(d.message || '')) {
+          syncError = 'Streamer.bot reports its saved config is damaged (' + d.message + '); nothing is pushed until it is replaced';
+          waitText = syncError;
+          show(waitText);
+        }
       } else if (d.type === 'discord:voice:update') {
         // Voice-channel arrivals are an auto-add source of their own — no director
         // and no room needed. This feed is chatty (~10/s while people talk); the
         // push only happens when the directory actually grew.
-        const users = d.discordVoice && d.discordVoice.users;
+        const dv = frameState(d, 'discordVoice', 'discordVoiceJson');
+        if (!dv) return;
+        const users = dv.users;
         discordUsers = (users && typeof users === 'object') ? users : {};
         if (runAutoAdd()) assembleAndPush(false);
       }
     };
-    ws.onclose = () => {
-      show('SB offline — retrying');
-      setTimeout(() => { reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); connect(); }, reconnectDelay);
+    sock.onclose = () => {
+      clearTimeout(helloTimer);
+      clearTimeout(authTimer);
+      clearTimeout(fallbackTimer);
+      clearTimeout(syncTimer);
+      syncFired = true;
+      if (ws !== sock) return;
+      pendingActions.clear();
+      transientProblem = '';
+      // A dead connection is the more current fact; only an authentication Hello that was followed by a
+      // hang-up is kept, because it is the likely reason.
+      connProblem = authHello && !healthy ? (authFailMsg || MSG_AUTH) : '';
+      show(unsent || revs.inflight.length ? MSG_UNSENT : 'SB offline — retrying');
+      scheduleReconnect();
     };
-    ws.onerror = () => {};
+    sock.onerror = () => {};
   }
 
   // ── Director iframe + loop (same as control.html, minus the editor) ────────
   function directorUrl() {
     if (!cfg.enabled || !cfg.room) return '';
-    const sep = DIRECTOR_BASE.includes('?') ? '&' : '?';
-    let u = DIRECTOR_BASE + sep + 'director=' + encodeURIComponent(cfg.room);
-    if (cfg.password) u += '&password=' + encodeURIComponent(cfg.password);
-    u += '&cleanish&novideo&noaudio';
-    return u;
+    if (!window.isSecureContext) return ''; // vdo.ninja refuses an insecure parent: do not start a director that can never answer
+    return GRVdoUrl.buildDirectorUrl(DIRECTOR_BASE, cfg.room, cfg.password); // the password encoded the way vdo.ninja reads it
   }
 
   function syncDirectorFrame() {
     const url = directorUrl();
+    if (!url && cfg.enabled && cfg.room && !window.isSecureContext) show('director needs a secure page: open via http://127.0.0.1:<port>/');
     if (url === frameUrl) return;
+    const hadFrame = !!frameUrl;
     frameUrl = url;
     if (url) {
-      director.src = url;
-      show(`room ${cfg.room} · director connecting…`);
-      startPolling();
+      roster = []; hasRoster = false; directorNote = ''; unlabeled = 0; // nothing from a previous room, password or load is current for this one
+      // A stream belongs to the room it was resolved in: moving to another room (or password) starts empty (GRN-122).
+      if (hadFrame) cfg.slots.forEach((s) => { s.streamID = ''; });
+      directorLoop.start(url); // points the frame at the room, starts the poll, begins a fresh settle session
     } else {
-      director.src = 'about:blank';
-      stopPolling();
+      directorLoop.stop();
       roster = [];
+      unlabeled = 0;
       hasRoster = false;
-      show(cfg.enabled ? 'no room configured' : 'director disabled');
+      show(cfg.enabled && cfg.room && !window.isSecureContext ? 'director needs a secure page: open via http://127.0.0.1:<port>/' : (cfg.enabled ? 'no room configured' : 'director disabled'));
     }
   }
 
-  function startPolling() {
-    stopPolling();
-    pollTimer = setInterval(pollGuestList, POLL_MS);
-    setTimeout(pollGuestList, FIRST_PROBE_MS);
-  }
-  function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  }
-  function pollGuestList() {
-    if (!frameUrl || !director.contentWindow) return;
-    try {
-      director.contentWindow.postMessage({ getGuestList: true, cib: 'sb-vdo-min' }, DIRECTOR_ORIGIN);
-    } catch (_) { /* iframe not ready yet */ }
-  }
+  window.addEventListener('message', (e) => directorLoop.onMessage(e));
 
-  window.addEventListener('message', (e) => {
-    if (e.origin !== DIRECTOR_ORIGIN) return;
-    const d = e.data;
-    if (!d || typeof d !== 'object' || !('guestList' in d)) return;
-    roster = VdoParse.parseGuestList(d);
-    hasRoster = true;
-    show(`room ${cfg.room} · ${roster.length} guest(s)`);
-    runAutoAdd(); // new label in the room → placeholder nameplate entry
-    assembleAndPush(true); // auto-follow: re-resolve every poll
-  });
-
-  show('connecting to SB…');
-  connect();
+  if (!WS_URL) { // an invalid ?sbport: say so, and never connect (nor fall back to 8080)
+    connProblem = 'invalid ?sbport (use a port number, 1-65535)';
+    show('');
+    console.warn('[director-min] invalid ?sbport ' + JSON.stringify(P.get('sbport')) + ': use a port number from 1 to 65535. Not connecting.');
+  } else {
+    show('connecting to SB…');
+    connect();
+  }
 })();
 </script>
 </body>

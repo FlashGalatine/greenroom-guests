@@ -1,12 +1,13 @@
 {
   "name": "greenroom",
-  "version": "1.0.13",
+  "version": "1.0.106",
+  "private": true,
   "description": "VDO.ninja guest dock + Discord voice roster overlays for OBS, driven by Streamer.bot — control page, five SB actions, optional Discord bot sidecar",
   "type": "module",
   "license": "MIT",
   "author": "Ashe \"Flash\" Galatine",
   "scripts": {
-    "start": "node mock-sb-server.mjs",
+    "mock": "node mock-sb-server.mjs",
     "mock:bridge": "node mock-discord-bridge.mjs",
     "bridge": "node sidecar/discord-bridge.mjs",
     "backup": "node backup.mjs save",
@@ -14,9 +15,14 @@
     "backup:list": "node backup.mjs list",
     "verify": "node verify.mjs",
     "verify:render": "node verify-render.mjs",
+    "verify:cs": "node verify-cs.mjs",
+    "mutation": "node tools/mutation/run.mjs",
     "shots": "node tools/shots.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
   }
 }

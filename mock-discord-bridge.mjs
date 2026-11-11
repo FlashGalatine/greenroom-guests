@@ -15,26 +15,35 @@
 //                       flipped every 100 ms: the doc-06 "20+ participants at the
 //                       100 ms coalesce" scale question, made assertable offline.
 //
-// Run against the mock (`npm start` then `npm run mock:bridge`) or against REAL
-// Streamer.bot (SB_WS_URL=ws://127.0.0.1:8080/) to drive overlays without Discord.
+// Run against the mock: `npm run mock` in one terminal, `npm run mock:bridge` in another (both default to the
+// mock's own ports, never Streamer.bot's 8080).
+//
+// SAFETY: this program does nothing to a server until that server's Hello frame says it is the mock
+// (info.source === 'mock'). Pointed at anything else (a real Streamer.bot says no such thing, and an unresponsive
+// server says nothing) it logs why and exits. It sends no Subscribe and no action: all it ever does to such a server is
+// open the connection, read the Hello and hang up. (If nothing is listening at all it keeps retrying, so it can be
+// started before the mock.) To drive a REAL Streamer.bot on purpose, pass
+// --allow-real-sb with SB_WS_URL=ws://127.0.0.1:8080/. Know what that does: the real sidecar also obeys Connect,
+// Leave, USE and settings edits sent over the bus, and the pushes below overwrite the live discord.state, so close
+// the real sidecar first and use it only on a Streamer.bot you are free to disturb.
 
 import { WebSocket } from 'ws';
+import { createHash } from 'node:crypto';
+// The rules for settings, ids and favorites are the real bridge's own (sidecar/settings.mjs is dependency-free and starts nothing when imported;
+// sidecar/discord-bridge.mjs itself runs main() on import and is never imported here).
+import { DEFAULT_SETTINGS, sanitizeSettings, normalizeFavorite, digitsOnly, parseJson } from './sidecar/settings.mjs';
 
-const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8080}/`;
+const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8084}/`; // the mock's WebSocket port
+const ALLOW_REAL_SB = process.argv.includes('--allow-real-sb');
+const HELLO_WAIT_MS = 3000; // a mock greets at once; a server that stays silent this long is not one
 const RECONNECT_MS = 3000;
+const SB_PASSWORD = process.env.GREENROOM_SB_PASSWORD || ''; // for a mock Streamer.bot started with SB_PASSWORD (never printed)
+const b64sha256 = (t) => createHash('sha256').update(t).digest('base64');
 
-const STREAMER_ID = '110457699291906048';
+const STREAMER_ID = '100000000000000001';
 
-const DEFAULT_SETTINGS = {
-  streamerUserId: STREAMER_ID,
-  avatarPx: 56,
-  streamerPx: 72,
-  height: 180,
-  accent: 'cyan',
-  scanlines: true,
-  neonBlink: true,
-  hideWhenAbsent: true,
-};
+// The fixtures of this mock use short ids ('111', '333'), so a favorite is held to "1 to 20 digits" here; the real bridge wants 17 to 20.
+const MOCK_ID_RE = /^\d{1,20}$/;
 
 // The three-user commentary channel every demo/test starts from on `connect`.
 const embed = (n) => `https://cdn.discordapp.com/embed/avatars/${n}.png`;
@@ -47,8 +56,8 @@ const SEED_USERS = () => ({
 const state = {
   favorites: [{ id: 'fav1', name: 'Main Hang', serverId: '111', channelId: '222' }],
   current: { serverId: '111', channelId: '222' },
-  settings: { ...DEFAULT_SETTINGS },
-  rpc: { enabled: true, hasToken: true, error: null },
+  settings: sanitizeSettings({ streamerUserId: STREAMER_ID }),
+  rpc: { enabled: true, hasToken: true, error: null, reconnecting: false, speakingStale: false },
   connected: false,
   hostInChannel: false,
   channelId: null,
@@ -60,6 +69,8 @@ let msgId = 0;
 let favSeq = 1;
 let speakTimer = null;
 let burstTimer = null;
+let hbTimer = null;
+const HEARTBEAT_MS = 5000;
 
 function payloadOut() {
   return {
@@ -71,6 +82,11 @@ function payloadOut() {
     rpc: state.rpc,
     favorites: state.favorites,
     current: state.current,
+    currentRefused: false, // the real bridge sets it when the saved channel fails its check at login
+    // the same liveness fields as the real bridge (docs/PROTOCOL.md): a push every hb ms while it runs
+    hb: HEARTBEAT_MS,
+    stopped: false,
+    bridgeVersion: 'mock',
   };
 }
 
@@ -111,8 +127,9 @@ function startBurst() {
   state.channelId = state.current ? state.current.channelId : '222';
   state.users = {};
   for (let n = 1; n <= 20; n++) {
-    const id = '30000000000000' + String(n).padStart(4, '0');
-    state.users[id] = { speaking: false, username: `Burst ${n}`, avatarUrl: embed(n % 6), mute: n % 7 === 0, deaf: n % 11 === 0 };
+    // (the first of the twenty is the streamer, as in a real call: hideWhenAbsent follows the streamer, so a burst without them would be hidden)
+    const id = n === 1 ? STREAMER_ID : '30000000000000' + String(n).padStart(4, '0');
+    state.users[id] ={ speaking: false, username: `Burst ${n}`, avatarUrl: embed(n % 6), mute: n % 7 === 0, deaf: n % 11 === 0 };
   }
   pushNow();
   burstTimer = setInterval(() => {
@@ -125,7 +142,7 @@ function startBurst() {
 }
 
 function dispatch(command, value) {
-  const parsed = (() => { try { return value ? JSON.parse(value) : null; } catch { return null; } })();
+  const parsed = (() => { try { return value ? parseJson(value) : null; } catch { return null; } })();
   switch (command) {
     case 'connect':
       state.connected = true;
@@ -148,32 +165,30 @@ function dispatch(command, value) {
       state.channelId = null;
       state.users = {};
       break;
-    case 'set-current':
-      if (parsed && parsed.serverId && parsed.channelId) {
-        state.current = { serverId: String(parsed.serverId), channelId: String(parsed.channelId) };
-        if (state.connected && state.hostInChannel) state.channelId = state.current.channelId;
-      }
+    case 'set-current': {
+      if (!parsed) break;
+      const sId = digitsOnly(parsed.serverId), cId = digitsOnly(parsed.channelId);
+      state.current = sId && cId ? { serverId: sId, channelId: cId } : null; // a blank id clears it, as in the real bridge
+      if (state.current && state.connected && state.hostInChannel) state.channelId = state.current.channelId;
       break;
-    case 'favorite-add':
-      if (parsed && parsed.name) {
-        state.favorites.push({ id: 'fav' + (++favSeq), name: String(parsed.name), serverId: String(parsed.serverId || ''), channelId: String(parsed.channelId || '') });
-      }
+    }
+    case 'favorite-add': {
+      const fav = parsed && normalizeFavorite(parsed, MOCK_ID_RE);
+      if (fav && !state.favorites.some((f) => f.serverId === fav.serverId && f.channelId === fav.channelId)) state.favorites.push({ id: 'fav' + (++favSeq), ...fav });
       break;
+    }
     case 'favorite-update':
       if (parsed && parsed.id) {
-        const f = state.favorites.find((x) => x.id === parsed.id);
-        if (f) {
-          if (parsed.name != null) f.name = String(parsed.name);
-          if (parsed.serverId != null) f.serverId = String(parsed.serverId);
-          if (parsed.channelId != null) f.channelId = String(parsed.channelId);
-        }
+        const f = state.favorites.find((x) => x.id === String(parsed.id));
+        const cand = f && normalizeFavorite({ name: parsed.name != null ? parsed.name : f.name, serverId: parsed.serverId != null ? parsed.serverId : f.serverId, channelId: parsed.channelId != null ? parsed.channelId : f.channelId }, MOCK_ID_RE);
+        if (cand) Object.assign(f, cand);
       }
       break;
     case 'favorite-remove':
-      if (parsed && parsed.id) state.favorites = state.favorites.filter((x) => x.id !== parsed.id);
+      if (parsed && parsed.id) state.favorites = state.favorites.filter((x) => x.id !== String(parsed.id));
       break;
     case 'set-settings':
-      if (parsed && typeof parsed === 'object') state.settings = { ...state.settings, ...parsed };
+      if (parsed && typeof parsed === 'object') state.settings = sanitizeSettings(state.settings, parsed);
       break;
     case 'mock-burst':
       if (value === 'on') { startBurst(); return; } // startBurst pushes itself
@@ -188,17 +203,54 @@ function dispatch(command, value) {
   pushNow();
 }
 
+function refuse(why) {
+  console.log(`[mock-bridge] REFUSING to act on ${WS_URL}: ${why}. No Subscribe or action was sent. (--allow-real-sb overrides this on purpose.)`);
+  process.exit(2);
+}
+
 function connect() {
   ws = new WebSocket(WS_URL);
-  ws.on('open', () => {
-    // Lowercase `general` — the SB Subscribe case gotcha (same as the real sidecar).
+  let engaged = false;
+  let authId = null;
+  let helloTimer = null;
+  // Subscribe and push only once, and only after the guard is satisfied.
+  const engage = () => {
+    if (engaged) return;
+    engaged = true;
+    clearTimeout(helloTimer);
+    // Lowercase `general`, the project's convention (same as the real sidecar; the mock accepts any casing, as Streamer.bot 1.0.7 does).
     ws.send(JSON.stringify({ request: 'Subscribe', id: String(++msgId), events: { general: ['Custom'] } }));
     pushNow(); // seed the discord.state cache so late joiners see bot status/favorites
+    if (hbTimer) clearInterval(hbTimer);
+    hbTimer = setInterval(pushNow, HEARTBEAT_MS);
     console.log(`[mock-bridge] up — connected to ${WS_URL}`);
+  };
+  ws.on('open', () => {
+    if (ALLOW_REAL_SB) { engage(); return; }
+    helloTimer = setTimeout(() => refuse(`no Hello frame within ${HELLO_WAIT_MS} ms, so it cannot be shown to be the mock`), HELLO_WAIT_MS);
   });
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (!m || typeof m !== 'object') return;
+    if (m.request === 'Hello') {
+      if (m.info && m.info.source === 'mock') {
+        const a = m.authentication;
+        if (a && typeof a === 'object' && typeof a.salt === 'string' && typeof a.challenge === 'string' && SB_PASSWORD) {
+          authId = String(++msgId);
+          ws.send(JSON.stringify({ request: 'Authenticate', id: authId, authentication: b64sha256(b64sha256(SB_PASSWORD + a.salt) + a.challenge) }));
+        } else engage();
+      }
+      else if (!ALLOW_REAL_SB) refuse(`its Hello says it is ${JSON.stringify(m.info && m.info.name || 'something')}, not the mock`);
+      return;
+    }
+    if (authId && m.id === authId && !m.event) {
+      authId = null;
+      if (m.status && m.status !== 'ok') refuse('the mock Streamer.bot refused the password (GREENROOM_SB_PASSWORD)');
+      else engage();
+      return;
+    }
+    if (!engaged) return; // before the guard is satisfied nothing is acted on
     if (m && m.id && !m.event) return; // acks
     if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
     let d = m.data;
@@ -209,6 +261,8 @@ function connect() {
     dispatch(String(d.command || ''), String(d.value ?? ''));
   });
   ws.on('close', () => {
+    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+    clearTimeout(helloTimer); // a stale 'no Hello' timer must never act on a connection that has already ended
     stopTimers();
     console.log(`[mock-bridge] disconnected — retrying in ${RECONNECT_MS}ms`);
     setTimeout(connect, RECONNECT_MS);
@@ -218,5 +272,7 @@ function connect() {
   });
 }
 
+// First line out: where this is aimed.
+console.log(`[mock-bridge] target ${WS_URL}${ALLOW_REAL_SB ? '  (--allow-real-sb: NOT checking that it is the mock)' : ''}`);
 console.log('[mock-bridge] token-less fake Discord bridge (see mock-sb-server.mjs / verify.mjs)');
 connect();

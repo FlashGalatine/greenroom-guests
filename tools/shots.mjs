@@ -1,9 +1,10 @@
 // Screenshot generator for docs/ — spawns the mock SB server, stages a lively
 // state (3-user voice channel, one speaking, favorites, a bound guest slot), and
 // captures the roster overlay (row + grid) and the control page at 2× scale.
-// Run: npm run shots   (requires playwright-core: npm install --no-save playwright-core)
+// Run: npm run shots   (playwright-core is a pinned devDependency: a plain  npm install  provides it)
 
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
@@ -16,20 +17,27 @@ const HTTP_PORT = Number(process.env.SB_HTTP_PORT) || 7477;
 const WS_PORT = Number(process.env.SB_WS_PORT) || 8083;
 const BASE = `http://127.0.0.1:${HTTP_PORT}`;
 
-const STREAMER = '110457699291906048';
-const embed = (n) => `https://cdn.discordapp.com/embed/avatars/${n}.png`;
+// the version the bridge in the screenshots reports (the page shows a note when the bridge is older than itself or reports none)
+const SIDECAR_VERSION = JSON.parse(readFileSync(resolve(ROOT, 'sidecar', 'package.json'), 'utf8')).version;
+const STREAMER = '100000000000000001';
+// Neutral local avatars (a letter on a flat colour as a data: SVG): the shots show no Discord default avatar and load nothing from Discord.
+const initial = (ch, bg) => 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="${bg}"/><text x="32" y="44" font-family="Arial,sans-serif" font-size="34" font-weight="bold" text-anchor="middle" fill="#fff">${ch}</text></svg>`);
+const embed = (n) => [initial('A', '#3a6ea5'), initial('G', '#8a5a9e'), initial('H', '#4f8a5b')][n - 1];
 
 function startMock() {
   return new Promise((res, rej) => {
     const child = spawn(process.execPath, ['mock-sb-server.mjs'], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SB_HTTP_PORT: String(HTTP_PORT), SB_WS_PORT: String(WS_PORT) },
+      // an allowlisted environment, not the shell's: nothing exported there can point this at a live Streamer.bot
+      env: Object.fromEntries([...['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'LANG', 'TZ'].filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]), ['SB_HTTP_PORT', String(HTTP_PORT)], ['SB_WS_PORT', String(WS_PORT)]]),
     });
-    let out = '';
-    const t = setTimeout(() => rej(new Error('mock no start\n' + out)), 8000);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { out += d; if (out.includes('[mock] WS')) { clearTimeout(t); res(child); } });
-    child.stderr.on('data', () => {});
+    let out = '', settled = false;
+    const t = setTimeout(() => { settled = true; try { child.kill(); } catch {} rej(new Error('mock did not start in 8s\n' + out)); }, 8000);
+    const onData = (d) => { out += d; if (!settled && out.includes('[mock] READY')) { settled = true; clearTimeout(t); res(child); } };
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', onData);
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', onData);
+    // a mock that exits first (a taken port, say) is reported at once, with its own words
+    child.on('exit', (code) => { if (!settled) { settled = true; clearTimeout(t); rej(new Error(`mock exited ${code} before it was ready\n` + out)); } });
   });
 }
 
@@ -56,7 +64,9 @@ async function main() {
     prod = await producer();
 
     prod.doAction('VDO Push', { payload: JSON.stringify({
-      enabled: true, room: 'greenroom-demo', password: 'demo',
+      // 'greenroomdemo' / 'demo' are throwaway values for these screenshots: never use them for a real session. (No hyphen: vdo.ninja turns it
+      // into an underscore and the control page then shows a note that the room differs from what was typed.)
+      enabled: true, room: 'greenroomdemo', password: 'demo',
       viewFlags: '&solo&hidescreenshare&rounded=0&tallyoff&fadein&codec=h264&cleanish',
       slots: [
         { slot: 1, label: 'ALPHA', streamID: 'demo0001', mirror: false, mode: 'webcam', discordUserId: '' },
@@ -81,16 +91,18 @@ async function main() {
       },
       settings: { streamerUserId: STREAMER, avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true },
       rpc: { enabled: true, hasToken: true, error: null },
+      hb: 5000, stopped: false, bridgeVersion: SIDECAR_VERSION,
       favorites: [
-        { id: 'f1', name: 'Commentary', serverId: '259501535484968970', channelId: '222' },
-        { id: 'f2', name: 'Lobby Night', serverId: '259501535484968970', channelId: '333' },
+        { id: 'f1', name: 'Commentary', serverId: '500000000000000001', channelId: '222' },
+        { id: 'f2', name: 'Lobby Night', serverId: '500000000000000001', channelId: '333' },
       ],
-      current: { serverId: '259501535484968970', channelId: '222' },
+      current: { serverId: '500000000000000001', channelId: '222' },
     }) });
 
     const shoot = async (url, viewport, file, settleMs = 1200, fullPage = false) => {
       const page = await browser.newPage({ viewport, deviceScaleFactor: 2 });
-      await page.route(/vdo\.ninja/, (r) => r.abort()); // keep shots offline (avatars still load from Discord CDN)
+      await page.route(/vdo\.ninja/, (r) => r.abort()); // keep shots offline
+      await page.route(/discordapp\.com/, (r) => r.abort()); // nothing is loaded from Discord's CDN either
       await page.goto(url, { waitUntil: 'load' });
       await page.evaluate(() => document.fonts.ready);
       await new Promise((r) => setTimeout(r, settleMs));

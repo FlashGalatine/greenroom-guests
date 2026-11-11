@@ -6,6 +6,8 @@
 <!--
   Greenroom guest slot — one OBS Browser Source per slot:
     http://127.0.0.1:7474/greenroom-overlay/vdoninja-guest.html?slot=1   (…2, 3, 4)
+  Add each slot source ONCE and reuse it in other scenes with Add Existing / Paste (Reference), never a new source or
+  Paste (Duplicate): every copy is one more viewer, and one more full stream for the guest's PC to send.
 
   SERVE OVER HTTP (Streamer.bot's HTTP Server, docs/STREAMERBOT-SETUP.md) — NOT as
   an OBS "Local file" source: the embedded vdo.ninja WebRTC viewer needs a
@@ -33,6 +35,7 @@
 </script>
 <script src="panel-client-sb.js"></script>
 <script src="nameplate-shared.js"></script>
+<script src="vdo-url.js"></script>
 </head>
 <body>
 <script>
@@ -41,10 +44,14 @@
 (function () {
   'use strict';
 
+  // The slot is 1 to 4, written exactly (no ?slot means slot 1). Anything else (slot=5, slot=abc, slot=2x) is 0: this source shows nothing and
+  // says so in the console (and on the page with ?sbdebug=1), instead of quietly showing slot 1 (GRN-144).
   function resolveSlot() {
-    if (Number.isFinite(window.__VDO_SLOT)) return Math.max(1, Math.floor(window.__VDO_SLOT));
-    const n = parseInt(new URLSearchParams(location.search).get('slot'), 10);
-    return Number.isFinite(n) && n >= 1 ? n : 1;
+    const q = new URLSearchParams(location.search);
+    const raw = window.__VDO_SLOT !== undefined ? String(window.__VDO_SLOT).trim() : q.has('slot') ? String(q.get('slot') ?? '').trim() : '1';
+    if (/^[1-4]$/.test(raw)) return Number(raw);
+    console.warn('[greenroom] this guest slot source has a bad slot (' + JSON.stringify(raw) + '): use ?slot=1 to 4. It shows nothing.');
+    return 0;
   }
   const SLOT = resolveSlot();
 
@@ -69,12 +76,14 @@
     '#dpfp.speaking img{opacity:1;filter:brightness(112%) saturate(112%);' +
       'box-shadow:0 0 0 3px rgba(57,255,20,.95),0 0 22px 6px rgba(57,255,20,.8);' +
       'animation:dpfp-blink .9s ease-in-out infinite}' +
+    'body.offline #dpfp.speaking img{animation:none;box-shadow:0 0 0 2px rgba(255,255,255,.10)}' +
+    '#dpfp.no-blink.speaking img{animation:none}' +
     '@keyframes dpfp-blink{' +
       '0%,100%{box-shadow:0 0 0 3px rgba(57,255,20,.9),0 0 12px 3px rgba(57,255,20,.6)}' +
       '50%{box-shadow:0 0 0 3px rgba(57,255,20,1),0 0 26px 8px rgba(57,255,20,1)}}' +
     // Nameplate positioning only — the plate's own look lives in
     // nameplate-shared.js (var(--np-*)-driven, docs/THEMING.md).
-    '.np-plate{position:absolute;z-index:3;max-width:calc(100% - 24px)}' +
+    'body .np-plate{position:absolute;z-index:3;max-width:calc(100% - 24px)}' +
     'body[data-nppos="bl"] .np-plate{left:12px;bottom:12px}' +
     'body[data-nppos="br"] .np-plate{right:12px;bottom:12px}' +
     'body[data-nppos="tl"] .np-plate{left:12px;top:12px}' +
@@ -108,23 +117,50 @@
   let lastVdo = null;       // latest vdoninja config payload (slots, room, flags…)
   let lastDiscord = null;   // latest discord voice feed { channelId, users:{…} }
   let dpfpUserId = '';      // the user id currently shown (for onerror fallback)
+  let dpfpWantUrl = '';     // the picture last asked for (a failed one is not asked for again on every update)
 
-  // A missing/broken avatar image falls back to the user's default embed avatar.
+  // Feed liveness (GRN-34): the bridge pushes at least every `hb` ms; three missed beats and the feed is stale, which means nobody speaks.
+  // A payload without `hb` (an older bridge, a single replayed push) is never stale. Timing uses the page's monotonic clock (a step of the
+  // system clock changes nothing); hb counts only as a number, between a floor and a ceiling; age only as a number, between 0 and three
+  // heartbeats (the same rules as the roster's, overlay/discord-roster.html).
+  const HB_FLOOR = 1000;
+  const HB_CEIL = 60000;
+  let fed = false;
+  let lastFeedAt = 0;
+  let wasStale = false;
+  const feedHb = () => { const h = lastDiscord && lastDiscord.hb; return typeof h === 'number' && Number.isFinite(h) && h > 0 ? Math.min(HB_CEIL, Math.max(HB_FLOOR, h)) : 0; };
+  const isStale = () => { const hb = feedHb(); return hb > 0 && fed && performance.now() - lastFeedAt > 3 * hb; };
+  const noteFeed = (msg) => {
+    const a = msg && msg.age;
+    const age = typeof a === 'number' && Number.isFinite(a) ? Math.max(0, Math.min(a, 3 * feedHb())) : 0;
+    fed = true;
+    lastFeedAt = performance.now() - age;
+  };
+
+  // A missing/broken avatar image falls back to the user's default embed avatar, and the real one is tried again a minute later.
   dpfpImg.addEventListener('error', () => {
     if (!dpfpUserId) return;
     const fallback = defaultAvatar(dpfpUserId);
     if (dpfpImg.getAttribute('src') !== fallback) dpfpImg.src = fallback;
+    setTimeout(() => { dpfpWantUrl = ''; }, 60000);
   });
 
-  // view/room/password are added programmatically; viewFlags carries the cosmetic
-  // flags (already leading with '&').
-  function buildUrl(v, streamID) {
-    let url = 'https://vdo.ninja/?view=' + encodeURIComponent(streamID);
-    if (v.room) url += '&room=' + encodeURIComponent(v.room);
-    if (v.password) url += '&password=' + encodeURIComponent(v.password);
-    url += v.viewFlags || '';
-    return url;
+  // The view URL is built by the shared helper (vdo-url.js): the password encoded the way vdo.ninja reads it, the saved flags
+  // normalised and stripped of anything that could load script or style or change the room, and the view solo unless asked otherwise.
+  function buildUrl(v, streamID) { return GRVdoUrl.buildViewUrl(v, streamID); }
+
+  // vdo.ninja refuses to run inside a page that is not a secure context, so a viewer started here would stay black for ever: say so.
+  const INSECURE = !window.isSecureContext;
+  const err = document.createElement('div');
+  err.hidden = true;
+  {
+    err.id = 'insecure';
+    err.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;padding:8px 10px;background:rgba(0,0,0,.75);color:#ffb454;font:14px/1.4 Consolas,monospace;border:1px solid #ffb454;z-index:10';
+    err.textContent = 'This source is not on a secure origin, so vdo.ninja would refuse to play. Open it via http://127.0.0.1:<port>/ (not a LAN name).';
+    document.body.appendChild(err);
   }
+  // shown only for a webcam slot that has a guest to show: a Discord-mode slot needs no vdo.ninja and an empty slot shows nothing
+  const showInsecure = (on) => { err.hidden = !(INSECURE && on); };
 
   function defaultAvatar(userId) {
     // Default embed avatar index for the new username system: (id >> 22) % 6.
@@ -136,10 +172,21 @@
 
   function slotFor(v) {
     const slots = v && Array.isArray(v.slots) ? v.slots : [];
-    return slots.find((s) => Number(s.slot) === SLOT) || null;
+    return slots.find((s) => s && Number(s.slot) === SLOT) || null;
   }
 
   function render() {
+    if (SLOT === 0) { // a bad ?slot: nothing (see resolveSlot), and with ?sbdebug=1 a hint on the page
+      frame.style.display = 'none'; dpfp.hidden = true;
+      if (Q.get('sbdebug') === '1' && !document.getElementById('slothint')) {
+      const h = document.createElement('div');
+      h.id = 'slothint';
+      h.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;padding:8px 10px;background:rgba(0,0,0,.75);color:#ffb454;font:14px/1.4 Consolas,monospace;border:1px solid #ffb454;z-index:10';
+      h.textContent = 'Bad slot in this source\'s URL: use ?slot=1 to 4. It shows nothing.';
+      document.body.appendChild(h);
+      }
+      return;
+    }
     const mine = slotFor(lastVdo);
     if (mine && mine.mode === 'discord') renderDiscord(mine);
     else renderWebcam(lastVdo, mine);
@@ -157,7 +204,8 @@
     // instant, no reload, works on the cross-origin vdo.ninja viewer.
     frame.style.transform = mine && mine.mirror ? 'scaleX(-1)' : 'none';
 
-    const url = v && streamID ? buildUrl(v, streamID) : 'about:blank';
+    showInsecure(!!(v && streamID));
+    const url = !INSECURE && v && streamID ? buildUrl(v, streamID) : 'about:blank';
     // Only reload the iframe when the resolved URL actually changes, so unrelated
     // pushes (another slot updating, or the voice feed) never interrupt our video.
     if (url !== lastUrl) {
@@ -167,6 +215,7 @@
   }
 
   function renderDiscord(mine) {
+    showInsecure(false);
     // Blank + hide the iframe so its WebRTC viewer tears down (no phantom video).
     if (lastUrl !== 'about:blank') { frame.src = 'about:blank'; lastUrl = 'about:blank'; }
     frame.style.display = 'none';
@@ -178,20 +227,41 @@
       dpfp.hidden = true;
       dpfp.classList.remove('speaking');
       dpfpUserId = '';
+      dpfpWantUrl = '';
       return;
     }
 
     dpfp.hidden = false;
+    if (dpfpUserId !== userId) dpfpWantUrl = '';
     dpfpUserId = userId;
-    const users = (lastDiscord && lastDiscord.users) || {};
-    const u = users[userId] || null;
+    const stale = isStale();
+    wasStale = stale;
+    const users = lastDiscord && lastDiscord.users && typeof lastDiscord.users === 'object' && !Array.isArray(lastDiscord.users) ? lastDiscord.users : {};
+    const u = users[userId] && typeof users[userId] === 'object' ? users[userId] : null;
 
     // Real PFP when the guest is in the call; default embed avatar otherwise.
-    const avatarUrl = (u && u.avatarUrl) || defaultAvatar(userId);
-    if (dpfpImg.getAttribute('src') !== avatarUrl) dpfpImg.src = avatarUrl;
+    const avatarUrl = (u && typeof u.avatarUrl === 'string' && u.avatarUrl) || defaultAvatar(userId);
+    if (dpfpWantUrl !== avatarUrl) { dpfpWantUrl = avatarUrl; dpfpImg.src = avatarUrl; }
 
-    dpfp.classList.toggle('speaking', !!(u && u.speaking));
+    // Speaking only while the feed is live and the bot is in the channel (a stale feed, a bridge that gave up its voice connection, or one
+    // that is offline says nothing about who is speaking now).
+    const live = !stale && !!lastDiscord && !!lastDiscord.connected && !!lastDiscord.hostInChannel;
+    dpfp.classList.toggle('speaking', live && !!(u && u.speaking));
+    // The shared blink setting (the roster's too): off means a steady glow.
+    dpfp.classList.toggle('no-blink', !!(lastDiscord && lastDiscord.settings && lastDiscord.settings.neonBlink === false));
   }
+
+  // The socket closed (Streamer.bot quit or restarted): nobody is "speaking" any more. Keep the
+  // avatars and the last feed; only the live speaking flags go.
+  window.addEventListener('svc:disconnect', () => {
+    if (lastDiscord && lastDiscord.users) {
+      for (const id of Object.keys(lastDiscord.users)) {
+        const u = lastDiscord.users[id];
+        if (u && typeof u === 'object') u.speaking = false;
+      }
+    }
+    render();
+  });
 
   window.addEventListener('svc:message', (e) => {
     const msg = e.detail;
@@ -199,17 +269,22 @@
     if (msg.type === 'sync') {
       // Legacy StreamService shape; under Streamer.bot the VDO Sync action replays
       // the two typed messages below instead. Kept for transport symmetry.
-      lastVdo = msg.vdoninja || null;
-      lastDiscord = msg.discordVoice || null;
+      // Assign only the fields the message carries: a bare {type:'sync'} must not blank the slot.
+      if (msg.vdoninja !== undefined) lastVdo = msg.vdoninja || null;
+      if (msg.discordVoice !== undefined) { lastDiscord = msg.discordVoice || null; noteFeed(msg); }
       render();
     } else if (msg.type === 'vdoninja:update') {
       lastVdo = msg.vdoninja || null;
       render();
     } else if (msg.type === 'discord:voice:update') {
       lastDiscord = msg.discordVoice || null;
+      noteFeed(msg);
       render();
     }
   });
+
+  // A feed that has just gone stale (the bridge died) redraws: the glow goes out.
+  setInterval(() => { if (isStale() !== wasStale) render(); }, 1000);
 })();
 </script>
 </body>

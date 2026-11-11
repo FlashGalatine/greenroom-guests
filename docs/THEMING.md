@@ -12,9 +12,6 @@ Open `discord-roster.html`, edit the `:root` block:
 
 | Variable | Default | What it drives |
 |---|---|---|
-| `--accent` | `34, 211, 238` (cyan) | speaking glow — an `R, G, B` **triplet** (goes into `rgba(var(--accent), α)`) |
-| `--avatar-px` | `56px` | guest avatar size |
-| `--streamer-px` | `72px` | streamer avatar size |
 | `--gap` | `14px` | spacing between members |
 | `--name-size` / `--name-color` / `--name-font` | `13px` / near-white / Segoe UI | name labels |
 | `--chip-bg` | dark translucent | per-member backing chip |
@@ -23,12 +20,16 @@ Open `discord-roster.html`, edit the `:root` block:
 | `--blink-s` | `.9s` | speaking pulse period |
 | `--radius` | `14px` | chip corner radius |
 
-Avatar size, accent, and the streamer id can also be changed **live** from the
-control page — they ride the payload's `settings` block, no file edit needed.
+The glow colour and the two avatar sizes are **not** reskinned in the `:root` block: the page sets
+`--accent`, `--avatar-px` and `--streamer-px` itself, at runtime, from `?accent=R,G,B`,
+`?avatar=` and `?streamerpx=` or, without those, from the payload's `settings` block (the control page
+changes them live), so an edit of those three lines in `:root` is overwritten. Use the URL parameters
+below, or the control page.
 
 ## URL params (http-served, so they work in OBS)
 
-Per-source overrides; precedence is **URL param → payload settings → default**:
+Per-source overrides; precedence is **URL param → payload settings → default** (the default is the one in the
+page's script, not the value in the `:root` block):
 
 | Param | Values | Meaning |
 |---|---|---|
@@ -39,8 +40,8 @@ Per-source overrides; precedence is **URL param → payload settings → default
 | `?streamer=` | user id | streamer-first ordering override |
 | `?hidewhenabsent=` | `1` \| `0` | hide everything when the streamer isn't in voice |
 | `?theme=plain` | — | the second look (below) |
-| `?max=` | n | cap rendered members; the rest collapse into a `+N` chip |
-| `?sbport=` / `?sbdebug=1` | — | transport knobs (overlay/panel-client-sb.js) |
+| `?max=` | n | cap rendered members; the rest collapse into a `+N` chip. Even without it, members that do not fit the browser source are folded into the `+N` chip automatically (the streamer stays first) |
+| `?sbport=` / `?sbdebug=1` | port 1-65535 / — | transport knobs (overlay/panel-client-sb.js); a bad `?sbport` is refused, never a different host |
 
 ## The plain theme
 
@@ -57,8 +58,8 @@ Effect toggles that ride `settings`: `scanlines` (chip texture) and `neonBlink`
 
 Mute (mic-slash) and deafen (headphones-slash) are inline SVGs — no external
 assets. Deafen implies mute visually, so a deafened member shows only the deafen
-badge (Discord's own convention). Recolor via `--badge-bg`/`--badge-fg`; resize
-automatically with the avatar (38% of avatar size, 18px minimum).
+badge (Discord's own convention). Recolor via `--badge-bg`/`--badge-fg`; they resize
+automatically with the avatar (38% of `--avatar-px` for guests, 34% of `--streamer-px` for the streamer, 18px minimum).
 
 ## Speaking glow
 
@@ -118,5 +119,6 @@ URL params — the guest overlay's built-in lower-third (`vdoninja-guest.html`):
 
 Social platform icons are inline SVGs tinted by the accent (`currentColor`):
 `twitch` `discord` `twitter` `bluesky` `youtube` `instagram` `tiktok` `website`
-— an unknown platform falls back to the `website` globe. One handle renders
+(the short names `x`, `yt`, `ig`, `bsky` and `tt` work too) — an unknown platform
+falls back to the `website` globe. One handle renders
 static; two or more rotate on a 5 s cycle.

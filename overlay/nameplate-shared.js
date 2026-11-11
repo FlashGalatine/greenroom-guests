@@ -13,6 +13,15 @@ window.GRNameplate = (function () {
 
   // Platform icons — fill follows CSS `color` via currentColor. Unknown
   // platforms fall back to the `website` globe.
+  //
+  // Provenance and licences of the glyphs (THIRD_PARTY_NOTICES.md has the notices):
+  //   tiktok   Boxicons 2.1.4 (bxl-tiktok), MIT, Copyright (c) 2015-2021 Aniket Suvarna; the path is byte-identical to the Boxicons one.
+  //   twitch   derived from the Boxicons 2.1.4 Twitch glyph (MIT, as above).
+  //   discord  the Discord glyph of Google's Material Icons (github.com/google/material-design-icons), Apache License 2.0; same outline as
+  //            Iconify's `ic:baseline-discord` (not the Pictogrammers `mdi:discord`, a different drawing). Upstream copyright line unconfirmed.
+  //   twitter (X), bluesky, youtube, instagram   source unconfirmed: the platforms' own marks are trademarks of their owners, drawn here only
+  //            to say which service a handle is on (not affiliated with or endorsed by them). Replace with a confirmed-source glyph if in doubt.
+  //   website  an original globe drawn for this kit.
   const ICONS = {
     twitch: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.265 3 3 6.236v13.223h4.502V21.5h2.531l2.27-2.041h3.476L20.5 14.94V3H4.265zm1.49 1.5H19v9.69l-2.752 2.478h-4.253L9.726 18.89v-2.222H5.755V4.5zM10.478 7.5h1.49V12h-1.49zm4.273 0h1.49V12h-1.49z"/></svg>',
     discord: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.36-.76-.54-1.09-.01-.02-.04-.03-.07-.03-1.5.26-2.93.71-4.27 1.33-.01 0-.02.01-.03.02-2.72 4.07-3.47 8.03-3.1 11.95 0 .02.01.04.03.05 1.8 1.32 3.53 2.12 5.24 2.65.03.01.06 0 .07-.02.4-.55.76-1.13 1.07-1.74.02-.04 0-.08-.04-.09-.57-.22-1.11-.48-1.64-.78-.04-.02-.04-.08-.01-.11.11-.08.22-.17.33-.25.02-.02.05-.02.07-.01 3.44 1.57 7.15 1.57 10.55 0 .02-.01.05-.01.07.01.11.09.22.17.33.26.04.03.04.09-.01.11-.52.31-1.07.56-1.64.78-.04.01-.05.06-.04.09.32.61.68 1.19 1.07 1.74.02.03.05.03.07.02 1.72-.53 3.45-1.33 5.24-2.65.02-.01.03-.03.03-.05.44-4.53-.73-8.46-3.1-11.95-.01-.01-.02-.02-.04-.02zM8.52 14.91c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.84 2.12-1.89 2.12zm6.97 0c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.83 2.12-1.89 2.12z"/></svg>',
@@ -24,8 +33,12 @@ window.GRNameplate = (function () {
     website: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9S14.5 18.4 12 21c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></svg>',
   };
 
+  // Short names people type for a platform. Only own properties count: icon('constructor') must not return a function.
+  const ICON_ALIASES = { x: 'twitter', yt: 'youtube', ig: 'instagram', bsky: 'bluesky', tt: 'tiktok' };
   function icon(platform) {
-    return ICONS[String(platform ?? '').toLowerCase()] || ICONS.website;
+    let k = String(platform ?? '').toLowerCase();
+    if (Object.hasOwn(ICON_ALIASES, k)) k = ICON_ALIASES[k];
+    return Object.hasOwn(ICONS, k) ? ICONS[k] : ICONS.website;
   }
 
   function escapeHtml(str) {
@@ -36,11 +49,20 @@ window.GRNameplate = (function () {
 
   // ── Directory sanitizers ────────────────────────────────────────────────────
   // KEEP IN SYNC with the copy in control/directory-core.js (same semantics, same
-  // key order) — the overlays can't load that file, it lives behind the other SB
-  // Path->Folder prefix. Both must be idempotent: sanitize(sanitize(x)) ===
+  // key order, same superset form: unknown fields pass through after the known ones) —
+  // the overlays can't load that file, it lives behind the other SB Path->Folder prefix.
+  // verify.mjs checks the copies agree. Both must be idempotent: sanitize(sanitize(x)) ===
   // sanitize(x), or the control pages' hydration baselines would drift and
   // trigger spurious pushes. `auto` (a placeholder name the control page invented
   // from a live guest) is carried through for parity; no overlay reads it.
+  const DIR_KEYS = new Set(['vdoLabel', 'discordUserId', 'displayName', 'socials', 'auto']);
+  const SOCIAL_KEYS = new Set(['platform', 'handle']);
+  function extraFields(src, known) {
+    const out = {};
+    for (const k of Object.keys(src || {})) if (!known.has(k) && k !== '__proto__') out[k] = src[k];
+    return out;
+  }
+
   function sanitizeSocials(raw) {
     const out = [];
     if (!Array.isArray(raw)) return out;
@@ -49,7 +71,7 @@ window.GRNameplate = (function () {
       const platform = String(s.platform ?? '').trim().toLowerCase();
       const handle = String(s.handle ?? '').trim();
       if (!platform || !handle) continue;
-      out.push({ platform, handle });
+      out.push(Object.assign({ platform, handle }, extraFields(s, SOCIAL_KEYS)));
     }
     return out;
   }
@@ -63,25 +85,85 @@ window.GRNameplate = (function () {
       const discordUserId = String(e.discordUserId ?? '').replace(/\D/g, '');
       const displayName = String(e.displayName ?? '').trim();
       if (!displayName || (!vdoLabel && !discordUserId)) continue;
-      out.push({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto });
+      out.push(Object.assign({ vdoLabel, discordUserId, displayName, socials: sanitizeSocials(e.socials), auto: !!e.auto }, extraFields(e, DIR_KEYS)));
     }
     return out;
   }
 
   // ── Lookup ──────────────────────────────────────────────────────────────────
-  // Labels are stored as the operator typed them but matched case-insensitively
-  // (vdo.ninja labels come back trimmed from the director enumeration).
+  // KEEP IN SYNC with control/directory-core.js: the block below is the same text there (verify.mjs compares them).
+  // <guest-identity>
+  // The comparison key for guest labels and the lookups built on it. IDENTICAL in control/directory-core.js and
+  // overlay/nameplate-shared.js (verify.mjs compares the two blocks and runs both over the same vectors).
+  //
+  // A label is normalised ONLY into a key; the raw label stays the slot key and is what is stored. canon() decodes vdo.ninja's HTML
+  // escaping (it escapes twice: "Tom &amp;amp; Jerry"), reads '_' as a space, applies NFC, drops invisible characters (zero-width
+  // joiners and spaces, the soft hyphen, ...) and collapses whitespace; it repeats until the text is stable (at most 10 passes, on
+  // the first 400 characters), so canon(canon(x)) === canon(x). fold() also folds case, and canonises once more afterwards: a
+  // lower-cased text can be longer (U+0130 becomes two characters) and so fold(fold(x)) === fold(x) as well. Two labels are
+  // "exactly equal" when their canons are equal. A label made only of invisible characters has an empty canon: it matches an entry
+  // whose label is the same raw text, and nothing else.
+  function decodeHtml(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = t.replace(/&(lt|gt|quot|#39|#x27|apos);/gi, (m, n) => ({ lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", apos: "'" }[n.toLowerCase()])).replace(/&amp;/gi, '&');
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function canon(s) {
+    let t = String(s ?? '').slice(0, 400);
+    for (let i = 0; i < 10; i++) {
+      const d = decodeHtml(t).replace(/_/g, ' ').normalize('NFC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').replace(/\s+/g, ' ').trim();
+      if (d === t) break;
+      t = d;
+    }
+    return t;
+  }
+  function fold(s) { return canon(canon(s).toLowerCase()); }
+  // Does the label draw anything? (U+2800, the Braille blank, is not whitespace but shows nothing.)
+  function hasGlyph(s) { return /[^\s⠀ㅤᅟᅠ]/u.test(canon(s)); }
+
+  // Which directory entry stands for this live label? Collect every entry whose key matches, then prefer an exact-case match (equal
+  // canon), then a curated entry over an auto one, then the first in array order.
   function findByLabel(dir, label) {
-    const needle = String(label ?? '').trim().toLowerCase();
-    if (!needle) return null;
-    return dir.find((e) => e.vdoLabel && e.vdoLabel.toLowerCase() === needle) || null;
+    const c = canon(label);
+    if (!c) {
+      const raw = String(label ?? '').trim();
+      if (!raw) return null;
+      let same = null;
+      for (const e of Array.isArray(dir) ? dir : []) {
+        if (!e || !e.vdoLabel || String(e.vdoLabel).trim() !== raw) continue;
+        if (!same || (same.auto && !e.auto)) same = e;
+      }
+      return same;
+    }
+    const f = fold(c);
+    let hit = null;
+    let hitRank = 99;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || !e.vdoLabel) continue;
+      const ec = canon(e.vdoLabel);
+      if (fold(ec) !== f) continue;
+      const rank = (ec === c ? 0 : 2) + (e.auto ? 1 : 0);
+      if (rank < hitRank) { hit = e; hitRank = rank; }
+    }
+    return hit;
   }
 
+  // Which entry stands for this Discord user? Digits only; a curated entry beats an auto one, then array order.
   function findByUserId(dir, id) {
-    const needle = String(id ?? '');
+    const needle = String(id ?? '').replace(/\D/g, '');
     if (!needle) return null;
-    return dir.find((e) => e.discordUserId && e.discordUserId === needle) || null;
+    let hit = null;
+    for (const e of Array.isArray(dir) ? dir : []) {
+      if (!e || String(e.discordUserId || '').replace(/\D/g, '') !== needle) continue;
+      if (!hit || (hit.auto && !e.auto)) hit = e;
+    }
+    return hit;
   }
+  // </guest-identity>
 
   // The single visibility rule shared by both nameplate surfaces. Needs only the
   // vdoninja payload (never discordVoice): a discord-mode plate mirrors the PFP
@@ -94,7 +176,8 @@ window.GRNameplate = (function () {
     if (!slot) return null;
     const dir = sanitizeDirectory(vdo.directory);
     if (slot.mode === 'discord') {
-      return slot.discordUserId ? findByUserId(dir, String(slot.discordUserId)) : null;
+      const uid = String(slot.discordUserId ?? '').replace(/\D/g, '');
+      return uid ? findByUserId(dir, uid) : null;
     }
     return slot.streamID ? findByLabel(dir, slot.label) : null;
   }
@@ -103,7 +186,7 @@ window.GRNameplate = (function () {
   const ACCENTS = { cyan: '34, 211, 238', magenta: '255, 0, 229', 'neon-green': '57, 255, 20' };
   function accentTriplet(name) {
     if (!name) return null;
-    if (ACCENTS[name]) return ACCENTS[name];
+    if (Object.hasOwn(ACCENTS, name)) return ACCENTS[name];
     return /^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$/.test(name) ? name : null;
   }
 
@@ -161,7 +244,8 @@ window.GRNameplate = (function () {
   // Standard "icon + handle" renderer. Handle is HTML-escaped; platform is only
   // ever an ICONS key lookup.
   function socialSlide(s) {
-    return icon(s.platform) + '<span class="np-handle">' + escapeHtml(s.handle) + '</span>';
+    // dir="auto": a handle in a right-to-left script runs from the right, so a long one is cut (ellipsis) at its end, not its beginning.
+    return icon(s.platform) + '<span class="np-handle" dir="auto">' + escapeHtml(s.handle) + '</span>';
   }
 
   // ── Plate CSS + builder ─────────────────────────────────────────────────────
@@ -172,13 +256,13 @@ window.GRNameplate = (function () {
       'background:var(--np-bg, rgba(10,14,18,.72));' +
       'border-left:3px solid rgb(var(--np-accent, 34, 211, 238));' +
       'border-radius:var(--np-radius, 10px);padding:var(--np-pad, 8px 14px);' +
-      "font-family:var(--np-name-font, 'Segoe UI', system-ui, sans-serif);max-width:100%}" +
+      "font-family:var(--np-name-font, 'Segoe UI', system-ui, sans-serif);max-width:100%;box-sizing:border-box}" +
     '.np-plate[hidden]{display:none}' +
     '.np-name{font-size:var(--np-name-size, 20px);font-weight:var(--np-name-weight, 700);' +
       'color:var(--np-name-color, #eef2f5);line-height:1.2;white-space:nowrap;' +
       'overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.7)}' +
     '.np-plate.no-socials .np-socials{display:none}' +
-    '.np-rot{display:inline-flex;align-items:center;gap:6px;' +
+    '.np-rot{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;' +
       'color:var(--np-handle-color, #b9c4cd);font-size:var(--np-handle-size, 13px);' +
       'transition:opacity .24s ease, transform .24s ease}' +
     '.np-rot svg{width:var(--np-icon-size, 15px);height:var(--np-icon-size, 15px);' +
@@ -214,6 +298,7 @@ window.GRNameplate = (function () {
 
     const name = document.createElement('div');
     name.className = 'np-name';
+    name.dir = 'auto'; // (same reason as the handle's)
     const socials = document.createElement('div');
     socials.className = 'np-socials';
     const rot = document.createElement('span');
@@ -249,7 +334,7 @@ window.GRNameplate = (function () {
   return {
     ICONS, icon, escapeHtml,
     sanitizeSocials, sanitizeDirectory,
-    findByLabel, findByUserId, resolvePlateEntry,
+    findByLabel, findByUserId, resolvePlateEntry, canon, fold, hasGlyph,
     ACCENTS, accentTriplet,
     makeRotator, socialSlide,
     injectCss, buildPlate,
