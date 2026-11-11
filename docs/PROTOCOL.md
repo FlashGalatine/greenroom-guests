@@ -465,7 +465,8 @@ address (`?sbpass=`; OBS stores it in the scene collection or its own settings).
 It covers the WebSocket only. Streamer.bot's HTTP server, which serves Greenroom's
 pages, has no password setting, and Streamer.bot documents a `DoAction` request on
 it (`POST /DoAction` with an action's id or name and its args) that runs that
-action. So a program on this PC, or a page that can send requests to that server,
+action. A run on Streamer.bot 1.0.7 on 2026-11-10 confirmed it: with Enforce on,
+the request ran `VDO Sync` without the password. So a program on this PC, or a page that can send requests to that server,
 can still run Greenroom's actions with Enforce on: `VDO Push` changes what the
 guest slots and overlays show, and `Discord Voice Command` can make the bot leave
 the call or quit. Keep both servers on 127.0.0.1 and load only pages you trust.

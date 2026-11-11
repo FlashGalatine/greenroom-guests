@@ -155,7 +155,9 @@ Streamer.bot's persisted `vdo.state`.
 **Discord Bridge Start extras** (skip for webcam-only setups):
 1. Edit the `BUNDLE` const (it reads `C:\path\to\greenroom-guests\sidecar` until you do, and the
    action then logs "BUNDLE is still the placeholder" and starts nothing) to your
-   `…\greenroom-guests\sidecar` path. The action checks that the folder exists, holds
+   `…\greenroom-guests\sidecar` path. **Change only that line.** `BUNDLE_PLACEHOLDER`, two lines below it,
+   must keep its original text: the action treats a `BUNDLE` equal to it as not set, so a find-and-replace that puts
+   your path on both lines gives "BUNDLE is still the placeholder" although the path is right. The action checks that the folder exists, holds
    `discord-bridge.mjs` and has `node_modules`, and logs which one is wrong; it finds
    Node as Windows finds it (Streamer.bot's own PATH first); only if `node` is not found
    there does it look for `node.exe` in the Node.js registry key, `%ProgramFiles%\nodejs`
@@ -458,7 +460,8 @@ is logged and the bridge keeps running. The bot token is never written to the lo
 
 **Tested versions.** Everything below was run on **Streamer.bot 1.0.4** on 2026-07-10, with the first release (Greenroom
 0.1.0). The offline suites cover what changed since (the escaped-string broadcast format, the authentication handshake, the
-action pre-flights), but no later release has been run on a real Streamer.bot. The action names and
+action pre-flights), but the checklist has not been run on a later release (a partial run of 1.0.104 is listed at
+the end of this section). The action names and
 the `CPH` calls the actions use were checked by name against **1.0.7**, and the offline suites do not depend on the
 Streamer.bot version, but this checklist has **not been run again** on 1.0.7 or on later 1.0.x, nor on OBS 33.0.1
 and its embedded browser (the dock checks in particular). Streamer.bot 1.1.x (argument isolation) has not
@@ -509,9 +512,31 @@ exercised on a live rig. Outcomes, faithfully:
       dock. Confirm the standalone 1×1 source (in a scene that is always shown) with the dock closed.
 - [ ] **Guest audio** — *not yet checked live.* Each live guest moves its own meter in the OBS mixer
       (**Control audio via OBS** ticked on the four slot sources, §3), and a test recording has the guests' audio.
-- [ ] **`?sbpass` and the OBS log** — *not yet checked live* (tested in Chromium only). With `&sbpass=` on the
-      director-min source, start OBS while Streamer.bot is closed, then search the current OBS log for the password:
-      the failed connections should name `sb-socket.js`, never the page's address.
+- [~] **`?sbpass` and the OBS log** — *looked at on 2026-11-10, not settled* (tested in Chromium only). The OBS 33.0.1
+      logs of sessions in which Streamer.bot was down for a while hold neither a password nor `sbpass`, but they hold
+      no failed-connection line from any browser source either, so whether such a line names `sb-socket.js` was not
+      seen, and it was not confirmed that `sbpass` was on the source address while Streamer.bot was down. To settle
+      it: with `&sbpass=` on the director-min source, start OBS while Streamer.bot is closed, then search the
+      current OBS log for the password.
+
+**Partial run, 2026-11-10.** Greenroom **1.0.104**, Streamer.bot **1.0.7**, OBS **33.0.1** (CEF 150), on a spare
+Streamer.bot install with a real vdo.ninja room and a real bot; observed by the operator. This is not a re-run of
+the checklist above; only these items were run:
+
+- [x] Guest video in the slot sources, with `director-min.html` designated as the always-on director and the dock open.
+- [x] Two guests bound a few seconds apart were each on screen within about 5 seconds (the fill-in correction
+      does not wait for the 30 s gap).
+- [x] **Clear auto-added** and **Un-ignore removed** beside the designated director-min: the live guests were in
+      the saved state again after a dock reload.
+- [x] A bridge started on a config that was not valid JSON kept a copy, and two saves in a row (a favorite, then
+      a setting) both reached the file with no "edited while" warning.
+- [x] The 1.0.104 bridge, launched by `Discord Bridge Start`, joined a voice channel.
+- [x] **HTTP `DoAction` with Authentication and Enforce on**: `POST /DoAction` naming `VDO Sync`, sent with no
+      password, returned 204 and the action ran, while clients without the password were being refused on the
+      WebSocket.
+- Found on the way: an overlay outside Greenroom that read the nested `vdoninja` object showed no names or
+  socials until it read `vdoninjaJson` (README → Updating, step 5).
+- Not run: old auto-added rows that hold socials, the 50-entry limit, guest audio, and the rest of the checklist.
 
 ## Optional: Streamer.bot Authentication
 
@@ -520,8 +545,8 @@ Do this only after **every** piece is updated (the overlay folder, the control f
 **Enforce** (not Authentication alone) is what refuses it.
 
 Authentication covers the WebSocket only. The HTTP server (§1) has no password setting,
-and Streamer.bot documents a `DoAction` request on it that runs an action by its name,
-so a program on this PC, or a page that can send requests to `127.0.0.1:7474`, can
+and Streamer.bot documents a `DoAction` request on it that runs an action by its name
+(confirmed on Streamer.bot 1.0.7, §6), so a program on this PC, or a page that can send requests to `127.0.0.1:7474`, can
 still run Greenroom's actions with Enforce on. Keep both servers on `127.0.0.1` and
 load only pages you trust (README → Security posture).
 

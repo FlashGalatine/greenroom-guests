@@ -190,9 +190,13 @@ roster is intentionally not snapshotted.
 4. Run `npm install` in `sidecar/` again (and in this folder once, `npm install --omit=dev`, for the backup CLI).
 5. **Reload the dock and `director-min`, and refresh every Greenroom OBS source first** (a page that was loaded before
    the update keeps running the old code until it is reloaded), **then** re-paste: for the three state actions the
-   order matters (setup guide, §2: an old page cannot read the new frames).
+   order matters (setup guide, §2: an old page cannot read the new frames). **An overlay of your own that reads
+   `vdoninja:update` or `discord:voice:update` straight from Streamer.bot** must read the string fields
+   (`vdoninjaJson`, `discordVoiceJson`; docs/PROTOCOL.md) before you re-paste: the actions no longer send the nested
+   `vdoninja` / `discordVoice` object, so an overlay that reads only that shows nothing afterwards.
 6. **Re-paste the C# actions the CHANGELOG lists** and compile each. After re-pasting `Discord Bridge Start`,
-   **set `BUNDLE` again** (the pasted code carries the placeholder) and put back what you had added to
+   **set `BUNDLE` again** (the pasted code carries the placeholder; change only the `BUNDLE` line, never
+   `BUNDLE_PLACEHOLDER` two lines below it) and put back what you had added to
    `psi.Arguments` (`--sb-ws-url`, `--guard-port`). The HTTP path maps and `BUNDLE` stay on the folder in use.
 7. Start the bridge again.
 
@@ -245,11 +249,12 @@ OBS-dock CEF question) was exercised on **2026-07-10** on a real Streamer.bot **
 rig — including the OBS Custom Browser Dock running the director, a real-room
 drop/rejoin auto-follow, and live Discord speaking events. Not exercised live: Streamer.bot's
 action queue under a rowdy multi-speaker feed, the standalone 1×1 `director-min` source,
-multi-director safety, guest audio. **Tested on:** Streamer.bot 1.0.4 with Greenroom 0.1.0 (live, that date); no later release has been run on
-a real Streamer.bot. The checklist has
+multi-director safety, guest audio. **Tested on:** Streamer.bot 1.0.4 with Greenroom 0.1.0 (live, that date). The checklist has
 **not been re-run** on Streamer.bot 1.0.7 or OBS 33.0.1 (the action names and `CPH` calls were checked against 1.0.7
 by name only); recheck it after a Streamer.bot or OBS major update, and 1.1.x (argument isolation) has not been
 validated. Results: [docs/STREAMERBOT-SETUP.md](docs/STREAMERBOT-SETUP.md#6-live-validation-results-2026-07-10-real-streamerbot-104).
+
+A **partial** live run on 2026-11-10 (Greenroom 1.0.104 on a spare Streamer.bot and OBS; versions and items at the end of that section) checked the fixes of that release and the HTTP `DoAction` request with Enforce on. It is not a re-run of the checklist.
 
 ## Security posture
 
@@ -279,7 +284,9 @@ Setup: docs/STREAMERBOT-SETUP.md, "Optional: Streamer.bot Authentication".
 
 Authentication covers the WebSocket only. Streamer.bot's HTTP server, which Greenroom
 needs to serve its pages, has no password setting, and Streamer.bot documents a
-`DoAction` request on it that runs an action by its name. So a program on this PC,
+`DoAction` request on it that runs an action by its name. A run on Streamer.bot 1.0.7
+on 2026-11-10 confirmed it: with Enforce on, the request ran `VDO Sync` without the
+password. So a program on this PC,
 or a page that can send requests to that server, can still run Greenroom's actions
 with Enforce on: change what the guest slots and overlays show (`VDO Push`), or make
 the Discord bot leave the call or quit (`Discord Voice Command`). Keep both servers
