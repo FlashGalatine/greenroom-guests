@@ -9,6 +9,17 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.114] — 2026-11-19
+
+Two fixes to the join schedule of 1.0.112, found in the review of its pull request. 1.0.112 was tagged but never merged or installed.
+
+### Fixed
+
+- **Back-to-back ticked times.** A ticked time that begins while another is still running (a 24 hour day before it, or two that overlap) now counts as a ticked time beginning: a Leave or a removal from the day before no longer keeps the bot out of it. Before, the bridge only noticed a change from "no ticked time" to "a ticked time". A ticked time that ends while an older one is still running is not a new beginning.
+- **A ticked time that begins while the bot is still logging in** no longer tries a join on a bot that is not logged in yet (the status line showed "Bot isn't in that server" until the login was done). The login joins when it is done. The same holds for turning the option off during a login.
+
+**Deploy:** copy the `sidecar/` and `control/` folders, restart the bridge and reload the dock. No Streamer.bot action changed. The sidecar version is 1.0.114 (the control page expects it).
+
 ## [1.0.112] — 2026-11-18
 
 A new option for the Discord bridge: **only join on a schedule**. It is off by default, and with it off nothing changes.
