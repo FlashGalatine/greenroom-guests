@@ -3295,6 +3295,52 @@ async function main() {
                 check('[8g] Discord removing the bot ends the hold (not held, parked, no rejoin in that window), and the next window opening joins again', !!parked && sc(parked).held === false && stayedOut && !!again && joins(o0) >= 1, JSON.stringify({ parked: parked && parked.schedule, stayedOut, again: !!again }));
                 t.close();
               }
+              // ── a window that starts while another is still open is a window opening too; going back to the tail of an older one is not ──
+              {
+                const cfgD = (over) => JSON.stringify({ favorites: [], current: { serverId: GUILD, channelId: '910' }, settings: { schedule: { enabled: true, days: friDays.map((d, i) => (over[i] ? { on: true, start: over[i][0], end: over[i][1] } : { ...d, on: false })) } } });
+                // Friday is 24 hours (20:00 to Saturday 20:00) and Saturday starts at 20:00: the schedule is never closed in between.
+                const t = await mkS('2026-11-20T20:30:00', { cfg: cfgD({ 5: ['20:00', '20:00'], 6: ['20:00', '23:00'] }) });
+                await t.waitFor((x) => x.channelId === '910', 8000);
+                await ready(t);
+                const m0 = t.got.length;
+                t.cmd('leave');
+                await wa(t, m0, (x) => x.channelId === null, 3000);
+                const o0 = mkSock();
+                clock(t, '2026-11-21T19:59:00');
+                await nap(600);
+                const early = joins(o0);
+                const m1 = t.got.length;
+                clock(t, '2026-11-21T20:00:05');
+                const again = await wa(t, m1, (x) => x.channelId === '910', 4000);
+                check('[8g] back-to-back windows (Friday 24 hours, Saturday from 20:00): Saturday\'s start is a window opening although the schedule never closed, so a Leave from Friday does not block it',
+                  early === 0 && !!again && joins(o0) >= 1, JSON.stringify({ early, again: !!again, s: t.last.schedule }));
+                t.close();
+                // Friday 20:00 to Saturday 06:00 with a short Saturday window (02:00 to 03:00) inside it: when the short one ends, the older one is
+                // still open, and that is not a new opening.
+                const u = await mkS('2026-11-21T02:30:00', { cfg: cfgD({ 5: ['20:00', '06:00'], 6: ['02:00', '03:00'] }) });
+                await u.waitFor((x) => x.channelId === '910', 8000);
+                await ready(u);
+                const n0 = u.got.length;
+                u.cmd('leave');
+                await wa(u, n0, (x) => x.channelId === null, 3000);
+                const o1 = mkSock();
+                clock(u, '2026-11-21T03:00:05');
+                await nap(800);
+                check('[8g] a window that ends while an older one is still open is not a window opening: the bot stays out after Leave', joins(o1) === 0 && u.last.channelId === null && sc(u.last).open === true, JSON.stringify({ joins: joins(o1), ch: u.last.channelId, s: u.last.schedule }));
+                u.close();
+              }
+              // ── a window that opens while the login is still in flight: no join is tried on a bot that is not logged in; the login then joins ──
+              {
+                md.holdHelloMs = 1500;
+                const o0 = mkSock();
+                const t = await mkS('2026-11-20T19:59:59.500', { timing: { scheduleTickMs: 150 } });
+                const j = await t.waitFor((x) => x.channelId === '910', 8000);
+                md.holdHelloMs = 0;
+                const early = t.got.filter((x) => x.connected !== true && (err(x) || sc(x).held === true));
+                check('[8g] a window that opens while the bot is still logging in starts no join before the login (no error, not held, no "window opened, joining"), and the login joins',
+                  !!j && joins(o0) >= 1 && early.length === 0 && !/schedule: window opened, joining/.test(t.out), JSON.stringify({ j: !!j, early: early.map((x) => [err(x), x.schedule]), out: t.out.slice(-300) }));
+                t.close();
+              }
             }
           } finally {
             await md.close();
@@ -3857,6 +3903,11 @@ async function main() {
         const full = sch({ 5: ['18:00', '18:00'] });
         check('[8g] a start equal to the end is 24 hours: Fri 18:00-18:00 is open Fri 18:00 and Sat 17:59, closed Sat 18:00 and Fri 17:59',
           scheduleOpen(full, at(20, 18)) === true && scheduleOpen(full, at(21, 17, 59)) === true && scheduleOpen(full, at(21, 18)) === false && scheduleOpen(full, at(20, 17, 59)) === false);
+        {
+          const W = S.scheduleWindow, two = sch({ 5: ['20:00', '06:00'], 6: ['02:00', '03:00'] });
+          check('[8g] scheduleWindow names the open window by its weekday, today\'s before the tail of yesterday\'s, and -1 when closed: Fri 20:00-06:00 with Sat 02:00-03:00 gives 5 at Sat 01:00, 6 at 02:30, 5 at 03:30, -1 at 07:00',
+            typeof W === 'function' && W(two, at(21, 1)) === 5 && W(two, at(21, 2, 30)) === 6 && W(two, at(21, 3, 30)) === 5 && W(two, at(21, 7)) === -1 && W(sch({}), at(20, 20)) === -1);
+        }
         check('[8g] with no day ticked nothing is open and there is no next start (null)', scheduleOpen(sch({}), at(20, 20)) === false && scheduleNextStart(sch({}), at(20, 20)) === null);
         check('[8g] the next start is strictly after now: at Fri 19:00 it is that day 20:00; at Fri 20:00 and 20:30 (only Friday ticked) it is the Friday a week later',
           scheduleNextStart(fri, at(20, 19)) === at(20, 20).getTime() && scheduleNextStart(fri, at(20, 20)) === at(27, 20).getTime() && scheduleNextStart(fri, at(20, 20, 30)) === at(27, 20).getTime(),

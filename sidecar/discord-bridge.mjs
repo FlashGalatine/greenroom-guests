@@ -53,7 +53,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import WebSocket from 'ws';
-import { scheduleOpen, scheduleNextStart } from './schedule.mjs';
+import { scheduleOpen, scheduleWindow, scheduleNextStart } from './schedule.mjs';
 import { DEFAULT_SETTINGS, sanitizeSettings, digitsOnly, cutName, parseJson, parseJsonLossless, normalizeFavorite, SNOWFLAKE_RE } from './settings.mjs';
 
 // Node first, then the heavy imports: an old Node says so instead of failing inside discord.js (GRN-22).
@@ -162,13 +162,14 @@ let wantVoice = true;        // operator intent: should the bot be in voice? (a 
 // Leave, Clear channel, a removal by Discord or a stop of the bot ends it. The schedule never makes the bot leave. In memory only: a bridge
 // that restarts outside a window does not join until USE or Connect.
 let sessionHeld = false;
-let lastScheduleOpen = false; // the schedule as the last tick saw it: a change from closed to open is "a window opened"
+let lastWindow = -1;     // the open window as the last tick saw it (its weekday, -1 for none): a change to today's window, or from none, is "a window opened"
 let scheduleTimer = null;
 // The clock the schedule reads. The test hooks can set it (GREENROOM_NOW at start, the `test-clock` command later); it keeps running from there.
 let clockOffset = (() => { const t = TEST_HOOKS && process.env.GREENROOM_NOW ? new Date(process.env.GREENROOM_NOW).getTime() : NaN; return Number.isFinite(t) ? t - Date.now() : 0; })();
 const nowMs = () => Date.now() + clockOffset;
 const scheduleOn = () => !!(state.settings.schedule && state.settings.schedule.enabled);
 const scheduleIsOpen = () => scheduleOpen(state.settings.schedule, new Date(nowMs()));
+const scheduleWindowNow = () => scheduleWindow(state.settings.schedule, new Date(nowMs()));
 const scheduleAllows = () => !scheduleOn() || sessionHeld || scheduleIsOpen();
 let useSeq = 0;              // the newest USE: a check that finishes for an older one is dropped (GRN-204)
 let joinGen = 0;             // the newest join, leave or stop: an older join that is still waiting does nothing more
@@ -562,8 +563,8 @@ async function setSettings(updates) {
   // is in the call stays (it is held). Only turning the schedule OFF lets a bot that was waiting for a window join, as it would have
   // without a schedule.
   if (JSON.stringify(state.settings.schedule) !== before) {
-    lastScheduleOpen = scheduleIsOpen();
-    if (wasOn && !scheduleOn() && voiceWanted() && voiceDown()) { cancelVoiceRejoin(); joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`)); }
+    lastWindow = scheduleWindowNow();
+    if (wasOn && !scheduleOn() && online() && voiceWanted() && voiceDown()) { cancelVoiceRejoin(); joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`)); }
     schedulePush();
   }
   await persist();
@@ -764,7 +765,7 @@ function startBot() {
     // with a capped backoff (GRN-52).
     const fatal = isAuthFailure(e);
     if (!fatal) sessionHeld = held; // the retried login is the same session: a Connect or USE that asked for the join still gets it
-    const delay =!fatal && creds.enabled && creds.botToken && !stopping ? Math.min(TIMING.loginStartMs * 2 ** loginStep++, TIMING.loginCapMs) : 0;
+    const delay = !fatal && creds.enabled && creds.botToken && !stopping ? Math.min(TIMING.loginStartMs * 2 ** loginStep++, TIMING.loginCapMs) : 0;
     rpc.error = 'Bot login failed: ' + clean(e?.message || e, 200) + (fatal ? ' — fix the token, then press Connect.' : delay ? ` — retrying in ${Math.max(1, Math.round(delay / 1000))} s` : '');
     log(rpc.error);
     if (delay) {
@@ -853,15 +854,19 @@ function logScheduleWait() {
 }
 
 // Looked at every TIMING.scheduleTickMs. A window that opens is a fresh start: an earlier Leave and an earlier removal by Discord are
-// forgotten, and the bot joins if it is logged in and has a channel. A window that closes changes nothing but the status in the feed.
+// forgotten, and the bot joins if it is logged in and has a channel (a bot that is still logging in joins when its login is done:
+// onBotReady). A window that starts while another is still open (a 24 hour day before it) is an opening too; one that ends while an older
+// one is still open is not. A window that closes changes nothing but the status in the feed.
 function scheduleTick() {
-  const open = scheduleIsOpen();
-  if (open === lastScheduleOpen) return;
-  lastScheduleOpen = open;
-  if (open && scheduleOn() && !stopping) {
+  const now = new Date(nowMs());
+  const win = scheduleWindow(state.settings.schedule, now);
+  if (win === lastWindow) return;
+  const opened = win >= 0 && (lastWindow < 0 || win === now.getDay());
+  lastWindow = win;
+  if (opened && scheduleOn() && !stopping) {
     wantVoice = true;
     voiceParked = false;
-    if (voiceWanted() && voiceDown()) {
+    if (online() && voiceWanted() && voiceDown()) {
       log('schedule: window opened, joining');
       cancelVoiceRejoin();
       joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`));
@@ -870,7 +875,7 @@ function scheduleTick() {
   schedulePush();
 }
 function startScheduleTimer() {
-  lastScheduleOpen = scheduleIsOpen(); // a bridge that starts inside a window has not seen one open
+  lastWindow = scheduleWindowNow(); // a bridge that starts inside a window has not seen one open
   if (scheduleTimer) clearInterval(scheduleTimer);
   scheduleTimer = setInterval(scheduleTick, TIMING.scheduleTickMs);
   scheduleTimer.unref();

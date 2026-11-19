@@ -33,24 +33,29 @@ export function sanitizeSchedule(base, update) {
 
 const minutes = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 
-// Is `date` (read by its local fields) inside a ticked window? Today's window, or the part of yesterday's that runs past midnight.
+// Which ticked window is `date` (read by its local fields) inside? The weekday (0 to 6) the window belongs to: today's window, or else the
+// part of yesterday's that runs past midnight; -1 when no window is open. Two windows can be open at once (yesterday's tail and today's):
+// today's is named, so the start of a window shows as a change of the answer even when the schedule never closed in between.
 // `enabled` is the caller's business.
-export function scheduleOpen(schedule, date) {
+export function scheduleWindow(schedule, date) {
   const days = schedule && schedule.days;
-  if (!Array.isArray(days) || days.length !== 7) return false;
+  if (!Array.isArray(days) || days.length !== 7) return -1;
   const now = date.getHours() * 60 + date.getMinutes();
-  const today = days[date.getDay()];
+  const t = date.getDay(), today = days[t];
   if (today && today.on) {
     const s = minutes(today.start), e = minutes(today.end);
-    if (e > s ? now >= s && now < e : now >= s) return true;
+    if (e > s ? now >= s && now < e : now >= s) return t;
   }
-  const yesterday = days[(date.getDay() + 6) % 7];
+  const y = (t + 6) % 7, yesterday = days[y];
   if (yesterday && yesterday.on) {
     const s = minutes(yesterday.start), e = minutes(yesterday.end);
-    if (e <= s && now < e) return true;
+    if (e <= s && now < e) return y;
   }
-  return false;
+  return -1;
 }
+
+// Is `date` inside a ticked window?
+export const scheduleOpen = (schedule, date) => scheduleWindow(schedule, date) >= 0;
 
 // When the next ticked window starts, strictly after `date`: epoch ms, or null when no day is ticked. Built from local date fields
 // (today and the seven days after it), so a daylight-saving change needs no handling.
