@@ -184,7 +184,7 @@ async function main() {
     // RENDER_ONLY=conn runs just the connection scenarios (R10+), skipping R1-R9.
     const ONLY = process.env.RENDER_ONLY || '';
     // RENDER_ONLY=labels runs just the guest-label scenarios (R11, R12); RENDER_ONLY=roster just R13; RENDER_ONLY=gestures just R14; RENDER_ONLY=directory just R15; RENDER_ONLY=urls just R16; RENDER_ONLY=invite just R17; RENDER_ONLY=identity just R18; RENDER_ONLY=revision just R19.
-    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness' && ONLY !== 'discordctl' && ONLY !== 'sbauth') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
+    if (ONLY && ONLY !== 'conn' && ONLY !== 'labels' && ONLY !== 'roster' && ONLY !== 'gestures' && ONLY !== 'directory' && ONLY !== 'urls' && ONLY !== 'invite' && ONLY !== 'identity' && ONLY !== 'revision' && ONLY !== 'liveness' && ONLY !== 'discordctl' && ONLY !== 'sbauth' && ONLY !== 'schedule') throw new Error(`RENDER_ONLY=${ONLY}: the supported values are 'conn', 'labels', 'roster', 'gestures', 'directory', 'urls', 'invite', 'identity' and 'revision' (or leave it unset)`);
     // Free, OS-assigned ports: never a fixed one that another tool on the PC may hold.
     const freePort = () => new Promise((res, rej) => {
       const s = createNetServer();
@@ -3694,6 +3694,147 @@ async function main() {
           !!imp && imp.length === 50 && imp.some((e) => e.displayName === 'Newcomer') && !imp.some((e) => e.displayName === 'Idle 00') && imp.some((e) => e.displayName === 'Idle 01')
           && /Sent to Streamer\.bot at \d\d:\d\d:\d\d\./.test(impNote) && /Auto-add limit \(50\): removed Idle 00 to make room/.test(impNote),
           JSON.stringify({ n: imp && imp.length, newcomer: !!imp && imp.some((e) => e.displayName === 'Newcomer'), idle00: !!imp && imp.some((e) => e.displayName === 'Idle 00'), note: impNote }));
+        await p.close();
+      }
+    }
+
+    // ── R23: the control page and the join schedule (settings.schedule and the `schedule` status of the feed) ──
+    if (!ONLY || ONLY === 'schedule') {
+      console.log('\n[R23] control page, join schedule: the day rows follow the feed, an edit sends the whole schedule as one changed key, the (+1 day) note, the status texts, an older bridge');
+      const ctlUrl = (x) => `${x.api.base}/control/control.html?sbport=${x.ws}`;
+      const settingsCmds = async (x) => (await x.api.actions()).filter((a) => a.name === 'Discord Voice Command' && a.args && a.args.command === 'set-settings').map((a) => { try { return JSON.parse(a.args.value); } catch { return a.args.value; } });
+      const push = (x, patch) => x.prod.doAction('Discord Voice Push', { payload: ROSTER_STATE(patch) });
+      const DAYS = (over = {}) => [0, 1, 2, 3, 4, 5, 6].map((i) => Object.assign({ on: false, start: '18:00', end: '23:00' }, over[i] || {}));
+      const SCH = (enabled, over) => ({ enabled, days: DAYS(over) });
+      const S = (schedule) => Object.assign({ streamerUserId: STREAMER, avatarPx: 56, streamerPx: 72, accent: 'cyan', scanlines: true, neonBlink: true, hideWhenAbsent: true, exitOnSbClose: false }, schedule ? { schedule } : {});
+      const ST = (o) => Object.assign({ enabled: false, open: false, held: false, nextStart: null }, o || {});
+      const feed = (x, schedule, status, patch) => push(x, Object.assign({ settings: S(schedule), schedule: ST(Object.assign({ enabled: schedule.enabled }, status || {})) }, patch || {}));
+      const form = (p) => p.evaluate(() => {
+        const g = (id) => document.getElementById(id);
+        return {
+          on: g('dvoSchedOn').checked, onDisabled: g('dvoSchedOn').disabled,
+          days: [0, 1, 2, 3, 4, 5, 6].map((i) => ({ on: g('dvoSchedDay' + i).checked, start: g('dvoSchedStart' + i).value, end: g('dvoSchedEnd' + i).value, plus: !g('dvoSchedPlus' + i).hidden,
+            disabled: g('dvoSchedDay' + i).disabled && g('dvoSchedStart' + i).disabled && g('dvoSchedEnd' + i).disabled })),
+          note: g('dvoSchedNote').hidden ? '' : g('dvoSchedNote').textContent, pill: g('dvoStatus').textContent,
+        };
+      });
+      const hydrated = (p) => wait(p, () => !document.getElementById('dvoNeonBlink').disabled, null, 6000);
+      const setTime = (p, id, v) => p.evaluate(([i, val]) => { const el = document.getElementById(i); el.focus(); el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); }, [id, v]);
+      const flip = async (p, id) => { await p.click('#' + id); await p.evaluate(() => document.activeElement && document.activeElement.blur()); };
+      const open = async (x) => { const p = await newPage(browser, { width: 920, height: 1400 }); const errs = []; p.on('pageerror', (e) => errs.push(String(e && e.message))); await p.goto(ctlUrl(x), { waitUntil: 'load' }); return { p, errs }; };
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+      // (a) the rows follow the feed; the day rows are usable only while the schedule is on
+      {
+        const x = await startExtra({});
+        const { p, errs } = await open(x);
+        const before = await form(p);
+        feed(x, SCH(true, { 5: { on: true, start: '20:00', end: '01:00' }, 4: { on: true, start: '19:00', end: '23:00' } }));
+        await hydrated(p);
+        await wait(p, () => document.getElementById('dvoSchedOn').checked, null, 4000);
+        const f = await form(p);
+        check('R23a: before a feed the schedule controls are disabled; a feed with the schedule on shows it: the box ticked, Thursday 19:00-23:00 and Friday 20:00-01:00 ticked with their times, the other days unticked, every row enabled, and "(+1 day)" only on Friday',
+          before.onDisabled === true && before.days.every((d) => d.disabled) && f.on === true && f.onDisabled === false && f.days.every((d) => !d.disabled)
+          && same(f.days.map((d) => [d.on, d.start, d.end, d.plus]), [0, 1, 2, 3, 4, 5, 6].map((i) => (i === 5 ? [true, '20:00', '01:00', true] : i === 4 ? [true, '19:00', '23:00', false] : [false, '18:00', '23:00', false]))) && f.note === '',
+          JSON.stringify({ before: before.onDisabled, f }));
+        feed(x, SCH(false, { 5: { on: true, start: '20:00', end: '01:00' } }));
+        await wait(p, () => !document.getElementById('dvoSchedOn').checked, null, 4000);
+        const off = await form(p);
+        check('R23a: with the schedule off the box is unticked and usable, and the day rows are disabled (they still show the saved days)', off.on === false && off.onDisabled === false && off.days.every((d) => d.disabled) && off.days[5].on === true && off.days[5].end === '01:00', JSON.stringify(off));
+        // (f) turning it on sends the whole schedule as the one changed key, and the rows become usable at once
+        await x.api.clear();
+        await flip(p, 'dvoSchedOn');
+        const usable = (await form(p)).days.every((d) => !d.disabled);
+        await sleep(1200);
+        const cmds = await settingsCmds(x);
+        check('R23f: ticking "Only join on a schedule" sends exactly one set-settings whose only key is `schedule` (enabled true, the seven days as saved), and the day rows are usable at once',
+          usable && cmds.length === 1 && same(cmds[0], { schedule: SCH(true, { 5: { on: true, start: '20:00', end: '01:00' } }) }), JSON.stringify({ usable, cmds }));
+        check('R23a: no page error', errs.length === 0, errs.join(' | '));
+        await p.close();
+      }
+      // (b), (c) an edit sends the whole schedule once; the (+1 day) note; a value just sent is held against an older feed and released by its echo
+      {
+        const x = await startExtra({});
+        const { p, errs } = await open(x);
+        const base = SCH(true, { 5: { start: '20:00', end: '23:00' } });
+        feed(x, base);
+        await hydrated(p);
+        await wait(p, () => document.getElementById('dvoSchedOn').checked, null, 4000);
+        await x.api.clear();
+        await flip(p, 'dvoSchedDay5');
+        await sleep(1200);
+        const c1 = await settingsCmds(x);
+        check('R23b: ticking Friday sends exactly one set-settings, {schedule} with only Friday changed', c1.length === 1 && same(c1[0], { schedule: SCH(true, { 5: { on: true, start: '20:00', end: '23:00' } }) }), JSON.stringify(c1));
+        await x.api.clear();
+        await setTime(p, 'dvoSchedEnd5', '01:00');
+        const plus = (await form(p)).days[5].plus;
+        feed(x, base); // an older feed (before the edit) arrives inside the hold
+        await sleep(1200);
+        const heldForm = await form(p);
+        const c2 = await settingsCmds(x);
+        const sent = SCH(true, { 5: { on: true, start: '20:00', end: '01:00' } });
+        check('R23c: an end at or before the start shows "(+1 day)" at once, the edit is sent once with the new end, and an older feed arriving inside the hold does not put the old value back',
+          plus === true && c2.length === 1 && same(c2[0], { schedule: sent }) && heldForm.days[5].on === true && heldForm.days[5].end === '01:00' && heldForm.days[5].plus === true, JSON.stringify({ plus, c2, d5: heldForm.days[5] }));
+        feed(x, sent); // the bridge's echo ends the hold
+        await sleep(500);
+        feed(x, SCH(true, { 5: { on: false, start: '21:00', end: '22:00' } })); // then another page changes it
+        const followed = await wait(p, () => document.getElementById('dvoSchedStart5').value === '21:00' && !document.getElementById('dvoSchedDay5').checked && document.getElementById('dvoSchedPlus5').hidden, null, 4000);
+        check('R23c: after the bridge echoed the edit the form follows the feed again (a change made elsewhere shows)', followed, JSON.stringify((await form(p)).days[5]));
+        // a time box that is cleared sends nothing and shows the saved time again
+        await x.api.clear();
+        await setTime(p, 'dvoSchedStart5', '');
+        await sleep(1000);
+        const c3 = await settingsCmds(x);
+        check('R23c: a time box that is emptied sends nothing and shows the saved time again', c3.length === 0 && (await form(p)).days[5].start === '21:00', JSON.stringify({ c3, d5: (await form(p)).days[5] }));
+        check('R23b: no page error', errs.length === 0, errs.join(' | '));
+        await p.close();
+      }
+      // (d) the status texts
+      {
+        const x = await startExtra({});
+        const { p, errs } = await open(x);
+        const sch = SCH(true, { 5: { on: true, start: '20:00', end: '23:00' } });
+        const waiting = { connected: true, hostInChannel: false, channelId: null, users: {} };
+        const next = new Date(2026, 10, 20, 20, 0).getTime(); // a Friday, 20:00 in this machine's zone
+        feed(x, sch, { open: false, held: false, nextStart: next }, waiting);
+        await hydrated(p);
+        const t1 = await wait(p, () => document.getElementById('dvoStatus').textContent === 'outside the schedule: next join Fri 20:00. Press USE to join now.', null, 5000);
+        check('R23d: bot online, not in a channel, the schedule on and closed: "outside the schedule: next join Fri 20:00. Press USE to join now."', t1, (await form(p)).pill);
+        feed(x, SCH(true), { open: false, held: false, nextStart: null }, waiting);
+        const t2 = await wait(p, () => document.getElementById('dvoStatus').textContent === 'outside the schedule: no day is ticked. Press USE to join now.', null, 5000);
+        check('R23d: …with no day ticked: "outside the schedule: no day is ticked. Press USE to join now."', t2, (await form(p)).pill);
+        feed(x, sch, { open: false, held: true, nextStart: next });
+        const t3 = await wait(p, () => /^in voice · 3 present.* · joined outside the schedule$/.test(document.getElementById('dvoStatus').textContent), null, 5000);
+        check('R23d: in the channel while the schedule is on and closed: the usual text plus " · joined outside the schedule"', t3, (await form(p)).pill);
+        feed(x, sch, { open: true, held: true, nextStart: next });
+        const t4 = await wait(p, () => /^in voice · 3 present/.test(document.getElementById('dvoStatus').textContent) && !/schedule/.test(document.getElementById('dvoStatus').textContent), null, 5000);
+        check('R23d: in the channel inside a window, and with the schedule off: the usual text, nothing about the schedule', t4, (await form(p)).pill);
+        feed(x, SCH(false, { 5: { on: true } }), { open: false, held: false, nextStart: next }, waiting);
+        const t5 = await wait(p, () => /^bot online · press USE to join/.test(document.getElementById('dvoStatus').textContent), null, 5000);
+        check('R23d: with the schedule off a bot that is online and out of the channel reads as before ("bot online · press USE to join")', t5, (await form(p)).pill);
+        feed(x, sch, { open: false, held: false, nextStart: next }, Object.assign({}, waiting, { current: null }));
+        const t6 = await wait(p, () => document.getElementById('dvoStatus').textContent === 'bot online · pick a favorite and press USE', null, 5000);
+        check('R23d: with no channel picked the schedule is not what keeps the bot out: "bot online · pick a favorite and press USE"', t6, (await form(p)).pill);
+        check('R23d: no page error', errs.length === 0, errs.join(' | '));
+        await p.close();
+      }
+      // (e) a bridge older than the schedule: no `schedule` in its settings or its feed
+      {
+        const x = await startExtra({});
+        const { p, errs } = await open(x);
+        push(x, { settings: S(null) });
+        await hydrated(p);
+        const noted = await wait(p, () => !document.getElementById('dvoSchedNote').hidden, null, 4000);
+        const f = await form(p);
+        await x.api.clear();
+        await p.evaluate(() => { const el = document.getElementById('dvoSchedOn'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); });
+        await sleep(1000);
+        const sentNothing = (await settingsCmds(x)).length === 0;
+        check('R23e: a feed from a bridge older than the schedule: the schedule controls stay disabled, a line says the bridge is older than the join schedule, a change event sends nothing, and nothing throws',
+          noted && f.onDisabled === true && f.days.every((d) => d.disabled) && /older than the join schedule/.test(f.note) && sentNothing && errs.length === 0, JSON.stringify({ note: f.note, onDisabled: f.onDisabled, sentNothing, errs }));
+        feed(x, SCH(true, { 5: { on: true } }));
+        const cleared = await wait(p, () => document.getElementById('dvoSchedNote').hidden && !document.getElementById('dvoSchedOn').disabled, null, 4000);
+        check('R23e: …and a feed that carries the schedule clears the line and enables the controls', cleared, JSON.stringify(await form(p)));
         await p.close();
       }
     }

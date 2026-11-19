@@ -81,6 +81,9 @@
   .action-error button { padding: 0 8px; }
   .warn { color: var(--amber); font-size: 12px; }
   .hint { color: var(--dim); font-size: 12px; }
+  .dvo-sched-days { display: grid; grid-template-columns: repeat(auto-fill, minmax(19em, 1fr)); gap: 4px 18px; margin: 0 0 8px; }
+  .dvo-sched-day { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
+  .dvo-sched-day label { min-width: 4.6em; }
   button.primary.attn { box-shadow: 0 0 0 2px var(--amber); }
   .vdo-unsaved-note { color: var(--amber); font-size: 12px; }
   .vdo-invite-opts input.bad { border-color: var(--red); }
@@ -348,6 +351,12 @@
     <div id="dvoSettingsMsg" class="warn" role="status" hidden></div>
     <div class="hint">Settings ride the <code>discord:voice:update</code> payload — the roster
       overlay re-styles live (URL params on the overlay override them; docs/THEMING.md).</div>
+    <div class="row" style="margin-top:10px">
+      <label><input type="checkbox" id="dvoSchedOn" /> Only join on a schedule</label>
+      <span class="hint">(this PC's clock: the bot joins by itself only inside the ticked times. USE and Connect join at any time, and nothing here makes it leave.)</span>
+    </div>
+    <div id="dvoSchedDays" class="dvo-sched-days"></div>
+    <div id="dvoSchedNote" class="warn" role="status" hidden></div>
   </section>
 
 </main>
@@ -2765,6 +2774,82 @@
   }
   for (const el of DVO_KEYS.keys()) el.addEventListener('change', () => captureSetting(el));
 
+  // ── The join schedule (settings.schedule; the rule is in sidecar/schedule.mjs) ──
+  // One window per weekday, Sunday first; an end at or before the start runs into the next day. An edit sends the WHOLE schedule as the one
+  // changed key (`schedule`), through the same send window and hold as the other settings (the hold compares it as JSON text). A bridge older
+  // than the schedule has none in its feed: the controls then stay disabled and a line says why.
+  const SCHED_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const SCHED_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const sched = { on: $('dvoSchedOn'), box: $('dvoSchedDays'), note: $('dvoSchedNote'), day: [], start: [], end: [], plus: [] };
+  for (let i = 0; i < 7; i++) {
+    const row = document.createElement('div');
+    row.className = 'dvo-sched-day';
+    row.innerHTML = `<label><input type="checkbox" id="dvoSchedDay${i}" /> ${SCHED_NAMES[i]}</label>`
+      + `<input type="time" id="dvoSchedStart${i}" aria-label="${SCHED_NAMES[i]} start" /><span>to</span>`
+      + `<input type="time" id="dvoSchedEnd${i}" aria-label="${SCHED_NAMES[i]} end" /><span id="dvoSchedPlus${i}" hidden>(+1 day)</span>`;
+    sched.box.appendChild(row);
+    sched.day.push($('dvoSchedDay' + i)); sched.start.push($('dvoSchedStart' + i)); sched.end.push($('dvoSchedEnd' + i)); sched.plus.push($('dvoSchedPlus' + i));
+  }
+  let schedFed = null;     // the schedule of the last feed that carried one (what an emptied time box goes back to)
+  let schedUsable = false; // the bridge knows the schedule (its feed carries the setting and the status)
+  const schedValid = (v) => !!v && typeof v === 'object' && Array.isArray(v.days) && v.days.length === 7 && v.days.every((d) => !!d && typeof d === 'object' && SCHED_TIME.test(d.start) && SCHED_TIME.test(d.end));
+  const schedNorm = (v) => ({ enabled: !!v.enabled, days: v.days.map((d) => ({ on: !!d.on, start: d.start, end: d.end })) });
+  const schedWhen = (ms) => { const d = new Date(ms); const two = (n) => String(n).padStart(2, '0'); return `${SCHED_NAMES[d.getDay()]} ${two(d.getHours())}:${two(d.getMinutes())}`; };
+  function schedEnable() {
+    sched.on.disabled = !schedUsable;
+    const rows = schedUsable && sched.on.checked; // the day rows are only usable while the schedule is on
+    for (let i = 0; i < 7; i++) { sched.day[i].disabled = !rows; sched.start[i].disabled = !rows; sched.end[i].disabled = !rows; }
+  }
+  function schedPlus() {
+    for (let i = 0; i < 7; i++) {
+      const a = sched.start[i].value, b = sched.end[i].value;
+      const next = SCHED_TIME.test(a) && SCHED_TIME.test(b) && b <= a;
+      if (sched.plus[i].hidden !== !next) sched.plus[i].hidden = !next;
+    }
+  }
+  function schedShow(v) {
+    if (sched.on.checked !== v.enabled) sched.on.checked = v.enabled;
+    v.days.forEach((d, i) => {
+      if (sched.day[i].checked !== d.on) sched.day[i].checked = d.on;
+      setIfNotFocused(sched.start[i], d.start);
+      setIfNotFocused(sched.end[i], d.end);
+    });
+    schedPlus();
+    schedEnable();
+  }
+  function reflectSchedule(dv) {
+    const fed = dv && dv.settings && dv.settings.schedule;
+    if (!dv || !dv.schedule || !schedValid(fed)) {
+      schedUsable = false;
+      schedEnable();
+      setLine(sched.note, dv && dv.settings && !dv.stopped ? 'This bridge is older than the join schedule: update the sidecar folder and restart it.' : '');
+      return;
+    }
+    schedUsable = true;
+    schedFed = schedNorm(fed);
+    setLine(sched.note, '');
+    if (!heldNow('schedule', JSON.stringify(schedFed))) schedShow(schedFed); else schedEnable();
+  }
+  function captureSchedule() {
+    if (!discordHydrated || !schedUsable || !schedFed) return; // nothing is sent before the bridge has reported its schedule
+    // The form as a schedule. A time box that was emptied (or holds half a time) goes back to the saved time.
+    const v = { enabled: !!sched.on.checked, days: SCHED_NAMES.map((_, i) => ({
+      on: !!sched.day[i].checked,
+      start: SCHED_TIME.test(sched.start[i].value) ? sched.start[i].value : schedFed.days[i].start,
+      end: SCHED_TIME.test(sched.end[i].value) ? sched.end[i].value : schedFed.days[i].end,
+    })) };
+    v.days.forEach((d, i) => { if (sched.start[i].value !== d.start) sched.start[i].value = d.start; if (sched.end[i].value !== d.end) sched.end[i].value = d.end; });
+    schedPlus();
+    schedEnable();
+    const text = JSON.stringify(v);
+    if (text === JSON.stringify(schedFed) && !heldSettings.has('schedule')) return; // nothing changed
+    heldSettings.set('schedule', { v: text, at: performance.now(), sentAt: null });
+    pendingSend.set('schedule', v);
+    if (!sendTimer) sendTimer = setTimeout(flushSettings, SEND_WINDOW_MS);
+  }
+  for (const el of [sched.on, ...sched.day, ...sched.start, ...sched.end]) el.addEventListener('change', captureSchedule);
+  schedEnable();
+
   // A favorite that was sent (GRN-133) is "saved" when a feed shows it; the name field is cleared only then.
   let pendingFav = null;     // { name, serverId, channelId, id }
   let loadedFavId = '';      // LOAD put this favorite into the fields: Save updates it
@@ -2803,6 +2888,8 @@
     const stale = !!dv && discordStale();
     dWasStale = stale;
     const tgt = targetName(dv);
+    const sc = (dv && dv.schedule) || {};
+    const schedClosed = sc.enabled === true && sc.open === false; // the join schedule is on and no window is open
     let text = NO_FEED_TEXT, cls = '';
     if (!dv) { /* keep default */ }
     else if (dv.stopped) { text = 'bridge stopped'; }
@@ -2812,9 +2899,10 @@
     else if (rpc.reconnecting) { text = 'reconnecting to Discord…'; }
     else if (dv.connected && dv.hostInChannel) {
       if (dv.current && dv.channelId && dv.channelId !== dv.current.channelId) { text = `moved in Discord · ${present} present — USE returns the bot`; cls = 'warn'; }
-      else { text = `in voice · ${present} present${tgt ? ' · ' + tgt : ''}`; cls = 'live'; } // (the count first: a long name is what gets cut)
+      else { text = `in voice · ${present} present${tgt ? ' · ' + tgt : ''}${schedClosed ? ' · joined outside the schedule' : ''}`; cls = 'live'; } // (the count first: a long name is what gets cut)
     }
     else if (dv.connected && dv.current && dv.currentRefused) { text = 'the saved channel is not joined (the bridge cannot use it): check it, or pick another and press USE'; cls = 'error'; }
+    else if (dv.connected && schedClosed && !sc.held && dv.current && dv.current.channelId) { text = Number.isFinite(sc.nextStart) ? `outside the schedule: next join ${schedWhen(sc.nextStart)}. Press USE to join now.` : 'outside the schedule: no day is ticked. Press USE to join now.'; cls = ''; }
     else if (dv.connected) { text = tgt ? `bot online · press USE to join · ${tgt}` : 'bot online · pick a favorite and press USE'; cls = ''; }
     else if (rpc.enabled && !rpc.hasToken) { text = 'enabled — add a token to sidecar/discord-tokens.json'; cls = ''; }
     else if (rpc.enabled) { text = 'connecting…'; cls = ''; }
@@ -2828,6 +2916,7 @@
 
     // Settings inputs (focus-guarded; a value just sent is held against the feed).
     reflectSettings((dv && dv.settings) || {});
+    reflectSchedule(dv);
 
     // Favorites list (rebuild only when favorites, the current target or the live channel change).
     const favs = (dv && Array.isArray(dv.favorites) ? dv.favorites : []);

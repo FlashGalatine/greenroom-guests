@@ -443,6 +443,36 @@ it on (or `=0` off) regardless of the saved setting, and so does
 Streamer.bot on any SB exit when this is off: there may be no listener to see
 in `netstat`, look for `node.exe` as a client of the SB port.
 
+**Only join on a schedule.** By default the bot joins the saved channel every time
+the bridge starts and the bot logs in. If the bridge starts with Streamer.bot and
+you only want the bot on some days, tick *"Only join on a schedule"* in the control
+page's Discord Voice Bridge section, tick the days, and set a start and an end time
+for each (24-hour, in the clock of the PC the bridge runs on). An end at or before
+the start runs into the next day: Friday `20:00` to `01:00` ends Saturday at 01:00,
+and the row shows *(+1 day)*. The same start and end is a full 24 hours. It
+persists to `settings.schedule`.
+
+- The bridge then joins **by itself** only inside a ticked time: at login, and
+  when a ticked time begins while the bridge is running (it looks every 30 s).
+  Outside it the bot logs in and waits, and the status line says
+  *"outside the schedule: next join Fri 20:00. Press USE to join now."*
+- **USE** on a favorite and **Connect** join at any time, for a test or a stream
+  that was not planned.
+- The schedule **never makes the bot leave**. A stream that runs past the end
+  keeps its roster, and a connection that drops is rejoined, until you press
+  Leave voice, Clear channel or Stop bridge (or Discord removes the bot). The
+  status line then reads *"joined outside the schedule"*.
+- This is kept in memory only: a bridge that is **restarted** outside a ticked time
+  does not join by itself, even in the middle of a stream that ran long. Press USE.
+- A ticked time beginning is a fresh start: a Leave pressed the day before does
+  not keep the bot out. A Leave pressed inside a ticked time holds until the next
+  one begins, or USE or Connect.
+- The schedule does not start or stop the bridge, and needs no Streamer.bot
+  action change.
+
+A control page newer than the bridge shows *"This bridge is older than the join
+schedule"* and keeps the boxes disabled: update the sidecar folder and restart it.
+
 **How the bridge stops.** Every way out is one routine: it pushes a final state
 (`stopped: true`, nobody in voice) to Streamer.bot, leaves the voice call once and
 exits. That covers Ctrl+C, Ctrl+Break, closing its window, the `quit` command and
