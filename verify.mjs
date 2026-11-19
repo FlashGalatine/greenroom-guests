@@ -3090,6 +3090,156 @@ async function main() {
               check('GRN-52: Quit with a login retry armed exits promptly with code 0, and the login is not tried again', exited2 && t2.code === 0 && md.gatewayHits === h0, JSON.stringify({ exited2, code: t2.code }));
               t2.close();
             }
+            // ── [8g] the join schedule: automatic joins are held outside a window; USE and Connect join at any time; nothing makes the bot leave ──
+            // The bridge's clock is set with GREENROOM_NOW (it keeps running from there) and moved with the `test-clock` command. Every case is on
+            // or after Friday 2026-11-20, with Friday 20:00-23:00 the only ticked window.
+            console.log('\n[8g] join schedule (bridge): no automatic join outside a window, a join when one opens, USE and Connect, the session hold, Leave, schedule edits');
+            {
+              const friDays = [0, 1, 2, 3, 4, 5, 6].map((i) => ({ on: i === 5, start: i === 5 ? '20:00' : '18:00', end: '23:00' }));
+              const cfgS = (enabled = true) => JSON.stringify({ favorites: [], current: { serverId: GUILD, channelId: '910' }, settings: { schedule: { enabled, days: friDays } } });
+              // A bridge whose token file says `enabled` (it logs in by itself at start, as after a restart of Streamer.bot) unless o.manual.
+              const mkS = async (now, o = {}) => rig({
+                tokData: JSON.stringify({ botToken: token, enabled: !o.manual }), cfgText: o.cfg !== undefined ? o.cfg : cfgS(),
+                env: { DISCORD_BRIDGE_API: md.api, GREENROOM_NOW: now, GREENROOM_TIMING: JSON.stringify({ ...OFF, scheduleTickMs: 60000, ...(o.timing || {}) }) },
+              });
+              const clock = (t, now, tick = true) => t.cmd('test-clock', JSON.stringify({ now, tick }));
+              const joins = (o0) => md.ops4.slice(o0).filter((d) => d.channel_id === '910').length;
+              const leaves = (o0) => md.ops4.slice(o0).filter((d) => d.channel_id === null).length;
+              const sc = (p) => (p && p.schedule) || {};
+              const online = (t) => t.waitFor((p) => p.connected === true, 8000);
+              // ── at login outside a window: online, not joined; the window opening joins; the close does nothing; a drop after it is rejoined; Leave ──
+              {
+                const o0 = mkSock();
+                const t = await mkS('2026-11-20T19:00:00', { timing: { scheduleTickMs: 200, stallLostMs: 500, backoffMs: [200, 300] } });
+                const on = await online(t);
+                await nap(900);
+                const p = t.last;
+                check('[8g] the bot logs in outside the window and does not join: online, no channel, no join asked of Discord, and the feed says the schedule is on, closed, not held, next start Fri 20:00',
+                  !!on && p.connected === true && p.channelId === null && joins(o0) === 0 && sc(p).enabled === true && sc(p).open === false && sc(p).held === false && sc(p).nextStart === new Date(2026, 10, 20, 20, 0).getTime() && /schedule: outside the window, not joining/.test(t.out),
+                  JSON.stringify({ c: p.connected, ch: p.channelId, joins: joins(o0), s: p.schedule, out: t.out.slice(-200) }));
+                const m1 = t.got.length;
+                clock(t, '2026-11-20T19:59:59.700', false); // (no tick asked: the bridge's own timer must notice the window opening)
+                const opened = await wa(t, m1, (x) => x.channelId === '910' && sc(x).open === true, 4000);
+                check('[8g] when the window opens the bridge joins by itself (its own timer notices): the channel is joined, the feed says open and held',
+                  !!opened && joins(o0) >= 1 && sc(opened).held === true && /schedule: window opened, joining/.test(t.out), JSON.stringify({ s: opened && opened.schedule, joins: joins(o0), out: t.out.slice(-200) }));
+                await ready(t);
+                const o1 = mkSock(), m2 = t.got.length;
+                clock(t, '2026-11-20T23:30:00');
+                const after = await wa(t, m2, (x) => sc(x).open === false, 3000);
+                await nap(600);
+                check('[8g] the window closing does nothing: the bot is still in the channel, Discord was not asked to leave, the feed says closed and held',
+                  !!after && t.last.channelId === '910' && t.last.hostInChannel === true && leaves(o1) === 0 && sc(t.last).held === true, JSON.stringify({ ch: t.last.channelId, h: t.last.hostInChannel, leaves: leaves(o1), s: t.last.schedule }));
+                const m3 = t.got.length;
+                vc(t, { do: 'close', code: 4006 });
+                const lost = await wa(t, m3, (x) => x.channelId === null, 3000);
+                const back = await wa(t, m3, (x) => x.channelId === '910' && lost && t.got.indexOf(x) > t.got.indexOf(lost), 4000);
+                check('[8g] a connection that drops after the window closed is rejoined (the session is held)', !!lost && !!back && joins(o1) >= 1, JSON.stringify({ lost: !!lost, back: !!back, joins: joins(o1) }));
+                await ready(t);
+                // Leave ends the hold; an unticked day does not bring the bot back; the next window does
+                t.cmd('leave');
+                await t.waitFor((x) => t.got.indexOf(x) > m3 && x.channelId === null && sc(x).held === false, 3000);
+                const o2 = mkSock();
+                clock(t, '2026-11-21T20:30:00');
+                await nap(800);
+                const satJoins = joins(o2), satHeld = sc(t.last).held;
+                const m4 = t.got.length;
+                clock(t, '2026-11-27T20:00:05');
+                const nextWeek = await wa(t, m4, (x) => x.channelId === '910', 4000);
+                check('[8g] Leave ends the hold: no rejoin outside a window (Saturday, unticked), and the next window opening (the Friday after) joins again although Leave was pressed',
+                  satJoins === 0 && satHeld === false && !!nextWeek && joins(o2) >= 1, JSON.stringify({ satJoins, satHeld, nextWeek: !!nextWeek }));
+                // Leave inside a window holds until the next window
+                const m5 = t.got.length;
+                t.cmd('leave');
+                await wa(t, m5, (x) => x.channelId === null, 3000);
+                const o3 = mkSock();
+                clock(t, '2026-11-27T20:31:00');
+                await nap(800);
+                check('[8g] Leave pressed inside a window holds: the bridge does not rejoin while that window is still open', joins(o3) === 0 && t.last.channelId === null, JSON.stringify({ joins: joins(o3), ch: t.last.channelId }));
+                t.close();
+              }
+              // ── USE outside a window joins ──
+              {
+                const t = await mkS('2026-11-20T19:00:00');
+                await online(t); await nap(500);
+                const o0 = mkSock(), m0 = t.got.length;
+                t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
+                const j = await wa(t, m0, (x) => x.channelId === '910', 4000);
+                check('[8g] USE outside a window joins (the operator acting), and the feed says held and not open', !!j && joins(o0) >= 1 && sc(t.last).held === true && sc(t.last).open === false, JSON.stringify({ j: !!j, s: t.last.schedule }));
+                // Clear channel ends the hold
+                const m1 = t.got.length;
+                t.cmd('set-current', JSON.stringify({ serverId: '', channelId: '' }));
+                const cleared = await wa(t, m1, (x) => x.current === null && sc(x).held === false, 3000);
+                check('[8g] Clear channel ends the hold', !!cleared, JSON.stringify(t.last.schedule));
+                t.close();
+              }
+              // ── Connect outside a window joins ──
+              {
+                const t = await mkS('2026-11-20T19:00:00', { manual: true });
+                const o0 = mkSock();
+                t.cmd('connect');
+                const j = await t.waitFor((x) => x.connected === true && x.channelId === '910', 8000);
+                check('[8g] Connect outside a window logs the bot in and joins (the operator acting)', !!j && joins(o0) >= 1 && sc(j).held === true, JSON.stringify({ j: !!j, s: t.last.schedule }));
+                t.close();
+              }
+              // ── schedule edits: turning it off lets a waiting bot in; turning it on does not remove a bot that is in the call ──
+              {
+                const t = await mkS('2026-11-20T19:00:00');
+                await online(t); await nap(500);
+                const o0 = mkSock(), m0 = t.got.length;
+                t.cmd('set-settings', JSON.stringify({ schedule: { enabled: false } }));
+                const j = await wa(t, m0, (x) => x.channelId === '910', 4000);
+                check('[8g] turning the schedule off outside a window lets the waiting bot join', !!j && joins(o0) >= 1 && sc(t.last).enabled === false, JSON.stringify({ j: !!j, s: t.last.schedule }));
+                t.close();
+                const u = await mkS('2026-11-20T19:00:00', { cfg: cfgS(false) });
+                const uj = await u.waitFor((x) => x.channelId === '910', 8000);
+                await ready(u);
+                const o1 = mkSock(), m1 = u.got.length;
+                u.cmd('set-settings', JSON.stringify({ schedule: { enabled: true } }));
+                const onNow = await wa(u, m1, (x) => sc(x).enabled === true, 3000);
+                await nap(600);
+                check('[8g] with the schedule off the bot joins at login as before; turning it on outside a window does not remove it (in the channel, no leave asked, held)',
+                  !!uj && !!onNow && u.last.channelId === '910' && u.last.hostInChannel === true && leaves(o1) === 0 && sc(u.last).held === true && sc(u.last).open === false, JSON.stringify({ uj: !!uj, ch: u.last.channelId, leaves: leaves(o1), s: u.last.schedule }));
+                // a widened window is not a "window opening": an earlier Leave still holds
+                u.cmd('leave');
+                await u.waitFor((x) => u.got.indexOf(x) > m1 && x.channelId === null, 3000);
+                const o2 = mkSock();
+                u.cmd('set-settings', JSON.stringify({ schedule: { days: friDays.map((d, i) => (i === 5 ? { ...d, start: '18:00' } : d)) } }));
+                await u.waitFor((x) => sc(x).open === true, 3000);
+                await nap(700);
+                check('[8g] a schedule edit that puts now inside a window is not a window opening: after Leave the bot stays out until USE, Connect or the next window', joins(o2) === 0 && u.last.channelId === null && sc(u.last).open === true, JSON.stringify({ joins: joins(o2), s: u.last.schedule }));
+                u.close();
+              }
+              // ── a join that began inside the window and has not become ready keeps retrying after the window closes ──
+              {
+                const t = await mkS('2026-11-20T22:59:30', { timing: { stallLostMs: 500, backoffMs: [300, 300] } });
+                await t.waitFor((x) => x.channelId === '910', 8000);
+                clock(t, '2026-11-20T23:00:30');
+                await t.waitFor((x) => sc(x).open === false, 3000);
+                const o0 = mkSock();
+                await nap(2200);
+                check('[8g] a join that began inside the window and never became ready is still retried after the window closed (no voice server on the mock: each retry is a new join request)', joins(o0) >= 2, JSON.stringify({ joins: joins(o0), out: t.out.slice(-300) }));
+                t.close();
+              }
+              // ── a kick ends the hold: outside a window nothing rejoins, and the next window is a fresh start ──
+              {
+                const t = await mkS('2026-11-20T20:30:00', { timing: { disconnectRaceMs: 200, sessionDropMs: 0 } });
+                await t.waitFor((x) => x.channelId === '910', 8000);
+                await ready(t);
+                const m0 = t.got.length;
+                vc(t, { do: 'close', code: 4022 });
+                const parked = await wa(t, m0, (x) => x.channelId === null && /Removed from voice/.test(err(x)), 3000);
+                const o0 = mkSock();
+                await nap(700);
+                const stayedOut = joins(o0) === 0; // (still inside the window: a removal is not rejoined)
+                clock(t, '2026-11-21T12:00:00'); // the window closes…
+                await t.waitFor((x) => sc(x).open === false, 3000);
+                const m1 = t.got.length;
+                clock(t, '2026-11-27T20:00:05'); // …and the next one opens
+                const again = await wa(t, m1, (x) => x.channelId === '910', 4000);
+                check('[8g] Discord removing the bot ends the hold (not held, parked, no rejoin in that window), and the next window opening joins again', !!parked && sc(parked).held === false && stayedOut && !!again && joins(o0) >= 1, JSON.stringify({ parked: parked && parked.schedule, stayedOut, again: !!again }));
+                t.close();
+              }
+            }
           } finally {
             await md.close();
           }
@@ -3628,6 +3778,65 @@ async function main() {
     }
 
     } // end of the sidecar sections ([7], [8], [8b])
+
+    // ── 8g. the join schedule: the window rule and the saved setting (the bridge cases are in the [8d] block, which has the mock Discord) ──
+    console.log('\n[8g] join schedule: the window rule and the saved setting');
+    // [8g-unit-begin]
+    {
+      let S = null, ST = null;
+      try { S = await import('./sidecar/schedule.mjs'); ST = await import('./sidecar/settings.mjs'); }
+      catch (e) { check('[8g] sidecar/schedule.mjs loads', false, String(e && e.message)); }
+      if (S && ST) {
+        const { scheduleOpen, scheduleNextStart, sanitizeSchedule, DEFAULT_SCHEDULE } = S;
+        // Sunday first. `days` maps a weekday number to [start, end]; the others are unticked.
+        const sch = (days, enabled = true) => ({ enabled, days: [0, 1, 2, 3, 4, 5, 6].map((i) => (days[i] ? { on: true, start: days[i][0], end: days[i][1] } : { on: false, start: '18:00', end: '23:00' })) });
+        const at = (d, h, m = 0) => new Date(2026, 10, d, h, m); // November 2026: the 20th is a Friday, the 21st a Saturday, the 22nd a Sunday
+        const fri = sch({ 5: ['20:00', '23:00'] });
+        check('[8g] a same-day window is open from its start (inclusive) to its end (exclusive): Fri 20:00-23:00 is open at 20:00 and 22:59, closed at 19:59 and 23:00',
+          at(20, 20).getDay() === 5 && scheduleOpen(fri, at(20, 20)) === true && scheduleOpen(fri, at(20, 22, 59)) === true && scheduleOpen(fri, at(20, 19, 59)) === false && scheduleOpen(fri, at(20, 23)) === false);
+        const late = sch({ 5: ['20:00', '01:00'] });
+        check('[8g] an end at or before the start runs into the next day: Fri 20:00-01:00 is open Sat 00:59 and closed Sat 01:00, with Saturday unticked; it is closed Fri 00:30 (that is Thursday\'s night)',
+          scheduleOpen(late, at(20, 23, 30)) === true && scheduleOpen(late, at(21, 0, 59)) === true && scheduleOpen(late, at(21, 1)) === false && scheduleOpen(late, at(20, 0, 30)) === false);
+        check('[8g] the week wraps: Sat 22:00-02:00 is open Sun 01:00', scheduleOpen(sch({ 6: ['22:00', '02:00'] }), at(22, 1)) === true && scheduleOpen(sch({ 6: ['22:00', '02:00'] }), at(22, 2)) === false);
+        const full = sch({ 5: ['18:00', '18:00'] });
+        check('[8g] a start equal to the end is 24 hours: Fri 18:00-18:00 is open Fri 18:00 and Sat 17:59, closed Sat 18:00 and Fri 17:59',
+          scheduleOpen(full, at(20, 18)) === true && scheduleOpen(full, at(21, 17, 59)) === true && scheduleOpen(full, at(21, 18)) === false && scheduleOpen(full, at(20, 17, 59)) === false);
+        check('[8g] with no day ticked nothing is open and there is no next start (null)', scheduleOpen(sch({}), at(20, 20)) === false && scheduleNextStart(sch({}), at(20, 20)) === null);
+        check('[8g] the next start is strictly after now: at Fri 19:00 it is that day 20:00; at Fri 20:00 and 20:30 (only Friday ticked) it is the Friday a week later',
+          scheduleNextStart(fri, at(20, 19)) === at(20, 20).getTime() && scheduleNextStart(fri, at(20, 20)) === at(27, 20).getTime() && scheduleNextStart(fri, at(20, 20, 30)) === at(27, 20).getTime(),
+          JSON.stringify([scheduleNextStart(fri, at(20, 19)), scheduleNextStart(fri, at(20, 20, 30)), at(27, 20).getTime()]));
+        check('[8g] the next start takes the nearest ticked day: Thu and Sat ticked, asked on Friday, gives Saturday', scheduleNextStart(sch({ 4: ['19:00', '23:00'], 6: ['20:00', '01:00'] }), at(20, 12)) === at(21, 20).getTime());
+        // Daylight saving (when this machine's zone has it): a window around the change on the two US dates neither throws nor gives a bad time.
+        const dst = sch({ 0: ['01:30', '03:30'] });
+        let dstOk = true;
+        try {
+          for (const d of [new Date(2026, 10, 1, 1, 45), new Date(2026, 10, 1, 4, 0), new Date(2026, 2, 8, 1, 45), new Date(2026, 2, 8, 4, 0), new Date(2026, 2, 7, 23, 0), new Date(2026, 9, 31, 23, 0)]) {
+            if (typeof scheduleOpen(dst, d) !== 'boolean' || !Number.isFinite(scheduleNextStart(dst, d)) || scheduleNextStart(dst, d) <= d.getTime()) dstOk = false;
+          }
+          if (scheduleOpen(dst, new Date(2026, 10, 1, 1, 45)) !== true || scheduleOpen(dst, new Date(2026, 2, 8, 4, 0)) !== false) dstOk = false;
+        } catch { dstOk = false; }
+        check('[8g] around a daylight-saving change (Sun 2026-11-01 and Sun 2026-03-08, window 01:30-03:30) the rule answers a boolean and a finite later next start', dstOk);
+        // the saved setting
+        const base = sch({ 5: ['20:00', '01:00'] });
+        const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const bad6 = { days: base.days.slice(0, 6) };
+        const badDays = base.days.map((d, i) => (i === 5 ? { on: 'yes', start: '24:00', end: '7:5' } : d));
+        check('[8g] sanitizeSchedule keeps the saved values for anything malformed: days of the wrong length, "24:00", a short "7:5", a text for `on`, a number for `enabled`, null, an array',
+          same(sanitizeSchedule(base, bad6), base) && same(sanitizeSchedule(base, { days: badDays }), base) && same(sanitizeSchedule(base, { enabled: 1 }), base) && same(sanitizeSchedule(base, null), base) && same(sanitizeSchedule(base, []), base) && same(sanitizeSchedule(base, { days: 'x' }), base) && same(sanitizeSchedule(base, { days: [null, 1, 'a', [], {}, undefined, true] }), base));
+        const part = sanitizeSchedule(base, { days: base.days.map((d, i) => (i === 1 ? { on: true } : {})) });
+        check('[8g] sanitizeSchedule takes a valid partial entry and changes only that field (Monday ticked, its times and every other day as saved), and `enabled` only as a boolean',
+          part.days[1].on === true && part.days[1].start === '18:00' && part.days[1].end === '23:00' && same(part.days.filter((_, i) => i !== 1), base.days.filter((_, i) => i !== 1)) && sanitizeSchedule(base, { enabled: false }).enabled === false && same(sanitizeSchedule(base, { enabled: false }).days, base.days));
+        const fresh = sanitizeSchedule(undefined, undefined);
+        check('[8g] the default schedule is off with seven unticked days 18:00-23:00, and every call returns a new object (nothing shared with the default or the base)',
+          same(fresh, { enabled: false, days: Array.from({ length: 7 }, () => ({ on: false, start: '18:00', end: '23:00' })) }) && same(DEFAULT_SCHEDULE, fresh) && fresh !== DEFAULT_SCHEDULE && fresh.days !== DEFAULT_SCHEDULE.days && fresh.days[0] !== DEFAULT_SCHEDULE.days[0] && sanitizeSchedule(base, {}).days[5] !== base.days[5]);
+        const s0 = ST.sanitizeSettings(ST.DEFAULT_SETTINGS, { schedule: base });
+        const s1 = ST.sanitizeSettings(s0, { accent: 'magenta' });
+        const s2 = ST.sanitizeSettings(s0, { schedule: 'nope', accent: 'magenta' });
+        check('[8g] settings carry the schedule: it loads through sanitizeSettings, an update without a `schedule` key (an older page) or with a malformed one leaves it as saved, and the copy is a new object',
+          same(s0.schedule, base) && same(s1.schedule, base) && s1.accent === 'magenta' && s1.schedule !== s0.schedule && same(s2.schedule, base) && same(ST.DEFAULT_SETTINGS.schedule, fresh) && ST.sanitizeSettings(undefined, undefined).schedule !== ST.DEFAULT_SETTINGS.schedule);
+      }
+    }
+    // [8g-unit-end]
 
     // ── 9. config backup CLI: save + restore round-trip (backup.mjs vs the mock) ──
     // The shared mock still holds VDO_PAYLOAD from [2] (room 'testroom', 2 directory
