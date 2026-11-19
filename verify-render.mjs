@@ -3740,7 +3740,7 @@ async function main() {
         feed(x, SCH(false, { 5: { on: true, start: '20:00', end: '01:00' } }));
         await wait(p, () => !document.getElementById('dvoSchedOn').checked, null, 4000);
         const off = await form(p);
-        check('R23a: with the schedule off the box is unticked and usable, and the day rows are disabled (they still show the saved days)', off.on === false && off.onDisabled === false && off.days.every((d) => d.disabled) && off.days[5].on === true && off.days[5].end === '01:00', JSON.stringify(off));
+        check('R23a: with the schedule off the box is unticked, and the day rows stay usable and show the saved days (the days can be set up before the schedule is turned on)', off.on === false && off.onDisabled === false && off.days.every((d) => !d.disabled) && off.days[5].on === true && off.days[5].end === '01:00', JSON.stringify(off));
         // (f) turning it on sends the whole schedule as the one changed key, and the rows become usable at once
         await x.api.clear();
         await flip(p, 'dvoSchedOn');

@@ -3181,6 +3181,62 @@ async function main() {
                 check('[8g] Connect outside a window logs the bot in and joins (the operator acting)', !!j && joins(o0) >= 1 && sc(j).held === true, JSON.stringify({ j: !!j, s: t.last.schedule }));
                 t.close();
               }
+              // ── Connect outside a window while Discord is down: the login is retried and the join still happens (the hold survives the retry) ──
+              {
+                const t = await mkS('2026-11-20T19:00:00', { manual: true });
+                const o0 = mkSock();
+                md.gatewayFailNext = 1; md.gatewayStatus = 400;
+                t.cmd('connect');
+                const retried = await t.waitFor((x) => /retrying in/.test(err(x)), 5000);
+                const j = await t.waitFor((x) => x.connected === true && x.channelId === '910', 8000);
+                md.gatewayFailNext = 0;
+                check('[8g] Connect outside a window whose first login fails (Discord down) and is retried still joins once the bot is in', !!retried && !!j && joins(o0) >= 1, JSON.stringify({ retried: !!retried, j: !!j, s: t.last.schedule, e: err(t.last) }));
+                t.close();
+              }
+              // ── a gateway resume and a re-identify while the session is held after the window closed: the bot is not told to leave ──
+              {
+                const t = await mkS('2026-11-20T20:30:00');
+                await t.waitFor((x) => x.channelId === '910', 8000);
+                await ready(t);
+                clock(t, '2026-11-20T23:30:00');
+                await t.waitFor((x) => sc(x).open === false, 3000);
+                // Discord shows the bot in the call (the mock sends no voice state of its own for it): this is what a wrong "should be out" would act on
+                where[ME] = '910';
+                md.dispatchAll('VOICE_STATE_UPDATE', vstate(ME, '910', { member: memberOf(ME, 'mockbot', { bot: true }) }));
+                await nap(300);
+                const o0 = mkSock(), r0 = md.resumes, i0 = md.identifies;
+                md.dropAll(4000); // a close the library resumes after
+                await until(() => md.resumes > r0, 8000);
+                await nap(800);
+                const afterResume = { leaves: leaves(o0), ch: t.last.channelId, held: sc(t.last).held };
+                md.dropAll(1000); // a close the library re-identifies after
+                await until(() => md.identifies > i0, 8000);
+                await nap(1500);
+                check('[8g] a gateway resume and a re-identify after the window closed do not take a held bot out of the call (no leave asked of Discord, still in the channel, still held)',
+                  md.resumes > r0 && md.identifies > i0 && afterResume.leaves === 0 && afterResume.ch === '910' && afterResume.held === true && leaves(o0) === 0 && t.last.channelId === '910' && sc(t.last).held === true,
+                  JSON.stringify({ resumes: md.resumes - r0, identifies: md.identifies - i0, afterResume, leaves: leaves(o0), ch: t.last.channelId, s: t.last.schedule }));
+                where[ME] = null;
+                t.close();
+              }
+              // ── an edit of the schedule that puts now inside a window does not make a waiting bot join (a day ticked before its times are set) ──
+              {
+                const t = await mkS('2026-11-20T19:00:00');
+                await online(t); await nap(500);
+                const o0 = mkSock();
+                t.cmd('set-settings', JSON.stringify({ schedule: { days: friDays.map((d, i) => (i === 5 ? { ...d, start: '18:00' } : d)) } }));
+                await t.waitFor((x) => sc(x).open === true, 3000);
+                await nap(900);
+                const noJoin = joins(o0) === 0 && t.last.channelId === null && sc(t.last).held === false;
+                // …and the bridge's timer does not take it for a window opening afterwards
+                clock(t, '2026-11-20T19:01:00');
+                await nap(700);
+                check('[8g] a schedule edit that puts now inside a window does not make a waiting bot join, then or at the next look (USE, Connect or the next window opening does)', noJoin && joins(o0) === 0, JSON.stringify({ noJoin, joins: joins(o0), s: t.last.schedule }));
+                const m0 = t.got.length;
+                t.cmd('set-current', JSON.stringify({ serverId: GUILD, channelId: '910' }));
+                const used = await wa(t, m0, (x) => x.channelId === '910', 4000);
+                check('[8g] …and USE then joins', !!used, JSON.stringify(t.last.schedule));
+                t.close();
+              }
               // ── schedule edits: turning it off lets a waiting bot in; turning it on does not remove a bot that is in the call ──
               {
                 const t = await mkS('2026-11-20T19:00:00');

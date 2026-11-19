@@ -555,12 +555,15 @@ async function setCurrent(serverId, channelId) {
 async function setSettings(updates) {
   if (!isObject(updates)) return false;
   const before = JSON.stringify(state.settings.schedule);
+  const wasOn = scheduleOn();
   state.settings = sanitizeSettings(state.settings, updates);
-  // An edit of the schedule is applied at once, but it is not "a window opening": an earlier Leave or removal still holds. A bot that is in
-  // the call stays (it is held); one that was waiting for a window and may now join does.
+  // An edit of the schedule is not "a window opening": it never starts a join by itself, even when it puts now inside a window (the page
+  // sends every box as it is changed, so a day is ticked before its times are set), and an earlier Leave or removal still holds. A bot that
+  // is in the call stays (it is held). Only turning the schedule OFF lets a bot that was waiting for a window join, as it would have
+  // without a schedule.
   if (JSON.stringify(state.settings.schedule) !== before) {
     lastScheduleOpen = scheduleIsOpen();
-    if (voiceWanted() && voiceDown()) { cancelVoiceRejoin(); joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`)); }
+    if (wasOn && !scheduleOn() && voiceWanted() && voiceDown()) { cancelVoiceRejoin(); joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`)); }
     schedulePush();
   }
   await persist();
@@ -755,11 +758,13 @@ function startBot() {
     if (login.destroyWanted) destroyClient(client);
     // A login that was replaced or stopped meanwhile says nothing about the bot that is running now (GRN-130, GRN-20).
     if (bot !== client) return;
+    const held = sessionHeld;
     stopBot();
     // A rejected token is a real failure: say so and wait for the operator. Anything else (Discord or the network is down) is retried
     // with a capped backoff (GRN-52).
     const fatal = isAuthFailure(e);
-    const delay = !fatal && creds.enabled && creds.botToken && !stopping ? Math.min(TIMING.loginStartMs * 2 ** loginStep++, TIMING.loginCapMs) : 0;
+    if (!fatal) sessionHeld = held; // the retried login is the same session: a Connect or USE that asked for the join still gets it
+    const delay =!fatal && creds.enabled && creds.botToken && !stopping ? Math.min(TIMING.loginStartMs * 2 ** loginStep++, TIMING.loginCapMs) : 0;
     rpc.error = 'Bot login failed: ' + clean(e?.message || e, 200) + (fatal ? ' — fix the token, then press Connect.' : delay ? ` — retrying in ${Math.max(1, Math.round(delay / 1000))} s` : '');
     log(rpc.error);
     if (delay) {

@@ -353,7 +353,7 @@
       overlay re-styles live (URL params on the overlay override them; docs/THEMING.md).</div>
     <div class="row" style="margin-top:10px">
       <label><input type="checkbox" id="dvoSchedOn" /> Only join on a schedule</label>
-      <span class="hint">(this PC's clock: the bot joins by itself only inside the ticked times. USE and Connect join at any time, and nothing here makes it leave.)</span>
+      <span class="hint">(this PC's clock: the bot joins by itself only inside the ticked times. USE and Connect join at any time, and nothing here makes it leave or join at once.)</span>
     </div>
     <div id="dvoSchedDays" class="dvo-sched-days"></div>
     <div id="dvoSchedNote" class="warn" role="status" hidden></div>
@@ -2797,7 +2797,7 @@
   const schedWhen = (ms) => { const d = new Date(ms); const two = (n) => String(n).padStart(2, '0'); return `${SCHED_NAMES[d.getDay()]} ${two(d.getHours())}:${two(d.getMinutes())}`; };
   function schedEnable() {
     sched.on.disabled = !schedUsable;
-    const rows = schedUsable && sched.on.checked; // the day rows are only usable while the schedule is on
+    const rows = schedUsable; // (usable while the schedule is off too: the days can be set up before it is turned on)
     for (let i = 0; i < 7; i++) { sched.day[i].disabled = !rows; sched.start[i].disabled = !rows; sched.end[i].disabled = !rows; }
   }
   function schedPlus() {

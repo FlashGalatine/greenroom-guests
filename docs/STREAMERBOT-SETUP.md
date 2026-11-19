@@ -467,6 +467,9 @@ persists to `settings.schedule`.
 - A ticked time beginning is a fresh start: a Leave pressed the day before does
   not keep the bot out. A Leave pressed inside a ticked time holds until the next
   one begins, or USE or Connect.
+- Changing the boxes never makes the bot join at once, even when the new times
+  include now: it joins when the next ticked time begins, or when you press USE.
+  (Turning the schedule off lets a waiting bot join, as it would without one.)
 - The schedule does not start or stop the bridge, and needs no Streamer.bot
   action change.
 
