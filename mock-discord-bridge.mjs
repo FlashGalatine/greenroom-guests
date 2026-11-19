@@ -31,6 +31,7 @@ import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
 // The rules for settings, ids and favorites are the real bridge's own (sidecar/settings.mjs is dependency-free and starts nothing when imported;
 // sidecar/discord-bridge.mjs itself runs main() on import and is never imported here).
+import { scheduleOpen, scheduleNextStart } from './sidecar/schedule.mjs';
 import { DEFAULT_SETTINGS, sanitizeSettings, normalizeFavorite, digitsOnly, parseJson } from './sidecar/settings.mjs';
 
 const WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8084}/`; // the mock's WebSocket port
@@ -83,6 +84,8 @@ function payloadOut() {
     favorites: state.favorites,
     current: state.current,
     currentRefused: false, // the real bridge sets it when the saved channel fails its check at login
+    // the join schedule's status, by the real bridge's own rule (the mock joins nothing by itself, so it never holds a session)
+    schedule: { enabled: !!state.settings.schedule.enabled, open: scheduleOpen(state.settings.schedule, new Date()), held: false, nextStart: scheduleNextStart(state.settings.schedule, new Date()) },
     // the same liveness fields as the real bridge (docs/PROTOCOL.md): a push every hb ms while it runs
     hb: HEARTBEAT_MS,
     stopped: false,

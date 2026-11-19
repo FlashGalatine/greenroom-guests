@@ -110,6 +110,10 @@ or click **<> Code → Download ZIP** on the repo page and extract it.
    control page so the bot hangs up and the sidecar exits when you close SB
    instead of lingering in the call (an SB restart reconnects and stays;
    docs/STREAMERBOT-SETUP.md).
+5. *(optional)* Tick **"Only join on a schedule"** and the days and times you
+   stream with the roster: the bot then joins by itself only inside those times.
+   USE and Connect still join at any time, and the schedule never makes the bot
+   leave (docs/STREAMERBOT-SETUP.md).
 
 Serve over `http://`, never as an OBS "Local file" — the VDO viewer renders
 black in a `file://` parent and `file://` sources ignore URL params.

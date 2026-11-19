@@ -9,6 +9,33 @@ collects every change in between. Commit hashes and landing dates are noted for
 traceability. Each release is tagged `v<version>` on its Release commit; the
 tags `v0.1.0` and `v1.0.13` were added afterwards, on those two commits.
 
+## [1.0.114] — 2026-11-19
+
+Two fixes to the join schedule of 1.0.112, found in the review of its pull request. 1.0.112 was tagged but never merged or installed.
+
+### Fixed
+
+- **Back-to-back ticked times.** A ticked time that begins while another is still running (a 24 hour day before it, or two that overlap) now counts as a ticked time beginning: a Leave or a removal from the day before no longer keeps the bot out of it. Before, the bridge only noticed a change from "no ticked time" to "a ticked time". A ticked time that ends while an older one is still running is not a new beginning.
+- **A ticked time that begins while the bot is still logging in** no longer tries a join on a bot that is not logged in yet (the status line showed "Bot isn't in that server" until the login was done). The login joins when it is done. The same holds for turning the option off during a login.
+
+**Deploy:** copy the `sidecar/` and `control/` folders, restart the bridge and reload the dock. No Streamer.bot action changed. The sidecar version is 1.0.114 (the control page expects it).
+
+## [1.0.112] — 2026-11-18
+
+A new option for the Discord bridge: **only join on a schedule**. It is off by default, and with it off nothing changes.
+
+### Added
+
+- **Only join on a schedule** (control page → Discord Voice Bridge; `settings.schedule`). Tick the days you stream with the roster and give each a start and an end time, on the clock of the PC the bridge runs on. While the option is on, the bridge joins the saved voice channel by itself only inside a ticked time: at login, and when a ticked time begins while the bridge is running (it looks every 30 seconds). Outside it the bot logs in and waits, and the status line says when it will next join. An end at or before the start runs into the next day (Friday 20:00 to 01:00 ends Saturday at 01:00; the row shows "(+1 day)"), and the same start and end is 24 hours.
+- **USE and Connect join at any time**, for a test or a stream that was not planned.
+- **The schedule never makes the bot leave.** Once a join has begun, the bridge keeps that session: a stream that runs past the end keeps its roster and a dropped connection is rejoined, until Leave voice, Clear channel, Stop bridge or a removal by Discord. This is kept in memory only, so a bridge that is restarted outside a ticked time does not join until you press USE.
+- **Changing the boxes never makes the bot join at once**, even when the new times include now (a day is ticked before its times are set): it joins when the next ticked time begins, or on USE. The days can be set up while the option is off. Turning the option off lets a waiting bot join.
+- A ticked time beginning is a fresh start (a Leave from the day before does not keep the bot out); a Leave pressed inside a ticked time holds until the next one begins.
+- The feed carries the schedule's status (`schedule`: `enabled`, `open`, `held`, `nextStart`; additive, `docs/PROTOCOL.md`), and the mock bridge sends it too. A control page with a bridge older than this release keeps the schedule boxes disabled and says the bridge is older.
+- `sidecar/schedule.mjs` holds the rule (dependency-free, shared with the mock bridge and the tests).
+
+**Deploy:** copy the `sidecar/` and `control/` folders, restart the bridge and reload the dock. No Streamer.bot action changed, so nothing is re-pasted. The sidecar version is 1.0.112 (the control page expects it). **Not done:** the schedule was tested against the mock Discord with a test clock, not against a real Discord server or over a real day change; `docs/control-page.png` does not show the new rows. `verify` 605/605; `verify:render` 505/505.
+
 ## [1.0.106] — 2026-11-10
 
 Documents only: the results of a partial live run of 1.0.104, and two warnings that run turned up. Nothing a streamer runs changed, so the sidecar version stays 1.0.104.

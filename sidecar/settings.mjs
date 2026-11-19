@@ -1,6 +1,8 @@
 // The rules for the bridge's saved settings and ids, in one place. Dependency-free and with no side effects: importing this file starts
 // nothing (the bridge starts main() when it is imported), so the mock bridge (mock-discord-bridge.mjs) and the tests can use the very same rules.
 
+import { DEFAULT_SCHEDULE, sanitizeSchedule } from './schedule.mjs';
+
 // What the overlays and the control page read from `discordVoice.settings`. (There used to be a `height` here that nothing read.)
 export const DEFAULT_SETTINGS = {
   streamerUserId: '',  // the streamer's Discord user id (digits), shown first in the roster
@@ -13,6 +15,9 @@ export const DEFAULT_SETTINGS = {
   // Lifecycle (not a render setting): when true, the sidecar gracefully leaves the voice call and exits once Streamer.bot closes, so the
   // bot doesn't linger in the channel after you close SB. GREENROOM_EXIT_ON_SB_CLOSE / --exit-on-sb-close override it. Opt-in.
   exitOnSbClose: false,
+  // The join schedule (not a render setting; sidecar/schedule.mjs): off by default. While it is on, the bridge joins the voice channel by
+  // itself only inside the ticked windows; USE and Connect join at any time. (Frozen: sanitizeSettings always hands out a copy.)
+  schedule: DEFAULT_SCHEDULE,
 };
 export const ACCENTS = ['cyan', 'magenta', 'neon-green'];
 
@@ -60,7 +65,7 @@ export function normalizeFavorite({ name, serverId, channelId }, idRe = SNOWFLAK
 // `base` stays). Used when the config is loaded and when set-settings arrives, so a hand-edited file and a forged bus command are held to the
 // same rules.
 export function sanitizeSettings(base, updates) {
-  const out = { ...DEFAULT_SETTINGS };
+  const out = { ...DEFAULT_SETTINGS, schedule: sanitizeSchedule(DEFAULT_SCHEDULE) };
   const src = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
   const take = (u) => {
     if (!u || typeof u !== 'object' || Array.isArray(u)) return;
@@ -69,6 +74,7 @@ export function sanitizeSettings(base, updates) {
     if (u.streamerPx !== undefined) out.streamerPx = clampInt(u.streamerPx, 32, 160, out.streamerPx);
     if (typeof u.accent === 'string' && ACCENTS.includes(u.accent)) out.accent = u.accent;
     for (const k of ['scanlines', 'neonBlink', 'hideWhenAbsent', 'exitOnSbClose']) if (typeof u[k] === 'boolean') out[k] = u[k];
+    if (u.schedule !== undefined) out.schedule = sanitizeSchedule(out.schedule, u.schedule); // (anything malformed in it keeps the saved value)
   };
   take(src);
   take(updates);

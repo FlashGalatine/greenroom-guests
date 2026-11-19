@@ -11,6 +11,18 @@
     "scanlines": true,
     "neonBlink": true,
     "hideWhenAbsent": true,
-    "exitOnSbClose": false
+    "exitOnSbClose": false,
+    "schedule": {
+      "enabled": false,
+      "days": [
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" },
+        { "on": false, "start": "18:00", "end": "23:00" }
+      ]
+    }
   }
 }

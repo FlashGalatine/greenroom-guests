@@ -53,6 +53,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import WebSocket from 'ws';
+import { scheduleOpen, scheduleWindow, scheduleNextStart } from './schedule.mjs';
 import { DEFAULT_SETTINGS, sanitizeSettings, digitsOnly, cutName, parseJson, parseJsonLossless, normalizeFavorite, SNOWFLAKE_RE } from './settings.mjs';
 
 // Node first, then the heavy imports: an old Node says so instead of failing inside discord.js (GRN-22).
@@ -105,6 +106,7 @@ const TIMING = (() => {
     speakingStaleMs: 300000, // no speaking start for this long with someone unmuted in the call: rpc.speakingStale
     stuckGlowMs: 180000,     // a glow that has been on this long with no end: rpc.speakingStale
     writeDelayMs: 0,         // (test hook) a slow disk: every atomic write waits this long before its rename
+    scheduleTickMs: 30000,   // how often the join schedule is looked at (a window opening is noticed within this long)
     sbHelloMs: 2000,         // Streamer.bot greets a connection with a Hello; the bridge waits this long for it before it says there was none
   };
   if (TEST_HOOKS && process.env.GREENROOM_TIMING) {
@@ -131,7 +133,7 @@ const SB_EXIT_GRACE_MS = Math.max(1000, Number(process.env.GREENROOM_SB_EXIT_GRA
 let state = {
   favorites: [],      // [{ id, name, serverId, channelId }]
   current: null,      // { serverId, channelId } | null
-  settings: { ...DEFAULT_SETTINGS },
+  settings: sanitizeSettings(DEFAULT_SETTINGS),
 };
 
 let creds = {
@@ -155,6 +157,20 @@ let bot = null;              // discord.js Client
 let voiceConn = null;        // current @discordjs/voice VoiceConnection
 let wantVoice = true;        // operator intent: should the bot be in voice? (a manual Leave sets false so it won't
                              // rejoin; USE and Connect set it again. In memory only: a bridge restart wants voice.)
+// The join schedule (settings.schedule, sidecar/schedule.mjs). While it is on, the bridge STARTS a join by itself only inside a window. Once a
+// join has begun (by a window, by USE or by Connect) the session is held: it is kept and rejoined after a drop whatever the clock says, until
+// Leave, Clear channel, a removal by Discord or a stop of the bot ends it. The schedule never makes the bot leave. In memory only: a bridge
+// that restarts outside a window does not join until USE or Connect.
+let sessionHeld = false;
+let lastWindow = -1;     // the open window as the last tick saw it (its weekday, -1 for none): a change to today's window, or from none, is "a window opened"
+let scheduleTimer = null;
+// The clock the schedule reads. The test hooks can set it (GREENROOM_NOW at start, the `test-clock` command later); it keeps running from there.
+let clockOffset = (() => { const t = TEST_HOOKS && process.env.GREENROOM_NOW ? new Date(process.env.GREENROOM_NOW).getTime() : NaN; return Number.isFinite(t) ? t - Date.now() : 0; })();
+const nowMs = () => Date.now() + clockOffset;
+const scheduleOn = () => !!(state.settings.schedule && state.settings.schedule.enabled);
+const scheduleIsOpen = () => scheduleOpen(state.settings.schedule, new Date(nowMs()));
+const scheduleWindowNow = () => scheduleWindow(state.settings.schedule, new Date(nowMs()));
+const scheduleAllows = () => !scheduleOn() || sessionHeld || scheduleIsOpen();
 let useSeq = 0;              // the newest USE: a check that finishes for an older one is dropped (GRN-204)
 let joinGen = 0;             // the newest join, leave or stop: an older join that is still waiting does nothing more
 let currentRefused = false;  // the saved current channel failed its check (at login or at a rejoin) for a configuration reason: not joined (payload `currentRefused`)
@@ -353,6 +369,8 @@ async function init() {
     }
   }
 
+  startScheduleTimer();
+
   // Load the gitignored bot token and, if enabled, start the bot at startup.
   const t = await loadTokens();
   if (t.status === 'ok') {
@@ -523,6 +541,7 @@ async function setCurrent(serverId, channelId) {
   // commands), and if it fails rpc.configWarning says the change is not kept after a restart.
   const saved = persist().catch((e) => log(`config not saved: ${e && e.code}`));
   if (next) wantVoice = true; // picking a channel means "be in voice"
+  sessionHeld = !!next;       // USE joins whatever the schedule says (the operator acting); Clear channel ends the session
   voiceParked = false;        // USE is the operator acting: a bot that was parked after a kick may rejoin (GRN-49)
   cancelVoiceRejoin();
   // If the bot is live, move it to the newly-selected channel (or leave voice).
@@ -536,7 +555,18 @@ async function setCurrent(serverId, channelId) {
 
 async function setSettings(updates) {
   if (!isObject(updates)) return false;
+  const before = JSON.stringify(state.settings.schedule);
+  const wasOn = scheduleOn();
   state.settings = sanitizeSettings(state.settings, updates);
+  // An edit of the schedule is not "a window opening": it never starts a join by itself, even when it puts now inside a window (the page
+  // sends every box as it is changed, so a day is ticked before its times are set), and an earlier Leave or removal still holds. A bot that
+  // is in the call stays (it is held). Only turning the schedule OFF lets a bot that was waiting for a window join, as it would have
+  // without a schedule.
+  if (JSON.stringify(state.settings.schedule) !== before) {
+    lastWindow = scheduleWindowNow();
+    if (wasOn && !scheduleOn() && online() && voiceWanted() && voiceDown()) { cancelVoiceRejoin(); joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`)); }
+    schedulePush();
+  }
   await persist();
   return true;
 }
@@ -623,6 +653,7 @@ async function connectRpc() {
   rpc.error = note;
   const saved = persistTokens().catch((e) => log(`tokens not saved: ${e && e.code}`)); // (rpc.configWarning says so; the bot starts whatever the write result, GRN-68)
   stopBot();
+  sessionHeld = true; // Connect joins whatever the schedule says (the operator acting)
   startBot();
   await saved;
 }
@@ -632,6 +663,7 @@ async function connectRpc() {
 // and USE/Connect brings it back. With no connection to close, a bot that Discord still shows in the call is told to leave (GRN-150).
 function leaveVoice() {
   wantVoice = false;
+  sessionHeld = false;
   joinGen++; // a join that is still checking its target must not bring the bot back
   cancelVoiceRejoin();
   const hadConnection = !!voiceConn;
@@ -727,10 +759,12 @@ function startBot() {
     if (login.destroyWanted) destroyClient(client);
     // A login that was replaced or stopped meanwhile says nothing about the bot that is running now (GRN-130, GRN-20).
     if (bot !== client) return;
+    const held = sessionHeld;
     stopBot();
     // A rejected token is a real failure: say so and wait for the operator. Anything else (Discord or the network is down) is retried
     // with a capped backoff (GRN-52).
     const fatal = isAuthFailure(e);
+    if (!fatal) sessionHeld = held; // the retried login is the same session: a Connect or USE that asked for the join still gets it
     const delay = !fatal && creds.enabled && creds.botToken && !stopping ? Math.min(TIMING.loginStartMs * 2 ** loginStep++, TIMING.loginCapMs) : 0;
     rpc.error = 'Bot login failed: ' + clean(e?.message || e, 200) + (fatal ? ' — fix the token, then press Connect.' : delay ? ` — retrying in ${Math.max(1, Math.round(delay / 1000))} s` : '');
     log(rpc.error);
@@ -777,6 +811,7 @@ function destroyClient(b) {
 
 function stopBot() {
   joinGen++;
+  sessionHeld = false; // (Connect sets it again after this)
   readyGuildIds = null;
   currentRefused = false; // nothing is checked while the bot is out; the next login checks the saved pick again
   cancelVoiceRejoin();    // the exit path (S12) comes through here: no rejoin or login timer outlives the bot
@@ -803,8 +838,47 @@ async function onBotReady() {
   rpc.error = '';
   loginStep = 0; // a login that works resets the retry backoff
   log(`Bot logged in as ${bot?.user?.tag || '?'}`);
-  if (wantVoice) await joinCurrentChannel();
-  else { reconcileVoice(false); schedulePush(); }
+  if (wantVoice && scheduleAllows()) await joinCurrentChannel();
+  else {
+    if (wantVoice && state.current && state.current.channelId) logScheduleWait();
+    reconcileVoice(false); schedulePush();
+  }
+}
+
+// ── The join schedule ────────────────────────────────────────────────────────
+
+const localTime = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, '0'); return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()]} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+function logScheduleWait() {
+  const next = scheduleNextStart(state.settings.schedule, new Date(nowMs()));
+  log(`schedule: outside the window, not joining (next ${next === null ? 'none: no day is ticked' : localTime(next)}); USE or Connect joins now`);
+}
+
+// Looked at every TIMING.scheduleTickMs. A window that opens is a fresh start: an earlier Leave and an earlier removal by Discord are
+// forgotten, and the bot joins if it is logged in and has a channel (a bot that is still logging in joins when its login is done:
+// onBotReady). A window that starts while another is still open (a 24 hour day before it) is an opening too; one that ends while an older
+// one is still open is not. A window that closes changes nothing but the status in the feed.
+function scheduleTick() {
+  const now = new Date(nowMs());
+  const win = scheduleWindow(state.settings.schedule, now);
+  if (win === lastWindow) return;
+  const opened = win >= 0 && (lastWindow < 0 || win === now.getDay());
+  lastWindow = win;
+  if (opened && scheduleOn() && !stopping) {
+    wantVoice = true;
+    voiceParked = false;
+    if (online() && voiceWanted() && voiceDown()) {
+      log('schedule: window opened, joining');
+      cancelVoiceRejoin();
+      joinCurrentChannel().catch((e) => log(`voice join failed: ${e.message}`));
+    }
+  }
+  schedulePush();
+}
+function startScheduleTimer() {
+  lastWindow = scheduleWindowNow(); // a bridge that starts inside a window has not seen one open
+  if (scheduleTimer) clearInterval(scheduleTimer);
+  scheduleTimer = setInterval(scheduleTick, TIMING.scheduleTickMs);
+  scheduleTimer.unref();
 }
 
 // ── Voice channel join + roster ─────────────────────────────────────────────
@@ -828,7 +902,7 @@ function destroyVoice() {
 // stopping bridge are left alone. Rejoins come from a backoff timer, from the gateway coming back, and from a server becoming available.
 
 const voiceDown = () => !voiceConn || voiceConn.state.status === VoiceConnectionStatus.Disconnected || voiceConn.state.status === VoiceConnectionStatus.Destroyed;
-const voiceWanted = () => !!(bot && !stopping && wantVoice && state.current && state.current.channelId && !currentRefused && !voiceParked);
+const voiceWanted = () => !!(bot && !stopping && wantVoice && state.current && state.current.channelId && !currentRefused && !voiceParked && scheduleAllows());
 
 function cancelVoiceRejoin() {
   if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
@@ -853,6 +927,7 @@ function onVoiceLost(conn, park, detail, neverReady) {
   if (voiceConn !== conn) return;
   destroyVoice();
   voiceParked = park;
+  if (park) sessionHeld = false; // Discord removed the bot: the session is over (USE, Connect or the next window starts another)
   rpc.error = park
     ? `Removed from voice (${detail}) — press USE to rejoin.`
     : 'Voice connection lost, rejoining…' + (neverReady ? ' If it keeps failing: check that the bot has View Channel + Connect on that channel and that the channel has room, or that Discord is not having an outage.' : '');
@@ -902,7 +977,7 @@ function reconcileVoice(reidentified) {
   try {
     if (!bot || stopping) return;
     if (reidentified && currentChannelId) reseedCurrent();
-    const intended = !!(wantVoice && state.current && state.current.channelId);
+    const intended = !!(wantVoice && state.current && state.current.channelId && scheduleAllows()); // (a held session is intended whatever the clock says)
     const targetGuild = state.current && state.current.serverId;
     // A call the bridge put the bot in that it should not be in any more (Leave, a cleared channel, another server): a leave that was
     // refused during an outage is repeated here, for every server the bridge joined (not only the saved one).
@@ -946,6 +1021,7 @@ function onGuildDelete(g) {
   cancelVoiceRejoin();
   destroyVoice();
   voiceParked = true;
+  sessionHeld = false;
   rpc.error = 'Bot was removed from that server';
   log(rpc.error);
   schedulePush();
@@ -960,6 +1036,7 @@ async function joinCurrentChannel(checked) {
   const gen = ++joinGen;
   const target = state.current; // { serverId, channelId } | null
   if (!target || !target.channelId) { currentRefused = false; destroyVoice(); schedulePush(); return; }
+  sessionHeld = true; // a join has begun: it is retried and kept whatever the schedule says from here on
   try {
     const chk = checked && !checked.error && checked.channel.id === target.channelId && checked.guild.id === target.serverId ? checked : await checkTarget(target.serverId, target.channelId);
     if (gen !== joinGen) return;
@@ -1474,6 +1551,7 @@ function dispatch(command, value) {
         if (TEST_HOOKS && command === 'test-block-log') { if (logWorker) logWorker.postMessage({ block: true }); return; }
         if (TEST_HOOKS && command === 'test-speaking') { setSpeaking(value, true); schedulePush(); return; }
         if (TEST_HOOKS && command === 'test-voice') { testVoice(parsed); return; }
+        if (TEST_HOOKS && command === 'test-clock') { const t = new Date(String(parsed && parsed.now)).getTime(); if (Number.isFinite(t)) { clockOffset = t - Date.now(); if (parsed.tick !== false) scheduleTick(); } return; }
         if (TEST_HOOKS && command === 'test-reject') { Promise.reject(new Error('forced rejection')); return; }
         if (TEST_HOOKS && command === 'test-signal') { process.emit(String(value), String(value)); return; }
         log(`unknown command "${clean(command, 40)}" — ignored`); // mock-burst etc. are mock-only
@@ -1510,6 +1588,9 @@ function payloadOut() {
     // The saved current channel failed its check at login (a Stage, a channel the bot cannot join, …), so it is not joined; false once the
     // pick changes (additive).
     currentRefused,
+    // The join schedule as the bridge sees it now (additive; docs/PROTOCOL.md): on or off, whether a window is open, whether the session is
+    // held (a join has begun and is kept whatever the clock says), and when the next window starts (epoch ms; null when no day is ticked).
+    schedule: { enabled: scheduleOn(), open: scheduleIsOpen(), held: sessionHeld, nextStart: scheduleNextStart(state.settings.schedule, new Date(nowMs())) },
     // Liveness and identity (additive; docs/PROTOCOL.md): a push every `hb` ms while the bridge runs (0 once it is stopping),
     // `stopped` on the last frame it sends, and the build that sent it.
     hb: stopping ? 0 : HEARTBEAT_MS,
